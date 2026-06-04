@@ -1,0 +1,13 @@
+{
+  "name": "fb-ads-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Facebook 广告数据看板独立模块",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

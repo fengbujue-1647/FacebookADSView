@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FB 广告数据看板</title>
+  <link rel="stylesheet" href="/styles.css?v=20260604-2">
+  <script src="https://cdn.jsdelivr.net/npm/echarts@6.0.0/dist/echarts.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="模块导航">
+      <div class="brand">
+        <div class="brand-mark">FB</div>
+        <div>
+          <strong>广告看板</strong>
+          <span>Meta Insights</span>
+        </div>
+      </div>
+
+      <nav class="nav-list">
+        <a class="nav-item active" href="/">
+          <i data-lucide="area-chart"></i>
+          <span>数据分布</span>
+        </a>
+        <a class="nav-item" href="/meta-relationship-map.html">
+          <i data-lucide="network"></i>
+          <span>接入关系</span>
+        </a>
+      </nav>
+
+      <div class="side-note">
+        <span>数据源</span>
+        <strong>Demo Insights</strong>
+        <small>待接入 Marketing API</small>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Facebook Ads Monitor</p>
+          <h1>FB 广告数据看板</h1>
+        </div>
+        <div class="top-actions">
+          <button class="icon-button" id="resetWindowButton" type="button" title="重置时间窗口" aria-label="重置时间窗口">
+            <i data-lucide="rotate-ccw"></i>
+          </button>
+          <button class="primary-button" id="exportButton" type="button">
+            <i data-lucide="download"></i>
+            <span>导出 CSV</span>
+          </button>
+        </div>
+      </header>
+
+      <section class="control-panel" aria-label="筛选条件">
+        <div class="control-group wide">
+          <label for="fromDate">开始日期</label>
+          <input id="fromDate" type="date">
+        </div>
+        <div class="control-group wide">
+          <label for="toDate">结束日期</label>
+          <input id="toDate" type="date">
+        </div>
+        <div class="control-group">
+          <label>计算方式</label>
+          <div class="segmented" role="group" aria-label="计算方式">
+            <button type="button" class="segment" data-granularity="hour">时</button>
+            <button type="button" class="segment active" data-granularity="day">日</button>
+            <button type="button" class="segment" data-granularity="week">周</button>
+            <button type="button" class="segment" data-granularity="month">月</button>
+          </div>
+        </div>
+        <div class="control-group">
+          <label for="campaignFilter">广告系列</label>
+          <select id="campaignFilter"></select>
+        </div>
+        <div class="control-group">
+          <label for="deliveryFilter">投放</label>
+          <select id="deliveryFilter"></select>
+        </div>
+        <div class="control-group">
+          <label>字段</label>
+          <div class="field-picker" id="fieldPicker">
+            <button class="select-button" id="fieldToggle" type="button" aria-haspopup="true" aria-expanded="false">
+              <span id="fieldSummary">已选 0 项</span>
+              <i data-lucide="chevron-down"></i>
+            </button>
+            <div class="field-menu" id="fieldMenu" hidden>
+              <div class="field-search">
+                <i data-lucide="search"></i>
+                <input id="fieldSearch" type="search" placeholder="搜索字段">
+              </div>
+              <div class="field-toolbar">
+                <button type="button" data-field-action="core">常用</button>
+                <button type="button" data-field-action="allMetrics">全选指标</button>
+                <button type="button" data-field-action="clear">清空</button>
+              </div>
+              <div class="field-list" id="fieldList"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="quick-window" aria-label="快速时间窗口">
+        <button type="button" data-window-days="7">近 7 天</button>
+        <button type="button" data-window-days="14">近 14 天</button>
+        <button type="button" data-window-days="30" class="active">近 30 天</button>
+        <button type="button" data-window-days="90">近 90 天</button>
+        <button type="button" data-window-days="180">近 180 天</button>
+      </section>
+
+      <section class="kpi-grid" id="kpiGrid" aria-label="关键指标"></section>
+
+      <section class="panel chart-panel">
+        <div class="panel-head">
+          <div>
+            <h2>时间分布</h2>
+            <span id="chartCaption">按日聚合</span>
+          </div>
+          <label class="switch">
+            <input id="normalizeToggle" type="checkbox" checked>
+            <span>统一比例</span>
+          </label>
+        </div>
+        <div class="chart-wrap">
+          <div id="mainChart" class="chart"></div>
+          <div class="empty-state" id="chartEmpty" hidden>请选择至少一个数值指标</div>
+        </div>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel-head">
+          <div>
+            <h2>广告系列汇总</h2>
+            <span id="tableCaption">当前时间窗口</span>
+          </div>
+          <div class="table-count" id="tableCount">0 行</div>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead id="tableHead"></thead>
+            <tbody id="tableBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js?v=20260604-2"></script>
+</body>
+</html>
