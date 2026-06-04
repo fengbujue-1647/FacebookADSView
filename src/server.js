@@ -110,6 +110,11 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (url.pathname === "/vendor/echarts.min.js") {
+    sendFile(res, path.join(repoRoot, "node_modules", "echarts", "dist", "echarts.min.js"));
+    return;
+  }
+
   if (url.pathname === "/meta-relationship-map.html") {
     sendFile(res, path.join(repoRoot, "meta-relationship-map.html"));
     return;

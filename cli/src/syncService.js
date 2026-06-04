@@ -177,7 +177,7 @@ export class SyncService {
     return activeAds;
   }
 
-  async pullActiveAds({ accounts: accountIds = [], datePreset = 'yesterday', since, until, limit = 5, resultAction = '' } = {}) {
+  async pullActiveAds({ accounts: accountIds = [], datePreset = 'yesterday', since, until, limit = 5, resultAction = '', hourly = false } = {}) {
     const accountsResult = await this.syncAccounts({ accountIds });
     const activeAds = await this.findActiveAds({
       accountIds: accountsResult.ids,
@@ -192,7 +192,8 @@ export class SyncService {
         fields: INSIGHT_FIELDS,
         datePreset,
         since,
-        until
+        until,
+        breakdowns: hourly ? 'hourly_stats_aggregated_by_advertiser_time_zone' : ''
       });
       return rows.map((row) => ({ ...row, id: ad.id }));
     }));
@@ -207,8 +208,9 @@ export class SyncService {
     }));
 
     await writeJson(rawFile('active_ads'), { activeAds, rawRows });
-    const jsonPath = await writeJson(outputJsonFile('facebook_ads_active_ads'), normalizedRows);
-    const csvPath = await writeCsv(outputFile('facebook_ads_active_ads'), normalizedRows, insightColumns);
+    const outputName = hourly ? 'facebook_ads_active_ads_hourly' : 'facebook_ads_active_ads';
+    const jsonPath = await writeJson(outputJsonFile(outputName), normalizedRows);
+    const csvPath = await writeCsv(outputFile(outputName), normalizedRows, insightColumns);
 
     return {
       accounts: accountsResult.accounts,

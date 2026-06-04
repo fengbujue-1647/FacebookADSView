@@ -98,9 +98,18 @@ function selectResult({ actions, costs, spend, forcedAction }) {
   return { result_type: '', result_count: 0, cost_per_result: 0 };
 }
 
+function hourStart(dateStart, hourlyRange) {
+  if (!dateStart || !hourlyRange) return '';
+  const match = String(hourlyRange).match(/^(\d{2}):/);
+  if (!match) return '';
+  return `${dateStart}T${match[1]}:00:00`;
+}
+
 export const insightColumns = [
   { key: 'date_start', header: '日期开始' },
   { key: 'date_stop', header: '日期结束' },
+  { key: 'hourly_range', header: '小时区间' },
+  { key: 'hour_start', header: '小时开始' },
   { key: 'account_id', header: '广告账户ID' },
   { key: 'account_name', header: '广告账户' },
   { key: 'campaign_id', header: '广告系列ID' },
@@ -146,6 +155,8 @@ export function normalizeInsight(row, { accountsById = new Map(), resourcesById 
   return {
     date_start: row.date_start || '',
     date_stop: row.date_stop || '',
+    hourly_range: row.hourly_stats_aggregated_by_advertiser_time_zone || '',
+    hour_start: hourStart(row.date_start, row.hourly_stats_aggregated_by_advertiser_time_zone),
     account_id: row.account_id || resource.account_id || '',
     account_name: row.account_name || account.name || '',
     campaign_id: row.campaign_id || resource.campaign_id || (row.campaign_name ? resource.id : ''),

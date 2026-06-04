@@ -11,9 +11,13 @@
     "cli:token": "npm --prefix cli run token",
     "cli:accounts": "npm --prefix cli run accounts --",
     "cli:pull": "npm --prefix cli run pull --",
-    "cli:active-ads": "npm --prefix cli run active-ads --"
+    "cli:active-ads": "npm --prefix cli run active-ads --",
+    "cli:active-ads-hourly": "npm --prefix cli run active-ads-hourly --"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "echarts": "^6.0.0"
   }
 }

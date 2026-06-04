@@ -109,10 +109,11 @@ export class YinoClient {
     });
   }
 
-  async getInsightsPage({ id, fields, datePreset, since, until, actionBreakdowns = 'action_type', actionAttributionWindows, after, before }) {
+  async getInsightsPage({ id, fields, datePreset, since, until, breakdowns, actionBreakdowns = 'action_type', actionAttributionWindows, after, before }) {
     const query = {
       id,
       fields: fields.join(','),
+      breakdowns,
       action_breakdowns: actionBreakdowns,
       action_attribution_windows: actionAttributionWindows,
       after,

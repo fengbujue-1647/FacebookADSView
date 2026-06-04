@@ -228,7 +228,8 @@ function buildRawRows() {
 
 function mapCollectedRow(row) {
   const dateValue = row.date_start || row.date_stop;
-  const timestamp = dateValue ? new Date(`${dateValue}T00:00:00`).getTime() : Date.now();
+  const timestampSource = row.hour_start || (dateValue ? `${dateValue}T00:00:00` : '');
+  const timestamp = timestampSource ? new Date(timestampSource).getTime() : Date.now();
   const spend = Number(row.spend || 0);
   const roas = Number(row.roas || 0);
   const purchaseValue = Number(row.purchase_value || 0) || spend * roas;
@@ -286,6 +287,9 @@ async function loadCollectedRows() {
     const rows = payload.rows.map(mapCollectedRow).filter((row) => Number.isFinite(row.timestamp));
     if (rows.length === 0) return null;
 
+    if (payload.rows.some((row) => row.hour_start)) {
+      state.granularity = "hour";
+    }
     applyCampaignsFromRows(rows);
     dataSourceName.textContent = "Collected Insights";
     dataSourceMeta.textContent = payload.updated_at ? `更新于 ${payload.updated_at.slice(0, 19).replace("T", " ")}` : payload.source;
@@ -783,6 +787,12 @@ function setWindowDays(days) {
   });
 }
 
+function syncGranularityButtons() {
+  document.querySelectorAll("[data-granularity]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.granularity === state.granularity);
+  });
+}
+
 function bindEvents() {
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -813,9 +823,7 @@ function bindEvents() {
   document.querySelectorAll("[data-granularity]").forEach((button) => {
     button.addEventListener("click", () => {
       state.granularity = button.dataset.granularity;
-      document.querySelectorAll("[data-granularity]").forEach((item) => {
-        item.classList.toggle("active", item === button);
-      });
+      syncGranularityButtons();
       renderDashboard();
     });
   });
@@ -898,6 +906,7 @@ async function init() {
   rawRows = await loadCollectedRows() || buildRawRows();
   renderFilters();
   setWindowDays(30);
+  syncGranularityButtons();
   els.normalizeToggle.checked = state.normalize;
   bindEvents();
   renderFieldList();

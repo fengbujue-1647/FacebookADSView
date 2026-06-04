@@ -98,6 +98,12 @@ npm run cli:active-ads -- --date-preset yesterday --limit 5
 npm run cli:active-ads -- --accounts 8462513793771963,2152108598945788 --date-preset yesterday --limit 5
 ```
 
+拉取少量 ACTIVE 广告的小时级数据，适合验证时间分布图：
+
+```bash
+npm run cli:active-ads-hourly -- --accounts 8462513793771963 --date-preset yesterday --limit 30
+```
+
 输出文件：
 
 ```text
