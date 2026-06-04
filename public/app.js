@@ -39,6 +39,7 @@ const coreFields = ["campaign", "delivery", "spend", "roas", "ctr_all", "clicks_
 const sumKeys = ["budget", "spend", "impressions", "clicks_all", "reach", "add_to_cart", "initiate_checkout", "purchases", "revenue", "results", "actions"];
 
 const state = {
+  activeView: "chart",
   granularity: "day",
   selectedFields: new Set(defaultFields),
   campaign: "all",
@@ -48,6 +49,21 @@ const state = {
   to: ""
 };
 
+const viewCopy = {
+  chart: {
+    title: "FB 广告图表看板",
+    subtitle: "按时间查看广告指标走势和窗口变化。"
+  },
+  data: {
+    title: "FB 广告数据看板",
+    subtitle: "查看当前时间窗口内的核心指标和指标总览。"
+  },
+  list: {
+    title: "FB 广告列表看板",
+    subtitle: "按广告系列查看投放状态、花费和转化表现。"
+  }
+};
+
 let chart;
 let rawRows = [];
 let lastChartData = [];
@@ -55,16 +71,21 @@ let lastCampaignRows = [];
 let currentSeriesRaw = {};
 
 const els = {
+  pageTitle: document.getElementById("pageTitle"),
+  pageSubtitle: document.getElementById("pageSubtitle"),
+  moreOptionsToggle: document.getElementById("moreOptionsToggle"),
+  optionsPanel: document.getElementById("optionsPanel"),
+  activeChips: document.getElementById("activeChips"),
   fromDate: document.getElementById("fromDate"),
   toDate: document.getElementById("toDate"),
   campaignFilter: document.getElementById("campaignFilter"),
   deliveryFilter: document.getElementById("deliveryFilter"),
-  fieldToggle: document.getElementById("fieldToggle"),
-  fieldMenu: document.getElementById("fieldMenu"),
   fieldSummary: document.getElementById("fieldSummary"),
   fieldSearch: document.getElementById("fieldSearch"),
   fieldList: document.getElementById("fieldList"),
   chartCaption: document.getElementById("chartCaption"),
+  metricCaption: document.getElementById("metricCaption"),
+  metricGrid: document.getElementById("metricGrid"),
   tableCaption: document.getElementById("tableCaption"),
   tableCount: document.getElementById("tableCount"),
   normalizeToggle: document.getElementById("normalizeToggle"),
@@ -369,6 +390,31 @@ function renderFilters() {
   ].join("");
 }
 
+function selectedCampaignLabel() {
+  if (state.campaign === "all") {
+    return "全部广告系列";
+  }
+  return CAMPAIGNS.find((campaign) => campaign.id === state.campaign)?.name || "未知广告系列";
+}
+
+function selectedDeliveryLabel() {
+  return state.delivery === "all" ? "全部投放状态" : state.delivery;
+}
+
+function renderActiveChips() {
+  const metricCount = selectedMetricIds().length;
+  const chips = [
+    `时间：${state.from} 至 ${state.to}`,
+    getGranularityLabel(),
+    selectedCampaignLabel(),
+    selectedDeliveryLabel(),
+    `字段：${state.selectedFields.size} 项`,
+    `图表指标：${metricCount} 项`
+  ];
+
+  els.activeChips.innerHTML = chips.map((chip) => `<span class="filter-chip"><strong>${chip}</strong></span>`).join("");
+}
+
 function renderFieldList() {
   const query = els.fieldSearch.value.trim().toLowerCase();
   const rows = FIELDS.filter((field) => {
@@ -390,7 +436,7 @@ function renderFieldList() {
     `;
   });
 
-  els.fieldList.innerHTML = rows.join("");
+  els.fieldList.innerHTML = rows.join("") || `<div class="empty-inline">没有匹配字段</div>`;
   els.fieldSummary.textContent = `已选 ${state.selectedFields.size} 项`;
 }
 
@@ -413,6 +459,42 @@ function renderKpis(total) {
       </article>
     `;
   }).join("");
+}
+
+function renderMetricGrid(total) {
+  const cards = selectedMetricIds().map((id) => {
+    const field = fieldById.get(id);
+    return `
+      <article class="metric-card">
+        <span>${field.label}</span>
+        <strong>${formatValue(id, total[id])}</strong>
+        <small>${field.api}</small>
+      </article>
+    `;
+  });
+
+  els.metricCaption.textContent = `${state.from} 至 ${state.to}`;
+  els.metricGrid.innerHTML = cards.join("") || `<div class="empty-inline">请选择至少一个数值指标</div>`;
+}
+
+function renderView() {
+  const copy = viewCopy[state.activeView];
+  els.pageTitle.textContent = copy.title;
+  els.pageSubtitle.textContent = copy.subtitle;
+
+  document.querySelectorAll("[data-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.view === state.activeView);
+  });
+
+  document.querySelectorAll("[data-view-panel]").forEach((panel) => {
+    const active = panel.dataset.viewPanel === state.activeView;
+    panel.hidden = !active;
+    panel.classList.toggle("active", active);
+  });
+
+  if (state.activeView === "chart" && chart) {
+    requestAnimationFrame(() => chart.resize());
+  }
 }
 
 function renderChart(points) {
@@ -601,9 +683,11 @@ function renderDashboard() {
   lastCampaignRows = campaignRows;
 
   renderKpis(total);
+  renderMetricGrid(total);
   renderChart(timePoints);
   renderTable(campaignRows);
   renderFieldList();
+  renderActiveChips();
 }
 
 function setWindowDays(days) {
@@ -619,23 +703,23 @@ function setWindowDays(days) {
   });
 }
 
-function exportCsv() {
-  const columns = selectedTableFields().filter((id) => fieldById.has(id));
-  const header = columns.map((id) => fieldById.get(id).label);
-  const rows = lastCampaignRows.map((row) => columns.map((id) => formatValue(id, row[id]).replaceAll(",", "")));
-  const csv = [header, ...rows]
-    .map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(","))
-    .join("\n");
-  const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `fb-ads-summary-${state.from}_${state.to}.csv`;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
 function bindEvents() {
+  document.querySelectorAll("[data-view]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.activeView = button.dataset.view;
+      renderView();
+    });
+  });
+
+  els.moreOptionsToggle.addEventListener("click", () => {
+    const nextOpen = els.optionsPanel.hidden;
+    els.optionsPanel.hidden = !nextOpen;
+    els.moreOptionsToggle.setAttribute("aria-expanded", String(nextOpen));
+    if (nextOpen) {
+      els.fieldSearch.focus();
+    }
+  });
+
   els.fromDate.addEventListener("change", () => {
     state.from = els.fromDate.value;
     renderDashboard();
@@ -669,15 +753,6 @@ function bindEvents() {
   els.normalizeToggle.addEventListener("change", () => {
     state.normalize = els.normalizeToggle.checked;
     renderChart(lastChartData);
-  });
-
-  els.fieldToggle.addEventListener("click", () => {
-    const nextOpen = els.fieldMenu.hidden;
-    els.fieldMenu.hidden = !nextOpen;
-    els.fieldToggle.setAttribute("aria-expanded", String(nextOpen));
-    if (nextOpen) {
-      els.fieldSearch.focus();
-    }
   });
 
   els.fieldSearch.addEventListener("input", renderFieldList);
@@ -726,16 +801,6 @@ function bindEvents() {
     renderDashboard();
   });
 
-  document.getElementById("exportButton").addEventListener("click", exportCsv);
-
-  document.addEventListener("click", (event) => {
-    const picker = document.getElementById("fieldPicker");
-    if (!picker.contains(event.target)) {
-      els.fieldMenu.hidden = true;
-      els.fieldToggle.setAttribute("aria-expanded", "false");
-    }
-  });
-
   window.addEventListener("resize", () => {
     if (chart) {
       chart.resize();
@@ -757,6 +822,7 @@ function init() {
   bindEvents();
   renderFieldList();
   renderDashboard();
+  renderView();
   initIcons();
 }
 
