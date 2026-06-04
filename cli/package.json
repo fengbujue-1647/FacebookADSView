@@ -1,0 +1,22 @@
+{
+  "name": "facebook-ads-view",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "YinoCloud Facebook ads data sync CLI.",
+  "bin": {
+    "fb-ads": "./src/cli.js"
+  },
+  "scripts": {
+    "pull": "node src/cli.js pull",
+    "accounts": "node src/cli.js accounts",
+    "token": "node src/cli.js token",
+    "doctor": "node src/cli.js doctor"
+  },
+  "dependencies": {
+    "commander": "^14.0.2",
+    "dotenv": "^17.2.3",
+    "p-limit": "^7.2.0"
+  },
+  "devDependencies": {}
+}

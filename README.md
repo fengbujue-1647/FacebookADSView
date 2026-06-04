@@ -37,6 +37,62 @@ http://127.0.0.1:3100/
 http://127.0.0.1:3100/api/health
 ```
 
+最新采集数据接口：
+
+```text
+http://127.0.0.1:3100/api/fb-ads/latest
+```
+
+页面启动时会优先读取 `cli/data/output/` 下最新一次 CLI 采集结果；如果没有真实采集数据，会自动回退到 Demo 数据。
+
+## 接入真实 API 数据
+
+采集模块放在 `cli/` 目录，密钥只保存在 CLI 的 `.env` 中，不会进入前端代码。
+
+安装 CLI 依赖：
+
+```bash
+npm run cli:install
+```
+
+复制配置文件：
+
+```text
+cli/.env.example -> cli/.env
+```
+
+在 `cli/.env` 填入 YinoCloud 审核通过后的应用 ID 和 API Key：
+
+```text
+YINO_CLIENT_ID=...
+YINO_CLIENT_SECRET=...
+```
+
+检查配置：
+
+```bash
+npm run cli:doctor
+```
+
+拉取昨天广告层级数据：
+
+```bash
+npm run cli:pull -- --date-preset yesterday --level ads
+```
+
+联调时建议先限制数量：
+
+```bash
+npm run cli:pull -- --date-preset yesterday --level ads --limit 10
+```
+
+输出文件：
+
+```text
+cli/data/output/facebook_ads_daily_*.json
+cli/data/output/facebook_ads_daily_*.csv
+```
+
 如果要改端口：
 
 ```bash
