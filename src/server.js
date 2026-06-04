@@ -54,7 +54,7 @@ function resolvePublicPath(pathname) {
 function latestAdsDataFile() {
   if (!fs.existsSync(cliOutputDir)) return null;
   const files = fs.readdirSync(cliOutputDir)
-    .filter((file) => /^facebook_ads_daily_.*\.json$/.test(file))
+    .filter((file) => /^facebook_ads_.*\.json$/.test(file))
     .map((file) => {
       const filePath = path.join(cliOutputDir, file);
       return {

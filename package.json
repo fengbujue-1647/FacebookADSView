@@ -10,7 +10,8 @@
     "cli:doctor": "npm --prefix cli run doctor",
     "cli:token": "npm --prefix cli run token",
     "cli:accounts": "npm --prefix cli run accounts --",
-    "cli:pull": "npm --prefix cli run pull --"
+    "cli:pull": "npm --prefix cli run pull --",
+    "cli:active-ads": "npm --prefix cli run active-ads --"
   },
   "engines": {
     "node": ">=20"

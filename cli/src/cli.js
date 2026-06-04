@@ -100,6 +100,38 @@ program
     info(`CSV 输出：${result.insights.csvPath}`);
   });
 
+program
+  .command('active-ads')
+  .description('只扫描并拉取前 N 个 ACTIVE 广告的 Insights')
+  .option('--accounts <ids>', '只扫描指定账户，多个用英文逗号分隔')
+  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d', 'yesterday')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--limit <number>', 'ACTIVE 广告数量', '5')
+  .option('--result-action <actionType>', '指定“成效”使用的 action_type，如 omni_purchase')
+  .action(async (options) => {
+    assertCredentials();
+    if ((options.since && !options.until) || (!options.since && options.until)) {
+      throw new Error('--since 和 --until 必须同时提供');
+    }
+
+    const service = new SyncService();
+    const result = await service.pullActiveAds({
+      accounts: parseAccounts(options.accounts),
+      datePreset: options.datePreset,
+      since: options.since,
+      until: options.until,
+      limit: parseInteger(options.limit) || 5,
+      resultAction: options.resultAction || ''
+    });
+
+    info(`账户：${result.accounts.length}`);
+    info(`ACTIVE 广告：${result.activeAds.length}`);
+    info(`Insights 原始行：${result.insights.rawRows.length}`);
+    info(`JSON 输出：${result.insights.jsonPath}`);
+    info(`CSV 输出：${result.insights.csvPath}`);
+  });
+
 program.parseAsync(process.argv).catch((err) => {
   console.error(`[error] ${err.message}`);
   process.exitCode = 1;

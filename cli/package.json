@@ -9,6 +9,7 @@
   },
   "scripts": {
     "pull": "node src/cli.js pull",
+    "active-ads": "node src/cli.js active-ads",
     "accounts": "node src/cli.js accounts",
     "token": "node src/cli.js token",
     "doctor": "node src/cli.js doctor"

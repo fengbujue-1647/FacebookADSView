@@ -86,11 +86,23 @@ npm run cli:pull -- --date-preset yesterday --level ads
 npm run cli:pull -- --date-preset yesterday --level ads --limit 10
 ```
 
+只拉前 5 个 ACTIVE 广告：
+
+```bash
+npm run cli:active-ads -- --date-preset yesterday --limit 5
+```
+
+指定账户范围，只扫描这些账户直到找到前 5 个 ACTIVE 广告：
+
+```bash
+npm run cli:active-ads -- --accounts 8462513793771963,2152108598945788 --date-preset yesterday --limit 5
+```
+
 输出文件：
 
 ```text
-cli/data/output/facebook_ads_daily_*.json
-cli/data/output/facebook_ads_daily_*.csv
+cli/data/output/facebook_ads_*.json
+cli/data/output/facebook_ads_*.csv
 ```
 
 如果要改端口：

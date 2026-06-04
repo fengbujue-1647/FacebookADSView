@@ -140,6 +140,88 @@ export class SyncService {
     };
   }
 
+  async findActiveAds({ accountIds, limit = 5 }) {
+    const activeAds = [];
+
+    for (const accountId of accountIds) {
+      if (activeAds.length >= limit) break;
+
+      info(`扫描账户 ${accountId} 的 ACTIVE ads`);
+      let after = '';
+      const seen = new Set();
+
+      do {
+        const payload = await this.client.getResourcePage({
+          accountId,
+          getType: 'ads',
+          after
+        });
+
+        const pageRows = payload.data?.data || [];
+        for (const row of pageRows) {
+          if (String(row.effective_status || '').toUpperCase() === 'ACTIVE') {
+            activeAds.push(row);
+            if (activeAds.length >= limit) break;
+          }
+        }
+
+        if (activeAds.length >= limit) break;
+
+        const next = payload.data?.paging?.cursors?.after || '';
+        if (!next || seen.has(next)) break;
+        seen.add(next);
+        after = next;
+      } while (true);
+    }
+
+    return activeAds;
+  }
+
+  async pullActiveAds({ accounts: accountIds = [], datePreset = 'yesterday', since, until, limit = 5, resultAction = '' } = {}) {
+    const accountsResult = await this.syncAccounts({ accountIds });
+    const activeAds = await this.findActiveAds({
+      accountIds: accountsResult.ids,
+      limit
+    });
+
+    info(`ACTIVE 广告数量：${activeAds.length}`);
+
+    const tasks = activeAds.map((ad) => this.limit(async () => {
+      const rows = await this.client.getAllInsights({
+        id: ad.id,
+        fields: INSIGHT_FIELDS,
+        datePreset,
+        since,
+        until
+      });
+      return rows.map((row) => ({ ...row, id: ad.id }));
+    }));
+
+    const rawRows = (await Promise.all(tasks)).flat();
+    const accountMap = mapById(accountsResult.accounts, 'account_id');
+    const resourceMap = new Map(activeAds.map((row) => [String(row.id), row]));
+    const normalizedRows = rawRows.map((row) => normalizeInsight(row, {
+      accountsById: accountMap,
+      resourcesById: resourceMap,
+      resultAction
+    }));
+
+    await writeJson(rawFile('active_ads'), { activeAds, rawRows });
+    const jsonPath = await writeJson(outputJsonFile('facebook_ads_active_ads'), normalizedRows);
+    const csvPath = await writeCsv(outputFile('facebook_ads_active_ads'), normalizedRows, insightColumns);
+
+    return {
+      accounts: accountsResult.accounts,
+      activeAds,
+      insights: {
+        csvPath,
+        jsonPath,
+        rawRows,
+        normalizedRows
+      }
+    };
+  }
+
   async pull(options = {}) {
     const accountIds = options.accounts?.length ? options.accounts : [];
     const accountsResult = await this.syncAccounts({ accountIds });
