@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FB 广告数据看板</title>
-  <link rel="stylesheet" href="/styles.css?v=20260604-4">
+  <link rel="stylesheet" href="/styles.css?v=20260604-5">
   <script src="/vendor/echarts.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
@@ -68,12 +68,20 @@
         <div class="options-popover" id="optionsPanel" hidden>
           <div class="option-grid">
             <div class="control-group">
-              <label for="fromDate">开始日期</label>
-              <input id="fromDate" type="date">
+              <label for="fromDate">开始时间</label>
+              <input id="fromDate" type="datetime-local" step="3600">
             </div>
             <div class="control-group">
-              <label for="toDate">结束日期</label>
-              <input id="toDate" type="date">
+              <label for="toDate">结束时间</label>
+              <input id="toDate" type="datetime-local" step="3600">
+            </div>
+            <div class="control-group">
+              <label for="fromMonth">开始月份</label>
+              <input id="fromMonth" type="month">
+            </div>
+            <div class="control-group">
+              <label for="toMonth">结束月份</label>
+              <input id="toMonth" type="month">
             </div>
             <div class="control-group">
               <label>计算方式</label>
@@ -92,12 +100,15 @@
               <label for="deliveryFilter">投放</label>
               <select id="deliveryFilter"></select>
             </div>
-            <div class="control-group">
+            <div class="control-group quick-window-group">
               <label>时间窗口</label>
               <div class="quick-window" aria-label="快速时间窗口">
+                <button type="button" data-window-preset="yesterday">昨天</button>
+                <button type="button" data-window-preset="today">今天</button>
+                <button type="button" data-window-preset="last3">近 3 天</button>
                 <button type="button" data-window-days="7">近 7 天</button>
                 <button type="button" data-window-days="14">近 14 天</button>
-                <button type="button" data-window-days="30" class="active">近 30 天</button>
+                <button type="button" data-window-days="30">近 30 天</button>
                 <button type="button" data-window-days="90">近 90 天</button>
                 <button type="button" data-window-days="180">近 180 天</button>
               </div>
@@ -107,7 +118,7 @@
           <div class="field-section">
             <div class="field-section-head">
               <div>
-                <strong>字段勾选</strong>
+                <strong>图表指标</strong>
                 <span id="fieldSummary">已选 0 项</span>
               </div>
               <div class="field-toolbar">
@@ -118,7 +129,7 @@
             </div>
             <div class="field-search">
               <i data-lucide="search"></i>
-              <input id="fieldSearch" type="search" placeholder="搜索字段，例如 ROAS / 花费 / 点击">
+              <input id="fieldSearch" type="search" placeholder="搜索指标，例如 ROAS / 花费 / 点击">
             </div>
             <div class="field-list" id="fieldList"></div>
           </div>
@@ -177,6 +188,6 @@
     </main>
   </div>
 
-  <script src="/app.js?v=20260604-4"></script>
+  <script src="/app.js?v=20260604-5"></script>
 </body>
 </html>

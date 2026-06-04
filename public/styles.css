@@ -320,6 +320,10 @@ h2 {
   align-items: end;
 }
 
+.quick-window-group {
+  grid-column: span 2;
+}
+
 .control-group {
   min-width: 0;
 }
@@ -355,6 +359,7 @@ h2 {
 }
 
 .segment {
+  position: relative;
   min-width: 0;
   border: 0;
   background: transparent;
@@ -365,6 +370,33 @@ h2 {
 .segment.active {
   background: var(--sidebar);
   color: #ffffff;
+}
+
+.segment.is-disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.segment.is-disabled:hover::after,
+.segment.is-disabled:focus-visible::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 8px);
+  z-index: 30;
+  width: max-content;
+  max-width: 260px;
+  padding: 7px 9px;
+  border-radius: var(--radius);
+  background: #17202a;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: left;
+  transform: translateX(-50%);
+  white-space: normal;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.22);
 }
 
 .field-picker {
@@ -776,6 +808,10 @@ td {
   .field-list {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .quick-window-group {
+    grid-column: span 3;
+  }
 }
 
 @media (max-width: 860px) {
@@ -816,6 +852,10 @@ td {
   .field-list {
     grid-template-columns: 1fr 1fr;
   }
+
+  .quick-window-group {
+    grid-column: span 2;
+  }
 }
 
 @media (max-width: 620px) {
@@ -825,6 +865,10 @@ td {
   .metric-grid,
   .field-list {
     grid-template-columns: 1fr;
+  }
+
+  .quick-window-group {
+    grid-column: span 1;
   }
 
   .panel-head {

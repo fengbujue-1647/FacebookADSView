@@ -1,5 +1,15 @@
 const MS_HOUR = 60 * 60 * 1000;
 const MS_DAY = 24 * MS_HOUR;
+const MAX_BUCKETS = {
+  hour: 96,
+  day: 190,
+  week: 260,
+  month: 120
+};
+const GRANULARITY_MIN_DAYS = {
+  week: 7,
+  month: 28
+};
 
 const CAMPAIGNS = [
   { id: "camp_us_brf_v2", name: "US - BRF V2 - Prospecting", delivery: "投放中", objective: "Purchase", dailyBudget: 320, scale: 1.18, ctr: 2.4, aov: 64 },
@@ -34,8 +44,9 @@ const FIELDS = [
 
 const fieldById = new Map(FIELDS.map((field) => [field.id, field]));
 const metricFields = FIELDS.filter((field) => field.type === "metric");
-const defaultFields = ["campaign", "delivery", "spend", "roas", "ctr_all", "clicks_all", "add_to_cart", "initiate_checkout", "purchases"];
-const coreFields = ["campaign", "delivery", "spend", "roas", "ctr_all", "clicks_all", "results", "cost_per_result"];
+const metricFieldIds = metricFields.map((field) => field.id);
+const defaultFields = ["spend", "roas", "ctr_all", "clicks_all", "add_to_cart", "initiate_checkout", "purchases"];
+const coreFields = ["spend", "roas", "ctr_all", "clicks_all", "results", "cost_per_result"];
 const sumKeys = ["budget", "spend", "impressions", "clicks_all", "reach", "add_to_cart", "initiate_checkout", "purchases", "revenue", "results", "actions"];
 
 const state = {
@@ -46,7 +57,8 @@ const state = {
   delivery: "all",
   normalize: true,
   from: "",
-  to: ""
+  to: "",
+  activeWindowPreset: ""
 };
 
 const viewCopy = {
@@ -78,6 +90,8 @@ const els = {
   activeChips: document.getElementById("activeChips"),
   fromDate: document.getElementById("fromDate"),
   toDate: document.getElementById("toDate"),
+  fromMonth: document.getElementById("fromMonth"),
+  toMonth: document.getElementById("toMonth"),
   campaignFilter: document.getElementById("campaignFilter"),
   deliveryFilter: document.getElementById("deliveryFilter"),
   fieldSummary: document.getElementById("fieldSummary"),
@@ -103,17 +117,54 @@ function pad(value) {
   return String(value).padStart(2, "0");
 }
 
-function toDateInputValue(date) {
+function toDateValue(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-function parseDateInput(value, endOfDay = false) {
-  const [year, month, day] = value.split("-").map(Number);
-  const date = new Date(year, month - 1, day);
-  if (endOfDay) {
+function toDateTimeInputValue(date) {
+  return `${toDateValue(date)}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function toMonthInputValue(date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
+}
+
+function startOfDay(date) {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function endOfDay(date) {
+  const next = new Date(date);
+  next.setHours(23, 0, 0, 0);
+  return next;
+}
+
+function parseDateInput(value, endOfRange = false) {
+  if (!value) {
+    return new Date(Number.NaN);
+  }
+
+  const [datePart, timePart] = value.split("T");
+  const [year, month, day] = datePart.split("-").map(Number);
+  const [hour = 0, minute = 0] = (timePart || "").split(":").map(Number);
+  const date = new Date(year, month - 1, day, hour, minute || 0, 0, 0);
+
+  if (endOfRange && !timePart) {
     date.setHours(23, 59, 59, 999);
   }
   return date;
+}
+
+function monthStart(value) {
+  const [year, month] = value.split("-").map(Number);
+  return new Date(year, month - 1, 1, 0, 0, 0, 0);
+}
+
+function monthEnd(value) {
+  const [year, month] = value.split("-").map(Number);
+  return new Date(year, month, 0, 23, 0, 0, 0);
 }
 
 function addDays(date, amount) {
@@ -162,6 +213,100 @@ function bucketDate(date, granularity) {
   }
   next.setHours(0, 0, 0, 0);
   return next;
+}
+
+function nextBucketDate(date, granularity) {
+  const next = new Date(date);
+  if (granularity === "hour") {
+    next.setHours(next.getHours() + 1, 0, 0, 0);
+    return next;
+  }
+  if (granularity === "day") {
+    next.setDate(next.getDate() + 1);
+    next.setHours(0, 0, 0, 0);
+    return next;
+  }
+  if (granularity === "week") {
+    next.setDate(next.getDate() + 7);
+    next.setHours(0, 0, 0, 0);
+    return next;
+  }
+  next.setMonth(next.getMonth() + 1, 1);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function selectedRangeBounds() {
+  const from = parseDateInput(state.from);
+  const to = parseDateInput(state.to);
+  if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
+    return null;
+  }
+  return from <= to ? { from, to } : { from: to, to: from };
+}
+
+function rangeDays(bounds = selectedRangeBounds()) {
+  if (!bounds) {
+    return 0;
+  }
+  return Math.max(1, Math.ceil((bounds.to.getTime() - bounds.from.getTime() + 1) / MS_DAY));
+}
+
+function bucketCountFor(granularity, bounds = selectedRangeBounds()) {
+  if (!bounds) {
+    return 0;
+  }
+  const start = bucketDate(bounds.from, granularity);
+  const end = bucketDate(bounds.to, granularity);
+
+  if (granularity === "hour") {
+    return Math.floor((end.getTime() - start.getTime()) / MS_HOUR) + 1;
+  }
+  if (granularity === "day") {
+    return Math.floor((end.getTime() - start.getTime()) / MS_DAY) + 1;
+  }
+  if (granularity === "week") {
+    return Math.floor((end.getTime() - start.getTime()) / (MS_DAY * 7)) + 1;
+  }
+  return (end.getFullYear() - start.getFullYear()) * 12 + end.getMonth() - start.getMonth() + 1;
+}
+
+function granularityAvailability(granularity) {
+  const bounds = selectedRangeBounds();
+  if (!bounds) {
+    return { allowed: true, reason: "" };
+  }
+
+  const days = rangeDays(bounds);
+  const minDays = GRANULARITY_MIN_DAYS[granularity] || 0;
+  if (days < minDays) {
+    return {
+      allowed: false,
+      reason: `当前窗口不足 ${minDays} 天，不适合按${getGranularityShortLabel(granularity)}聚合`
+    };
+  }
+
+  const buckets = bucketCountFor(granularity, bounds);
+  const maxBuckets = MAX_BUCKETS[granularity];
+  if (buckets > maxBuckets) {
+    return {
+      allowed: false,
+      reason: `当前窗口会生成 ${buckets} 个点，超过 ${maxBuckets} 个点上限`
+    };
+  }
+
+  return { allowed: true, reason: "" };
+}
+
+function coerceGranularity() {
+  if (granularityAvailability(state.granularity).allowed) {
+    return;
+  }
+
+  const fallback = ["hour", "day", "week", "month"].find((granularity) => granularityAvailability(granularity).allowed);
+  if (fallback) {
+    state.granularity = fallback;
+  }
 }
 
 function seededNoise(value) {
@@ -340,10 +485,12 @@ function addToAccumulator(acc, row) {
 }
 
 function getFilteredRows() {
-  const from = parseDateInput(state.from);
-  const to = parseDateInput(state.to, true);
+  const bounds = selectedRangeBounds();
+  if (!bounds) {
+    return [];
+  }
   return rawRows.filter((row) => {
-    if (row.timestamp < from.getTime() || row.timestamp > to.getTime()) {
+    if (row.timestamp < bounds.from.getTime() || row.timestamp > bounds.to.getTime()) {
       return false;
     }
     if (state.campaign !== "all" && row.campaignId !== state.campaign) {
@@ -357,7 +504,25 @@ function getFilteredRows() {
 }
 
 function aggregateByTime(rows) {
+  const bounds = selectedRangeBounds();
+  if (!bounds || rows.length === 0) {
+    return [];
+  }
+
   const buckets = new Map();
+  const firstDataTime = Math.min(...rows.map((row) => row.timestamp));
+  const start = bucketDate(new Date(Math.max(bounds.from.getTime(), firstDataTime)), state.granularity);
+  const end = bucketDate(bounds.to, state.granularity);
+
+  for (let cursor = start, guard = 0; cursor.getTime() <= end.getTime() && guard < 1200; cursor = nextBucketDate(cursor, state.granularity), guard += 1) {
+    const key = cursor.getTime();
+    buckets.set(key, {
+      key,
+      label: labelForBucket(cursor, state.granularity),
+      sortDate: new Date(cursor),
+      ...createAccumulator()
+    });
+  }
 
   rows.forEach((row) => {
     const date = bucketDate(new Date(row.timestamp), state.granularity);
@@ -453,6 +618,15 @@ function getGranularityLabel() {
   }[state.granularity];
 }
 
+function getGranularityShortLabel(granularity) {
+  return {
+    hour: "小时",
+    day: "日",
+    week: "周",
+    month: "月"
+  }[granularity];
+}
+
 function renderFilters() {
   els.campaignFilter.innerHTML = [
     `<option value="all">全部广告系列</option>`,
@@ -477,14 +651,21 @@ function selectedDeliveryLabel() {
   return state.delivery === "all" ? "全部投放状态" : state.delivery;
 }
 
+function formatDateTimeLabel(value) {
+  return value ? value.replace("T", " ") : "-";
+}
+
+function formatRangeText() {
+  return `${formatDateTimeLabel(state.from)} 至 ${formatDateTimeLabel(state.to)}`;
+}
+
 function renderActiveChips() {
   const metricCount = selectedMetricIds().length;
   const chips = [
-    `时间：${state.from} 至 ${state.to}`,
+    `时间：${formatRangeText()}`,
     getGranularityLabel(),
     selectedCampaignLabel(),
     selectedDeliveryLabel(),
-    `字段：${state.selectedFields.size} 项`,
     `图表指标：${metricCount} 项`
   ];
 
@@ -493,13 +674,11 @@ function renderActiveChips() {
 
 function renderFieldList() {
   const query = els.fieldSearch.value.trim().toLowerCase();
-  const rows = FIELDS.filter((field) => {
+  const rows = metricFields.filter((field) => {
     const haystack = `${field.label} ${field.api}`.toLowerCase();
     return haystack.includes(query);
   }).map((field) => {
     const checked = state.selectedFields.has(field.id) ? "checked" : "";
-    const tagClass = field.type === "dimension" ? "dimension" : "";
-    const tag = field.type === "dimension" ? "维度" : "指标";
     return `
       <label class="field-row">
         <input type="checkbox" value="${field.id}" ${checked}>
@@ -507,13 +686,13 @@ function renderFieldList() {
           <strong>${field.label}</strong>
           <small>${field.api}</small>
         </span>
-        <span class="field-tag ${tagClass}">${tag}</span>
+        <span class="field-tag">指标</span>
       </label>
     `;
   });
 
-  els.fieldList.innerHTML = rows.join("") || `<div class="empty-inline">没有匹配字段</div>`;
-  els.fieldSummary.textContent = `已选 ${state.selectedFields.size} 项`;
+  els.fieldList.innerHTML = rows.join("") || `<div class="empty-inline">没有匹配指标</div>`;
+  els.fieldSummary.textContent = `已选 ${state.selectedFields.size} 个指标`;
 }
 
 function renderKpis(total) {
@@ -549,7 +728,7 @@ function renderMetricGrid(total) {
     `;
   });
 
-  els.metricCaption.textContent = `${state.from} 至 ${state.to}`;
+  els.metricCaption.textContent = formatRangeText();
   els.metricGrid.innerHTML = cards.join("") || `<div class="empty-inline">请选择至少一个数值指标</div>`;
 }
 
@@ -575,10 +754,11 @@ function renderView() {
 
 function renderChart(points) {
   const metrics = selectedMetricIds();
-  els.chartCaption.textContent = `${getGranularityLabel()} · ${state.from} 至 ${state.to}`;
-  els.chartEmpty.hidden = metrics.length > 0;
+  els.chartCaption.textContent = `${getGranularityLabel()} · ${formatRangeText()}`;
+  els.chartEmpty.textContent = metrics.length === 0 ? "请选择至少一个数值指标" : "当前时间窗口没有可展示数据";
+  els.chartEmpty.hidden = metrics.length > 0 && points.length > 0;
 
-  if (!window.echarts || metrics.length === 0) {
+  if (!window.echarts || metrics.length === 0 || points.length === 0) {
     if (chart) {
       chart.clear();
     }
@@ -740,7 +920,7 @@ function renderTable(rows) {
   `).join("");
 
   els.tableCount.textContent = `${rows.length} 行`;
-  els.tableCaption.textContent = `${state.from} 至 ${state.to}`;
+  els.tableCaption.textContent = formatRangeText();
 }
 
 function calculateTotals(rows) {
@@ -750,6 +930,8 @@ function calculateTotals(rows) {
 }
 
 function renderDashboard() {
+  coerceGranularity();
+  syncGranularityButtons();
   const rows = getFilteredRows();
   const timePoints = aggregateByTime(rows);
   const campaignRows = aggregateByCampaign(rows);
@@ -774,22 +956,121 @@ function latestDataDate() {
   return new Date(maxTimestamp);
 }
 
-function setWindowDays(days) {
-  const to = latestDataDate();
-  const from = addDays(to, -(days - 1));
-  state.from = toDateInputValue(from);
-  state.to = toDateInputValue(to);
+function sameDate(a, b) {
+  return a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate();
+}
+
+function currentHour() {
+  const now = new Date();
+  now.setMinutes(0, 0, 0);
+  return now;
+}
+
+function updateTimeControls() {
   els.fromDate.value = state.from;
   els.toDate.value = state.to;
+  const bounds = selectedRangeBounds();
+  if (bounds) {
+    els.fromMonth.value = toMonthInputValue(bounds.from);
+    els.toMonth.value = toMonthInputValue(bounds.to);
+  }
+}
 
-  document.querySelectorAll("[data-window-days]").forEach((button) => {
-    button.classList.toggle("active", Number(button.dataset.windowDays) === days);
+function syncQuickWindowButtons() {
+  document.querySelectorAll("[data-window-days], [data-window-preset]").forEach((button) => {
+    const key = button.dataset.windowPreset || `last${button.dataset.windowDays}`;
+    button.classList.toggle("active", key === state.activeWindowPreset);
   });
+}
+
+function setWindowRange(from, to, preset = "", preferredGranularity = "") {
+  if (from > to) {
+    [from, to] = [to, from];
+  }
+  state.from = toDateTimeInputValue(from);
+  state.to = toDateTimeInputValue(to);
+  state.activeWindowPreset = preset;
+  updateTimeControls();
+  syncQuickWindowButtons();
+  coerceGranularity();
+  if (preferredGranularity && granularityAvailability(preferredGranularity).allowed) {
+    state.granularity = preferredGranularity;
+  }
+  syncGranularityButtons();
+}
+
+function setWindowDays(days) {
+  const to = currentHour();
+  const from = startOfDay(addDays(to, -(days - 1)));
+  setWindowRange(from, to, `last${days}`, days <= 3 ? "hour" : "day");
+}
+
+function setWindowPreset(preset) {
+  const now = currentHour();
+  if (preset === "today") {
+    setWindowRange(startOfDay(now), now, "today", "hour");
+    return;
+  }
+
+  if (preset === "yesterday") {
+    const yesterday = addDays(now, -1);
+    setWindowRange(startOfDay(yesterday), endOfDay(yesterday), "yesterday", "hour");
+    return;
+  }
+
+  if (preset === "last3") {
+    const from = startOfDay(addDays(now, -2));
+    setWindowRange(from, now, "last3", "hour");
+  }
+}
+
+function applyMonthWindow() {
+  if (!els.fromMonth.value || !els.toMonth.value) {
+    return;
+  }
+
+  let from = monthStart(els.fromMonth.value);
+  let to = monthEnd(els.toMonth.value);
+  if (from > to) {
+    [from, to] = [monthStart(els.toMonth.value), monthEnd(els.fromMonth.value)];
+  }
+  setWindowRange(from, to, "", "month");
+}
+
+function normalizeDateInputs() {
+  const from = parseDateInput(els.fromDate.value);
+  const to = parseDateInput(els.toDate.value);
+  if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
+    return;
+  }
+  setWindowRange(from, to);
+}
+
+function setDefaultWindow() {
+  const latest = latestDataDate();
+  const now = currentHour();
+  if (sameDate(latest, now)) {
+    setWindowPreset("today");
+    return;
+  }
+  const yesterday = addDays(now, -1);
+  if (sameDate(latest, yesterday)) {
+    setWindowPreset("yesterday");
+    return;
+  }
+  setWindowRange(startOfDay(latest), endOfDay(latest));
 }
 
 function syncGranularityButtons() {
   document.querySelectorAll("[data-granularity]").forEach((button) => {
+    const availability = granularityAvailability(button.dataset.granularity);
     button.classList.toggle("active", button.dataset.granularity === state.granularity);
+    button.classList.toggle("is-disabled", !availability.allowed);
+    button.setAttribute("aria-disabled", String(!availability.allowed));
+    button.title = availability.reason;
+    button.dataset.tooltip = availability.reason;
   });
 }
 
@@ -811,18 +1092,32 @@ function bindEvents() {
   });
 
   els.fromDate.addEventListener("change", () => {
-    state.from = els.fromDate.value;
+    normalizeDateInputs();
     renderDashboard();
   });
 
   els.toDate.addEventListener("change", () => {
-    state.to = els.toDate.value;
+    normalizeDateInputs();
+    renderDashboard();
+  });
+
+  els.fromMonth.addEventListener("change", () => {
+    applyMonthWindow();
+    renderDashboard();
+  });
+
+  els.toMonth.addEventListener("change", () => {
+    applyMonthWindow();
     renderDashboard();
   });
 
   document.querySelectorAll("[data-granularity]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.granularity = button.dataset.granularity;
+      const nextGranularity = button.dataset.granularity;
+      if (!granularityAvailability(nextGranularity).allowed) {
+        return;
+      }
+      state.granularity = nextGranularity;
       syncGranularityButtons();
       renderDashboard();
     });
@@ -865,10 +1160,10 @@ function bindEvents() {
         state.selectedFields = new Set(coreFields);
       }
       if (action === "allMetrics") {
-        state.selectedFields = new Set(["campaign", "delivery", ...metricFields.map((field) => field.id)]);
+        state.selectedFields = new Set(metricFieldIds);
       }
       if (action === "clear") {
-        state.selectedFields = new Set(["campaign", "delivery"]);
+        state.selectedFields = new Set();
       }
       renderDashboard();
     });
@@ -881,8 +1176,15 @@ function bindEvents() {
     });
   });
 
+  document.querySelectorAll("[data-window-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setWindowPreset(button.dataset.windowPreset);
+      renderDashboard();
+    });
+  });
+
   document.getElementById("resetWindowButton").addEventListener("click", () => {
-    setWindowDays(30);
+    setDefaultWindow();
     if (chart) {
       chart.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
     }
@@ -905,8 +1207,7 @@ function initIcons() {
 async function init() {
   rawRows = await loadCollectedRows() || buildRawRows();
   renderFilters();
-  setWindowDays(30);
-  syncGranularityButtons();
+  setDefaultWindow();
   els.normalizeToggle.checked = state.normalize;
   bindEvents();
   renderFieldList();
