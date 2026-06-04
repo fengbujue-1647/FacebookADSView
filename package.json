@@ -5,7 +5,12 @@
   "description": "Facebook 广告数据看板独立模块",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node src/server.js"
+    "dev": "node src/server.js",
+    "cli:install": "npm --prefix cli install",
+    "cli:doctor": "npm --prefix cli run doctor",
+    "cli:token": "npm --prefix cli run token",
+    "cli:accounts": "npm --prefix cli run accounts --",
+    "cli:pull": "npm --prefix cli run pull --"
   },
   "engines": {
     "node": ">=20"

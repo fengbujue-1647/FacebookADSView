@@ -75,6 +75,9 @@ const els = {
   mainChart: document.getElementById("mainChart")
 };
 
+const dataSourceName = document.getElementById("dataSourceName");
+const dataSourceMeta = document.getElementById("dataSourceMeta");
+
 function pad(value) {
   return String(value).padStart(2, "0");
 }
@@ -200,6 +203,75 @@ function buildRawRows() {
   }
 
   return rows;
+}
+
+function mapCollectedRow(row) {
+  const dateValue = row.date_start || row.date_stop;
+  const timestamp = dateValue ? new Date(`${dateValue}T00:00:00`).getTime() : Date.now();
+  const spend = Number(row.spend || 0);
+  const roas = Number(row.roas || 0);
+  const purchaseValue = Number(row.purchase_value || 0) || spend * roas;
+  const campaignId = row.campaign_id || row.adset_id || row.ad_id || row.campaign_name || "unknown";
+
+  return {
+    timestamp,
+    campaign: row.campaign_name || row.adset_name || row.ad_name || campaignId,
+    campaignId,
+    delivery: row.effective_status || "未知",
+    objective: row.result_type || "",
+    budget: 0,
+    spend,
+    impressions: Number(row.impressions || 0),
+    clicks_all: Number(row.clicks || 0),
+    reach: Number(row.reach || 0),
+    add_to_cart: Number(row.add_to_cart_count || 0),
+    initiate_checkout: Number(row.initiate_checkout_count || 0),
+    purchases: Number(row.purchase_count || 0),
+    revenue: purchaseValue,
+    results: Number(row.result_count || row.purchase_count || 0),
+    actions: Number(row.result_count || 0) + Number(row.add_to_cart_count || 0) + Number(row.initiate_checkout_count || 0) + Number(row.purchase_count || 0)
+  };
+}
+
+function applyCampaignsFromRows(rows) {
+  const campaigns = new Map();
+  rows.forEach((row) => {
+    if (!campaigns.has(row.campaignId)) {
+      campaigns.set(row.campaignId, {
+        id: row.campaignId,
+        name: row.campaign,
+        delivery: row.delivery,
+        objective: row.objective,
+        dailyBudget: 0,
+        scale: 1,
+        ctr: 0,
+        aov: 0
+      });
+    }
+  });
+
+  if (campaigns.size > 0) {
+    CAMPAIGNS.splice(0, CAMPAIGNS.length, ...campaigns.values());
+  }
+}
+
+async function loadCollectedRows() {
+  try {
+    const response = await fetch("/api/fb-ads/latest", { cache: "no-store" });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    if (!payload.ok || !Array.isArray(payload.rows) || payload.rows.length === 0) return null;
+
+    const rows = payload.rows.map(mapCollectedRow).filter((row) => Number.isFinite(row.timestamp));
+    if (rows.length === 0) return null;
+
+    applyCampaignsFromRows(rows);
+    dataSourceName.textContent = "Collected Insights";
+    dataSourceMeta.textContent = payload.updated_at ? `更新于 ${payload.updated_at.slice(0, 19).replace("T", " ")}` : payload.source;
+    return rows;
+  } catch {
+    return null;
+  }
 }
 
 function deriveMetrics(row) {
@@ -749,8 +821,8 @@ function initIcons() {
   }
 }
 
-function init() {
-  rawRows = buildRawRows();
+async function init() {
+  rawRows = await loadCollectedRows() || buildRawRows();
   renderFilters();
   setWindowDays(30);
   els.normalizeToggle.checked = state.normalize;

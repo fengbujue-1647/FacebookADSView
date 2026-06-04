@@ -6,6 +6,7 @@ const port = Number(process.env.PORT || 3100);
 const host = process.env.HOST || "127.0.0.1";
 const publicDir = path.resolve(__dirname, "..", "public");
 const repoRoot = path.resolve(__dirname, "..");
+const cliOutputDir = path.join(repoRoot, "cli", "data", "output");
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -50,6 +51,48 @@ function resolvePublicPath(pathname) {
   return insidePublic ? resolved : null;
 }
 
+function latestAdsDataFile() {
+  if (!fs.existsSync(cliOutputDir)) return null;
+  const files = fs.readdirSync(cliOutputDir)
+    .filter((file) => /^facebook_ads_daily_.*\.json$/.test(file))
+    .map((file) => {
+      const filePath = path.join(cliOutputDir, file);
+      return {
+        file,
+        filePath,
+        mtimeMs: fs.statSync(filePath).mtimeMs
+      };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  return files[0] || null;
+}
+
+function sendLatestAdsData(res) {
+  const latest = latestAdsDataFile();
+  if (!latest) {
+    writeJson(res, 404, { ok: false, error: "no_collected_data" });
+    return;
+  }
+
+  try {
+    const text = fs.readFileSync(latest.filePath, "utf8").replace(/^\uFEFF/, "");
+    const rows = JSON.parse(text);
+    writeJson(res, 200, {
+      ok: true,
+      source: latest.file,
+      updated_at: new Date(latest.mtimeMs).toISOString(),
+      rows
+    });
+  } catch (readError) {
+    writeJson(res, 500, {
+      ok: false,
+      error: "read_failed",
+      message: readError.message
+    });
+  }
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
@@ -59,6 +102,11 @@ const server = http.createServer((req, res) => {
       module: "fb-ads-dashboard",
       time: new Date().toISOString()
     });
+    return;
+  }
+
+  if (url.pathname === "/api/fb-ads/latest") {
+    sendLatestAdsData(res);
     return;
   }
 
