@@ -20,6 +20,7 @@ export const config = {
   concurrency: intEnv('YINO_CONCURRENCY', 3),
   requestTimeoutMs: intEnv('YINO_REQUEST_TIMEOUT_MS', 30_000),
   tokenCacheFile: path.join(rootDir, '.cache', 'yino-token.json'),
+  databaseFile: path.join(rootDir, 'data', 'fb-ads.sqlite'),
   rawDir: path.join(rootDir, 'data', 'raw'),
   outputDir: path.join(rootDir, 'data', 'output')
 };

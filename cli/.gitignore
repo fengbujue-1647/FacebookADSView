@@ -3,4 +3,6 @@ node_modules/
 .cache/
 data/raw/
 data/output/
+config/monitored-accounts.json
+config/sampling-plans.json
 *.log

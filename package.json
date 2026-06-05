@@ -4,20 +4,29 @@
   "private": true,
   "description": "Facebook 广告数据看板独立模块",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node src/server.js",
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node --disable-warning=ExperimentalWarning src/server.js",
     "cli:install": "npm --prefix cli install",
     "cli:doctor": "npm --prefix cli run doctor",
     "cli:token": "npm --prefix cli run token",
     "cli:accounts": "npm --prefix cli run accounts --",
     "cli:pull": "npm --prefix cli run pull --",
     "cli:active-ads": "npm --prefix cli run active-ads --",
-    "cli:active-ads-hourly": "npm --prefix cli run active-ads-hourly --"
+    "cli:active-ads-hourly": "npm --prefix cli run active-ads-hourly --",
+    "cli:active-campaigns": "npm --prefix cli run active-campaigns --",
+    "cli:targeted-monitor": "npm --prefix cli run targeted-monitor --",
+    "cli:sampling-config": "npm --prefix cli run sampling-config --",
+    "cli:sampling-evaluate": "npm --prefix cli run sampling-evaluate --",
+    "cli:sampling-run": "npm --prefix cli run sampling-run --",
+    "cli:sampling-loop": "npm --prefix cli run sampling-loop --",
+    "cli:db-init": "npm --prefix cli run db-init",
+    "cli:db-import-output": "npm --prefix cli run db-import-output --"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "dependencies": {
-    "echarts": "^6.0.0"
+    "echarts": "^6.0.0",
+    "tom-select": "^2.6.1"
   }
 }

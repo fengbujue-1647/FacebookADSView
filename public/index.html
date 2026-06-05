@@ -4,8 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FB 广告数据看板</title>
-  <link rel="stylesheet" href="/styles.css?v=20260604-5">
+  <link rel="stylesheet" href="/vendor/tom-select.min.css">
+  <link rel="stylesheet" href="/styles.css?v=20260605-7">
   <script src="/vendor/echarts.min.js"></script>
+  <script src="/vendor/tom-select.complete.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>
@@ -32,6 +34,10 @@
           <i data-lucide="list-filter"></i>
           <span>列表看板</span>
         </button>
+        <button class="nav-item" type="button" data-view="settings">
+          <i data-lucide="settings"></i>
+          <span>设置</span>
+        </button>
       </nav>
 
       <div class="side-note">
@@ -55,7 +61,7 @@
         </div>
       </header>
 
-      <section class="view-toolbar" aria-label="看板选项">
+      <section class="view-toolbar" id="viewToolbar" aria-label="看板选项">
         <div class="toolbar-row">
           <button class="filter-button" id="moreOptionsToggle" type="button" aria-expanded="false" aria-controls="optionsPanel">
             <i data-lucide="sliders-horizontal"></i>
@@ -94,11 +100,20 @@
             </div>
             <div class="control-group">
               <label for="campaignFilter">广告系列</label>
-              <select id="campaignFilter"></select>
+              <select id="campaignFilter" multiple></select>
             </div>
             <div class="control-group">
               <label for="deliveryFilter">投放</label>
               <select id="deliveryFilter"></select>
+            </div>
+            <div class="control-group metric-picker-group">
+              <label for="fieldFilter">图表指标 <span id="fieldSummary">已选 0 项</span></label>
+              <select id="fieldFilter" multiple></select>
+              <div class="field-toolbar compact-field-toolbar">
+                <button type="button" data-field-action="core">常用</button>
+                <button type="button" data-field-action="allMetrics">全选</button>
+                <button type="button" data-field-action="clear">清空</button>
+              </div>
             </div>
             <div class="control-group quick-window-group">
               <label>时间窗口</label>
@@ -113,25 +128,6 @@
                 <button type="button" data-window-days="180">近 180 天</button>
               </div>
             </div>
-          </div>
-
-          <div class="field-section">
-            <div class="field-section-head">
-              <div>
-                <strong>图表指标</strong>
-                <span id="fieldSummary">已选 0 项</span>
-              </div>
-              <div class="field-toolbar">
-                <button type="button" data-field-action="core">常用</button>
-                <button type="button" data-field-action="allMetrics">全选指标</button>
-                <button type="button" data-field-action="clear">清空</button>
-              </div>
-            </div>
-            <div class="field-search">
-              <i data-lucide="search"></i>
-              <input id="fieldSearch" type="search" placeholder="搜索指标，例如 ROAS / 花费 / 点击">
-            </div>
-            <div class="field-list" id="fieldList"></div>
           </div>
         </div>
       </section>
@@ -185,9 +181,113 @@
           </div>
         </section>
       </section>
+
+      <section class="view-panel" data-view-panel="settings" hidden>
+        <section class="panel settings-panel">
+          <div class="panel-head">
+            <div>
+              <h2>取样监控设置</h2>
+              <span id="settingsCaption">账户与取数方案</span>
+            </div>
+            <div class="settings-actions">
+              <button class="icon-button" id="reloadSettingsButton" type="button" title="刷新账户设置" aria-label="刷新账户设置">
+                <i data-lucide="refresh-cw"></i>
+              </button>
+              <button class="primary-button" id="saveSettingsButton" type="button">
+                <i data-lucide="save"></i>
+                <span>保存</span>
+              </button>
+            </div>
+          </div>
+          <div class="settings-body">
+            <div class="settings-tabs" role="tablist" aria-label="设置页签">
+              <button class="settings-tab active" type="button" data-settings-tab="accounts">账户</button>
+              <button class="settings-tab" type="button" data-settings-tab="targeted">定向伪实时</button>
+              <button class="settings-tab" type="button" data-settings-tab="activeCampaigns">ACTIVE 系列</button>
+            </div>
+
+            <div class="settings-pane active" data-settings-pane="accounts">
+              <div class="control-group settings-field">
+                <label for="monitorAccountsInput">账户 ID</label>
+                <textarea id="monitorAccountsInput" rows="8" spellcheck="false" placeholder="8462513793771963"></textarea>
+              </div>
+              <div class="account-list" id="settingsAccountList"></div>
+            </div>
+
+            <div class="settings-pane" data-settings-pane="targeted" hidden>
+              <div class="settings-grid">
+                <label class="switch settings-switch">
+                  <input id="targetedEnabled" type="checkbox">
+                  <span>启用</span>
+                </label>
+                <div class="control-group">
+                  <label for="targetedLevelSelect">对象层级</label>
+                  <select id="targetedLevelSelect">
+                    <option value="ads">广告</option>
+                    <option value="adsets">广告组</option>
+                  </select>
+                </div>
+                <div class="control-group">
+                  <label for="targetedIntervalInput">频率(分钟)</label>
+                  <input id="targetedIntervalInput" type="number" min="15" max="30" step="1">
+                </div>
+                <div class="control-group">
+                  <label for="targetedDatePresetSelect">日期</label>
+                  <select id="targetedDatePresetSelect">
+                    <option value="today">today</option>
+                    <option value="yesterday">yesterday</option>
+                    <option value="last_7d">last_7d</option>
+                  </select>
+                </div>
+                <div class="control-group">
+                  <label for="targetedResultActionInput">成效口径</label>
+                  <input id="targetedResultActionInput" type="text" placeholder="omni_purchase">
+                </div>
+                <div class="control-group settings-field wide">
+                  <label for="targetedIdsInput">对象 ID</label>
+                  <textarea id="targetedIdsInput" rows="7" spellcheck="false" placeholder="120238379067340623"></textarea>
+                </div>
+              </div>
+              <div class="settings-summary" id="targetedSummary"></div>
+            </div>
+
+            <div class="settings-pane" data-settings-pane="activeCampaigns" hidden>
+              <div class="settings-grid">
+                <label class="switch settings-switch">
+                  <input id="activeCampaignsEnabled" type="checkbox">
+                  <span>启用</span>
+                </label>
+                <div class="control-group">
+                  <label for="activeCampaignIntervalInput">频率(分钟)</label>
+                  <input id="activeCampaignIntervalInput" type="number" min="30" max="60" step="1">
+                </div>
+                <div class="control-group">
+                  <label for="activeCampaignDatePresetSelect">日期</label>
+                  <select id="activeCampaignDatePresetSelect">
+                    <option value="today">today</option>
+                    <option value="yesterday">yesterday</option>
+                    <option value="last_7d">last_7d</option>
+                  </select>
+                </div>
+                <div class="control-group">
+                  <label for="activeCampaignLimitInput">验证上限</label>
+                  <input id="activeCampaignLimitInput" type="number" min="0" step="1">
+                </div>
+                <div class="control-group">
+                  <label for="activeCampaignResultActionInput">成效口径</label>
+                  <input id="activeCampaignResultActionInput" type="text" placeholder="omni_purchase">
+                </div>
+              </div>
+              <div class="settings-summary" id="activeCampaignSummary"></div>
+            </div>
+
+            <div class="settings-status" id="settingsStatus" role="status"></div>
+          </div>
+        </section>
+      </section>
     </main>
   </div>
 
-  <script src="/app.js?v=20260604-5"></script>
+  <script src="/app.js?v=20260605-7"></script>
 </body>
 </html>

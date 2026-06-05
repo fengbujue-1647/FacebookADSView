@@ -1,6 +1,6 @@
 # FB 广告数据看板
 
-一个独立运行的 Facebook 广告数据看板模块，前端用于展示 Ads Insights 类数据。当前版本使用 Demo 数据模拟真实广告账户表现，后续可替换为 Marketing API 或本地采集后的数据源。
+一个独立运行的 Facebook 广告数据看板模块，前端用于展示 Ads Insights 类数据。看板会优先读取本地 SQLite 采集库；没有真实采集数据时，才回退到 Demo 数据。
 
 ## 功能
 
@@ -43,7 +43,7 @@ http://127.0.0.1:3100/api/health
 http://127.0.0.1:3100/api/fb-ads/latest
 ```
 
-页面启动时会优先读取 `cli/data/output/` 下最新一次 CLI 采集结果；如果没有真实采集数据，会自动回退到 Demo 数据。
+页面启动时会优先读取 `cli/data/fb-ads.sqlite` 中最新完成批次；如果数据库还没有数据，会回退读取 `cli/data/output/` 下最新一次非空 JSON；如果两者都没有真实采集数据，会自动回退到 Demo 数据。
 
 ## 接入真实 API 数据
 
@@ -68,10 +68,30 @@ YINO_CLIENT_ID=...
 YINO_CLIENT_SECRET=...
 ```
 
+配置监控账户：
+
+```text
+cli/config/monitored-accounts.example.json -> cli/config/monitored-accounts.json
+```
+
+`monitored-accounts.json` 只放本机要采集的账户 ID。配置后，CLI 在没有传 `--accounts` 时会优先使用这些账户，避免默认扫描全部账户。
+
 检查配置：
 
 ```bash
 npm run cli:doctor
+```
+
+初始化本地 SQLite 数据库：
+
+```bash
+npm run cli:db-init
+```
+
+如果已经有 `cli/data/output/facebook_ads_*.json`，可以先导入最新非空文件到 SQLite：
+
+```bash
+npm run cli:db-import-output
 ```
 
 拉取昨天广告层级数据：
@@ -84,6 +104,12 @@ npm run cli:pull -- --date-preset yesterday --level ads
 
 ```bash
 npm run cli:pull -- --date-preset yesterday --level ads --limit 10
+```
+
+如果确实需要忽略监控账户并扫描全部账户，显式加 `--all-accounts`：
+
+```bash
+npm run cli:pull -- --all-accounts --date-preset yesterday --level ads --limit 10
 ```
 
 只拉前 5 个 ACTIVE 广告：
@@ -104,11 +130,48 @@ npm run cli:active-ads -- --accounts 8462513793771963,2152108598945788 --date-pr
 npm run cli:active-ads-hourly -- --accounts 8462513793771963 --date-preset yesterday --limit 30
 ```
 
+评估两条取样监控方案的数据量，并可抽样探测 ACTIVE 广告中数据量最大的对象：
+
+```bash
+npm run cli:sampling-evaluate -- --accounts 8462513793771963 --resource-limit 100 --probe-level ads --probe-limit 10 --date-preset yesterday
+```
+
+按设置页或命令行指定的广告/广告组 ID 拉取小时级伪实时监控数据：
+
+```bash
+npm run cli:targeted-monitor -- --level ads --ids 120238379067340623 --date-preset today
+```
+
+扫描并拉取 ACTIVE 广告系列的小时级监控数据：
+
+```bash
+npm run cli:active-campaigns -- --accounts 8462513793771963 --date-preset today
+```
+
+按设置页配置执行一次或循环执行取样监控：
+
+```bash
+npm run cli:sampling-run -- --mode all
+npm run cli:sampling-loop -- --mode all --max-cycles 1
+```
+
 输出文件：
 
 ```text
 cli/data/output/facebook_ads_*.json
 cli/data/output/facebook_ads_*.csv
+```
+
+取样监控配置文件：
+
+```text
+cli/config/sampling-plans.json
+```
+
+本地数据库：
+
+```text
+cli/data/fb-ads.sqlite
 ```
 
 如果要改端口：
@@ -119,9 +182,9 @@ $env:PORT=3101; npm start
 
 ## 数据和安全
 
-- 当前页面里的广告数据是前端 Demo 数据，不包含真实账号、Token、Cookie 或 API key。
-- 后续接入真实数据时，不要把访问令牌写进前端代码或仓库。
-- 建议把采集后的本地数据放进 `data/`，该目录已加入 `.gitignore`。
+- `.env`、本地 SQLite 数据库、采集输出 JSON/CSV、Token 缓存都不提交到 Git 仓库。
+- 不要把访问令牌、client secret、Cookie 或 API key 写进前端代码。
+- SQLite 适合当前本机单服务采集和看板读取；如果后续需要多机采集、多人远程访问、集中备份或千万级以上长期明细查询，再迁移到 MySQL/Postgres。
 
 ## 接入智在 EAH 大厅
 

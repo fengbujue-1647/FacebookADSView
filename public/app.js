@@ -53,12 +53,33 @@ const state = {
   activeView: "chart",
   granularity: "day",
   selectedFields: new Set(defaultFields),
-  campaign: "all",
+  selectedCampaigns: new Set(),
   delivery: "all",
   normalize: true,
   from: "",
   to: "",
-  activeWindowPreset: ""
+  activeWindowPreset: "",
+  monitoredAccounts: [],
+  activeSettingsTab: "accounts",
+  samplingSettings: {
+    targeted: {
+      enabled: false,
+      level: "ads",
+      ids: [],
+      intervalMinutes: 15,
+      datePreset: "today",
+      resultAction: "",
+      hourly: true
+    },
+    activeCampaigns: {
+      enabled: true,
+      intervalMinutes: 60,
+      datePreset: "today",
+      resultAction: "",
+      limit: 0,
+      hourly: true
+    }
+  }
 };
 
 const viewCopy = {
@@ -73,14 +94,35 @@ const viewCopy = {
   list: {
     title: "FB 广告列表看板",
     subtitle: "按广告系列查看投放状态、花费和转化表现。"
+  },
+  settings: {
+    title: "设置",
+    subtitle: "配置用于采集和看板展示的监控账户。"
   }
 };
 
 let chart;
 let rawRows = [];
 let lastChartData = [];
+let lastChartRows = [];
 let lastCampaignRows = [];
 let currentSeriesRaw = {};
+let campaignSelect;
+let fieldSelect;
+let isSyncingSelects = false;
+
+const chartPalette = [
+  "#2563eb",
+  "#0f766e",
+  "#b45309",
+  "#7c3aed",
+  "#be123c",
+  "#0891b2",
+  "#15803d",
+  "#c2410c",
+  "#4f46e5",
+  "#475569"
+];
 
 const els = {
   pageTitle: document.getElementById("pageTitle"),
@@ -94,9 +136,9 @@ const els = {
   toMonth: document.getElementById("toMonth"),
   campaignFilter: document.getElementById("campaignFilter"),
   deliveryFilter: document.getElementById("deliveryFilter"),
+  fieldFilter: document.getElementById("fieldFilter"),
   fieldSummary: document.getElementById("fieldSummary"),
-  fieldSearch: document.getElementById("fieldSearch"),
-  fieldList: document.getElementById("fieldList"),
+  viewToolbar: document.getElementById("viewToolbar"),
   chartCaption: document.getElementById("chartCaption"),
   metricCaption: document.getElementById("metricCaption"),
   metricGrid: document.getElementById("metricGrid"),
@@ -107,7 +149,27 @@ const els = {
   tableHead: document.getElementById("tableHead"),
   tableBody: document.getElementById("tableBody"),
   chartEmpty: document.getElementById("chartEmpty"),
-  mainChart: document.getElementById("mainChart")
+  mainChart: document.getElementById("mainChart"),
+  resetWindowButton: document.getElementById("resetWindowButton"),
+  settingsCaption: document.getElementById("settingsCaption"),
+  monitorAccountsInput: document.getElementById("monitorAccountsInput"),
+  settingsAccountList: document.getElementById("settingsAccountList"),
+  settingsStatus: document.getElementById("settingsStatus"),
+  reloadSettingsButton: document.getElementById("reloadSettingsButton"),
+  saveSettingsButton: document.getElementById("saveSettingsButton"),
+  targetedEnabled: document.getElementById("targetedEnabled"),
+  targetedLevelSelect: document.getElementById("targetedLevelSelect"),
+  targetedIdsInput: document.getElementById("targetedIdsInput"),
+  targetedIntervalInput: document.getElementById("targetedIntervalInput"),
+  targetedDatePresetSelect: document.getElementById("targetedDatePresetSelect"),
+  targetedResultActionInput: document.getElementById("targetedResultActionInput"),
+  targetedSummary: document.getElementById("targetedSummary"),
+  activeCampaignsEnabled: document.getElementById("activeCampaignsEnabled"),
+  activeCampaignIntervalInput: document.getElementById("activeCampaignIntervalInput"),
+  activeCampaignDatePresetSelect: document.getElementById("activeCampaignDatePresetSelect"),
+  activeCampaignLimitInput: document.getElementById("activeCampaignLimitInput"),
+  activeCampaignResultActionInput: document.getElementById("activeCampaignResultActionInput"),
+  activeCampaignSummary: document.getElementById("activeCampaignSummary")
 };
 
 const dataSourceName = document.getElementById("dataSourceName");
@@ -372,7 +434,7 @@ function buildRawRows() {
 }
 
 function mapCollectedRow(row) {
-  const dateValue = row.date_start || row.date_stop;
+  const dateValue = row.date_stop || row.date_start;
   const timestampSource = row.hour_start || (dateValue ? `${dateValue}T00:00:00` : '');
   const timestamp = timestampSource ? new Date(timestampSource).getTime() : Date.now();
   const spend = Number(row.spend || 0);
@@ -422,6 +484,202 @@ function applyCampaignsFromRows(rows) {
   }
 }
 
+function clampNumber(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function parseIdInput(value) {
+  const ids = value.split(/[\s,;，；]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => /^\d{3,32}$/.test(item));
+  return [...new Set(ids)];
+}
+
+function parseAccountInput(value) {
+  return parseIdInput(value).map((id) => ({ id, name: "" }));
+}
+
+function normalizeSamplingSettings(settings = {}) {
+  const targeted = settings.targeted || {};
+  const activeCampaigns = settings.activeCampaigns || {};
+  return {
+    targeted: {
+      enabled: targeted.enabled === true,
+      level: ["ads", "adsets"].includes(targeted.level) ? targeted.level : "ads",
+      ids: Array.isArray(targeted.ids) ? targeted.ids.filter((id) => /^\d{3,32}$/.test(String(id))) : [],
+      intervalMinutes: clampNumber(targeted.intervalMinutes, 15, 15, 30),
+      datePreset: targeted.datePreset || "today",
+      resultAction: String(targeted.resultAction || "").trim(),
+      hourly: targeted.hourly !== false
+    },
+    activeCampaigns: {
+      enabled: activeCampaigns.enabled !== false,
+      intervalMinutes: clampNumber(activeCampaigns.intervalMinutes, 60, 30, 60),
+      datePreset: activeCampaigns.datePreset || "today",
+      resultAction: String(activeCampaigns.resultAction || "").trim(),
+      limit: Math.max(0, Number.parseInt(activeCampaigns.limit, 10) || 0),
+      hourly: activeCampaigns.hourly !== false
+    }
+  };
+}
+
+function summaryChips(items) {
+  return items.map((item) => `<span>${item}</span>`).join("");
+}
+
+function renderAccountSettings(message = "") {
+  const accounts = state.monitoredAccounts;
+  renderSettingsCaption();
+  els.monitorAccountsInput.value = accounts.map((account) => account.id).join("\n");
+  els.settingsAccountList.innerHTML = accounts.map((account) => `
+    <span class="account-pill">${account.id}</span>
+  `).join("") || `<div class="empty-inline">暂无监控账户</div>`;
+  els.settingsStatus.textContent = message;
+}
+
+function renderSettingsCaption() {
+  const targeted = state.samplingSettings.targeted;
+  const activeCampaigns = state.samplingSettings.activeCampaigns;
+  els.settingsCaption.textContent = [
+    `账户 ${state.monitoredAccounts.length} 个`,
+    `定向 ${targeted.ids.length} 个`,
+    `ACTIVE ${activeCampaigns.intervalMinutes} 分钟`
+  ].join(" · ");
+}
+
+function renderSamplingSettings() {
+  const settings = state.samplingSettings;
+  const targeted = settings.targeted;
+  const activeCampaigns = settings.activeCampaigns;
+
+  els.targetedEnabled.checked = targeted.enabled;
+  els.targetedLevelSelect.value = targeted.level;
+  els.targetedIdsInput.value = targeted.ids.join("\n");
+  els.targetedIntervalInput.value = targeted.intervalMinutes;
+  els.targetedDatePresetSelect.value = targeted.datePreset;
+  els.targetedResultActionInput.value = targeted.resultAction;
+  els.targetedSummary.innerHTML = summaryChips([
+    targeted.enabled ? "启用" : "停用",
+    targeted.level === "ads" ? "广告" : "广告组",
+    `${targeted.ids.length} 个对象`,
+    `${targeted.intervalMinutes} 分钟`
+  ]);
+
+  els.activeCampaignsEnabled.checked = activeCampaigns.enabled;
+  els.activeCampaignIntervalInput.value = activeCampaigns.intervalMinutes;
+  els.activeCampaignDatePresetSelect.value = activeCampaigns.datePreset;
+  els.activeCampaignLimitInput.value = activeCampaigns.limit;
+  els.activeCampaignResultActionInput.value = activeCampaigns.resultAction;
+  els.activeCampaignSummary.innerHTML = summaryChips([
+    activeCampaigns.enabled ? "启用" : "停用",
+    `${activeCampaigns.intervalMinutes} 分钟`,
+    activeCampaigns.limit > 0 ? `上限 ${activeCampaigns.limit}` : "全量"
+  ]);
+  renderSettingsCaption();
+}
+
+function collectSamplingSettings() {
+  return normalizeSamplingSettings({
+    targeted: {
+      enabled: els.targetedEnabled.checked,
+      level: els.targetedLevelSelect.value,
+      ids: parseIdInput(els.targetedIdsInput.value),
+      intervalMinutes: els.targetedIntervalInput.value,
+      datePreset: els.targetedDatePresetSelect.value,
+      resultAction: els.targetedResultActionInput.value,
+      hourly: true
+    },
+    activeCampaigns: {
+      enabled: els.activeCampaignsEnabled.checked,
+      intervalMinutes: els.activeCampaignIntervalInput.value,
+      datePreset: els.activeCampaignDatePresetSelect.value,
+      limit: els.activeCampaignLimitInput.value,
+      resultAction: els.activeCampaignResultActionInput.value,
+      hourly: true
+    }
+  });
+}
+
+async function loadAccountSettings(message = "") {
+  try {
+    const response = await fetch("/api/settings/accounts", { cache: "no-store" });
+    const payload = await response.json();
+    state.monitoredAccounts = payload.ok && Array.isArray(payload.accounts) ? payload.accounts : [];
+    renderAccountSettings(message);
+  } catch {
+    renderAccountSettings("账户设置读取失败");
+  }
+}
+
+async function loadSamplingSettings(message = "") {
+  try {
+    const response = await fetch("/api/settings/sampling", { cache: "no-store" });
+    const payload = await response.json();
+    state.samplingSettings = normalizeSamplingSettings(payload.ok ? payload.settings : {});
+    renderSamplingSettings();
+    if (message) {
+      els.settingsStatus.textContent = message;
+    }
+  } catch {
+    renderSamplingSettings();
+    els.settingsStatus.textContent = "取样设置读取失败";
+  }
+}
+
+async function loadSettings(message = "") {
+  await Promise.all([
+    loadAccountSettings(),
+    loadSamplingSettings()
+  ]);
+  if (message) {
+    els.settingsStatus.textContent = message;
+  }
+}
+
+async function saveSettings() {
+  const accounts = parseAccountInput(els.monitorAccountsInput.value);
+  const samplingSettings = collectSamplingSettings();
+  els.saveSettingsButton.disabled = true;
+  els.settingsStatus.textContent = "保存中";
+  try {
+    const accountResponse = await fetch("/api/settings/accounts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ accounts })
+    });
+    const accountPayload = await accountResponse.json();
+    if (!accountResponse.ok || !accountPayload.ok) {
+      throw new Error(accountPayload.message || "账户保存失败");
+    }
+    const samplingResponse = await fetch("/api/settings/sampling", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ settings: samplingSettings })
+    });
+    const samplingPayload = await samplingResponse.json();
+    if (!samplingResponse.ok || !samplingPayload.ok) {
+      throw new Error(samplingPayload.message || "取样设置保存失败");
+    }
+    state.monitoredAccounts = accountPayload.accounts;
+    state.samplingSettings = normalizeSamplingSettings(samplingPayload.settings);
+    renderAccountSettings("已保存");
+    renderSamplingSettings();
+  } catch (error) {
+    els.settingsStatus.textContent = error.message || "保存失败";
+  } finally {
+    els.saveSettingsButton.disabled = false;
+  }
+}
+
 async function loadCollectedRows() {
   try {
     const response = await fetch("/api/fb-ads/latest", { cache: "no-store" });
@@ -436,8 +694,10 @@ async function loadCollectedRows() {
       state.granularity = "hour";
     }
     applyCampaignsFromRows(rows);
-    dataSourceName.textContent = "Collected Insights";
-    dataSourceMeta.textContent = payload.updated_at ? `更新于 ${payload.updated_at.slice(0, 19).replace("T", " ")}` : payload.source;
+    dataSourceName.textContent = payload.storage === "sqlite" ? "SQLite Insights" : "Collected Insights";
+    const rowText = `${rows.length.toLocaleString("en-US")} 行`;
+    const updateText = payload.updated_at ? `更新于 ${payload.updated_at.slice(0, 19).replace("T", " ")}` : payload.source;
+    dataSourceMeta.textContent = [rowText, updateText].filter(Boolean).join(" · ");
     return rows;
   } catch {
     return null;
@@ -493,7 +753,7 @@ function getFilteredRows() {
     if (row.timestamp < bounds.from.getTime() || row.timestamp > bounds.to.getTime()) {
       return false;
     }
-    if (state.campaign !== "all" && row.campaignId !== state.campaign) {
+    if (state.selectedCampaigns.size > 0 && !state.selectedCampaigns.has(row.campaignId)) {
       return false;
     }
     if (state.delivery !== "all" && row.delivery !== state.delivery) {
@@ -541,6 +801,54 @@ function aggregateByTime(rows) {
   return [...buckets.values()]
     .sort((a, b) => a.key - b.key)
     .map(deriveMetrics);
+}
+
+function campaignCompareEnabled() {
+  return state.selectedCampaigns.size > 1;
+}
+
+function selectedCampaignsInDisplayOrder() {
+  return CAMPAIGNS.filter((campaign) => state.selectedCampaigns.has(campaign.id));
+}
+
+function aggregateByCampaignTime(rows, timePoints) {
+  if (!campaignCompareEnabled() || timePoints.length === 0) {
+    return [];
+  }
+
+  const campaigns = selectedCampaignsInDisplayOrder();
+  const pointKeys = new Set(timePoints.map((point) => point.key));
+  const campaignBuckets = new Map();
+
+  campaigns.forEach((campaign) => {
+    const buckets = new Map();
+    timePoints.forEach((point) => {
+      buckets.set(point.key, {
+        key: point.key,
+        label: point.label,
+        sortDate: point.sortDate,
+        ...createAccumulator()
+      });
+    });
+    campaignBuckets.set(campaign.id, buckets);
+  });
+
+  rows.forEach((row) => {
+    const buckets = campaignBuckets.get(row.campaignId);
+    if (!buckets) {
+      return;
+    }
+    const key = bucketDate(new Date(row.timestamp), state.granularity).getTime();
+    if (!pointKeys.has(key)) {
+      return;
+    }
+    addToAccumulator(buckets.get(key), row);
+  });
+
+  return campaigns.map((campaign) => ({
+    campaign,
+    points: timePoints.map((point) => deriveMetrics(campaignBuckets.get(campaign.id).get(point.key)))
+  }));
 }
 
 function aggregateByCampaign(rows) {
@@ -627,24 +935,68 @@ function getGranularityShortLabel(granularity) {
   }[granularity];
 }
 
+function setSelectOptions(select, items, selectedValues = new Set()) {
+  select.innerHTML = "";
+  items.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.value;
+    option.textContent = item.label;
+    option.selected = selectedValues.has(item.value);
+    select.appendChild(option);
+  });
+}
+
+function selectedSelectValues(select) {
+  return [...select.selectedOptions].map((option) => option.value);
+}
+
+function selectedControlValues(select, instance) {
+  if (!instance) {
+    return selectedSelectValues(select);
+  }
+  const value = instance.getValue();
+  return Array.isArray(value) ? value : String(value || "").split(",").filter(Boolean);
+}
+
+function pruneSelectedCampaigns() {
+  const campaignIds = new Set(CAMPAIGNS.map((campaign) => campaign.id));
+  state.selectedCampaigns.forEach((id) => {
+    if (!campaignIds.has(id)) {
+      state.selectedCampaigns.delete(id);
+    }
+  });
+}
+
 function renderFilters() {
-  els.campaignFilter.innerHTML = [
-    `<option value="all">全部广告系列</option>`,
-    ...CAMPAIGNS.map((campaign) => `<option value="${campaign.id}">${campaign.name}</option>`)
-  ].join("");
+  pruneSelectedCampaigns();
+  setSelectOptions(els.campaignFilter, CAMPAIGNS.map((campaign) => ({
+    value: campaign.id,
+    label: campaign.name
+  })), state.selectedCampaigns);
+
+  setSelectOptions(els.fieldFilter, metricFields.map((field) => ({
+    value: field.id,
+    label: field.label
+  })), state.selectedFields);
 
   const deliveries = [...new Set(CAMPAIGNS.map((campaign) => campaign.delivery))];
   els.deliveryFilter.innerHTML = [
     `<option value="all">全部投放状态</option>`,
     ...deliveries.map((delivery) => `<option value="${delivery}">${delivery}</option>`)
   ].join("");
+
+  syncFieldSummary();
 }
 
 function selectedCampaignLabel() {
-  if (state.campaign === "all") {
+  if (state.selectedCampaigns.size === 0) {
     return "全部广告系列";
   }
-  return CAMPAIGNS.find((campaign) => campaign.id === state.campaign)?.name || "未知广告系列";
+  if (state.selectedCampaigns.size === 1) {
+    const [campaignId] = state.selectedCampaigns;
+    return CAMPAIGNS.find((campaign) => campaign.id === campaignId)?.name || "未知广告系列";
+  }
+  return `广告系列：${state.selectedCampaigns.size} 个`;
 }
 
 function selectedDeliveryLabel() {
@@ -672,27 +1024,55 @@ function renderActiveChips() {
   els.activeChips.innerHTML = chips.map((chip) => `<span class="filter-chip"><strong>${chip}</strong></span>`).join("");
 }
 
-function renderFieldList() {
-  const query = els.fieldSearch.value.trim().toLowerCase();
-  const rows = metricFields.filter((field) => {
-    const haystack = `${field.label} ${field.api}`.toLowerCase();
-    return haystack.includes(query);
-  }).map((field) => {
-    const checked = state.selectedFields.has(field.id) ? "checked" : "";
-    return `
-      <label class="field-row">
-        <input type="checkbox" value="${field.id}" ${checked}>
-        <span class="field-main">
-          <strong>${field.label}</strong>
-          <small>${field.api}</small>
-        </span>
-        <span class="field-tag">指标</span>
-      </label>
-    `;
+function syncFieldSummary() {
+  els.fieldSummary.textContent = `已选 ${state.selectedFields.size} 个指标`;
+}
+
+function syncFieldChoiceSelection() {
+  isSyncingSelects = true;
+  const selectedIds = [...state.selectedFields];
+  [...els.fieldFilter.options].forEach((option) => {
+    option.selected = state.selectedFields.has(option.value);
+  });
+  if (fieldSelect) {
+    fieldSelect.setValue(selectedIds, true);
+  }
+  isSyncingSelects = false;
+  syncFieldSummary();
+}
+
+function initChoicePickers() {
+  if (!window.TomSelect) {
+    syncFieldSummary();
+    return;
+  }
+
+  const commonOptions = {
+    plugins: ["checkbox_options", "remove_button"],
+    controlInput: null,
+    create: false,
+    closeAfterSelect: false,
+    hideSelected: false,
+    maxOptions: null,
+    sortField: [{ field: "$order" }],
+    render: {
+      no_results() {
+        return '<div class="no-results">没有可选项</div>';
+      }
+    }
+  };
+
+  campaignSelect = new TomSelect(els.campaignFilter, {
+    ...commonOptions,
+    placeholder: "全部广告系列"
   });
 
-  els.fieldList.innerHTML = rows.join("") || `<div class="empty-inline">没有匹配指标</div>`;
-  els.fieldSummary.textContent = `已选 ${state.selectedFields.size} 个指标`;
+  fieldSelect = new TomSelect(els.fieldFilter, {
+    ...commonOptions,
+    placeholder: "选择指标"
+  });
+
+  syncFieldSummary();
 }
 
 function renderKpis(total) {
@@ -736,6 +1116,8 @@ function renderView() {
   const copy = viewCopy[state.activeView];
   els.pageTitle.textContent = copy.title;
   els.pageSubtitle.textContent = copy.subtitle;
+  els.viewToolbar.hidden = state.activeView === "settings";
+  els.resetWindowButton.hidden = state.activeView === "settings";
 
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === state.activeView);
@@ -750,11 +1132,30 @@ function renderView() {
   if (state.activeView === "chart" && chart) {
     requestAnimationFrame(() => chart.resize());
   }
+  if (state.activeView === "settings") {
+    renderAccountSettings();
+    renderSamplingSettings();
+  }
 }
 
-function renderChart(points) {
+function renderSettingsTabs() {
+  document.querySelectorAll("[data-settings-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.settingsTab === state.activeSettingsTab);
+  });
+
+  document.querySelectorAll("[data-settings-pane]").forEach((pane) => {
+    const active = pane.dataset.settingsPane === state.activeSettingsTab;
+    pane.hidden = !active;
+    pane.classList.toggle("active", active);
+  });
+}
+
+function renderChart(points, rows = lastChartRows) {
   const metrics = selectedMetricIds();
-  els.chartCaption.textContent = `${getGranularityLabel()} · ${formatRangeText()}`;
+  const compareMode = campaignCompareEnabled();
+  const compareGroups = compareMode ? aggregateByCampaignTime(rows, points) : [];
+  const compareSuffix = compareMode ? ` · ${compareGroups.length} 个广告系列对比` : "";
+  els.chartCaption.textContent = `${getGranularityLabel()} · ${formatRangeText()}${compareSuffix}`;
   els.chartEmpty.textContent = metrics.length === 0 ? "请选择至少一个数值指标" : "当前时间窗口没有可展示数据";
   els.chartEmpty.hidden = metrics.length > 0 && points.length > 0;
 
@@ -772,35 +1173,58 @@ function renderChart(points) {
   const labels = points.map((point) => point.label);
   currentSeriesRaw = {};
 
-  const series = metrics.map((id) => {
-    const field = fieldById.get(id);
-    const rawValues = points.map((point) => Number(point[id] || 0));
-    currentSeriesRaw[field.label] = { id, values: rawValues };
-    const chartValues = state.normalize && metrics.length > 1 ? normalizeValues(rawValues) : rawValues;
+  const createSeries = ({ name, field, values, color, seriesIndex }) => {
+    currentSeriesRaw[name] = { id: field.id, values };
+    const chartValues = state.normalize && metrics.length > 1 ? normalizeValues(values) : values;
 
     return {
-      name: field.label,
+      name,
       type: "line",
       smooth: true,
-      showSymbol: false,
+      showSymbol: points.length <= 1,
       symbolSize: 6,
       data: chartValues,
       lineStyle: {
         width: 2
       },
       areaStyle: {
-        opacity: 0.14
+        opacity: compareMode ? 0.06 : 0.14
       },
       emphasis: {
         focus: "series"
       },
-      color: field.color
+      color: color || chartPalette[seriesIndex % chartPalette.length]
     };
-  });
+  };
+
+  const series = compareMode
+    ? compareGroups.flatMap((group, campaignIndex) => metrics.map((id, metricIndex) => {
+      const field = fieldById.get(id);
+      const values = group.points.map((point) => Number(point[id] || 0));
+      const name = metrics.length === 1 ? group.campaign.name : `${group.campaign.name} · ${field.label}`;
+      return createSeries({
+        name,
+        field,
+        values,
+        color: chartPalette[(campaignIndex * metrics.length + metricIndex) % chartPalette.length],
+        seriesIndex: campaignIndex * metrics.length + metricIndex
+      });
+    }))
+    : metrics.map((id, seriesIndex) => {
+      const field = fieldById.get(id);
+      const values = points.map((point) => Number(point[id] || 0));
+      return createSeries({
+        name: field.label,
+        field,
+        values,
+        color: field.color,
+        seriesIndex
+      });
+    });
 
   chart.setOption({
     animationDuration: 420,
-    color: metrics.map((id) => fieldById.get(id).color),
+    color: series.map((item) => item.color),
     tooltip: {
       trigger: "axis",
       confine: true,
@@ -938,13 +1362,14 @@ function renderDashboard() {
   const total = calculateTotals(rows);
 
   lastChartData = timePoints;
+  lastChartRows = rows;
   lastCampaignRows = campaignRows;
 
   renderKpis(total);
   renderMetricGrid(total);
-  renderChart(timePoints);
+  renderChart(timePoints, rows);
   renderTable(campaignRows);
-  renderFieldList();
+  syncFieldSummary();
   renderActiveChips();
 }
 
@@ -1082,12 +1507,19 @@ function bindEvents() {
     });
   });
 
+  document.querySelectorAll("[data-settings-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.activeSettingsTab = button.dataset.settingsTab;
+      renderSettingsTabs();
+    });
+  });
+
   els.moreOptionsToggle.addEventListener("click", () => {
     const nextOpen = els.optionsPanel.hidden;
     els.optionsPanel.hidden = !nextOpen;
     els.moreOptionsToggle.setAttribute("aria-expanded", String(nextOpen));
     if (nextOpen) {
-      els.fieldSearch.focus();
+      els.campaignFilter.focus();
     }
   });
 
@@ -1124,7 +1556,10 @@ function bindEvents() {
   });
 
   els.campaignFilter.addEventListener("change", () => {
-    state.campaign = els.campaignFilter.value;
+    if (isSyncingSelects) {
+      return;
+    }
+    state.selectedCampaigns = new Set(selectedControlValues(els.campaignFilter, campaignSelect));
     renderDashboard();
   });
 
@@ -1135,21 +1570,14 @@ function bindEvents() {
 
   els.normalizeToggle.addEventListener("change", () => {
     state.normalize = els.normalizeToggle.checked;
-    renderChart(lastChartData);
+    renderChart(lastChartData, lastChartRows);
   });
 
-  els.fieldSearch.addEventListener("input", renderFieldList);
-
-  els.fieldList.addEventListener("change", (event) => {
-    const checkbox = event.target.closest("input[type='checkbox']");
-    if (!checkbox) {
+  els.fieldFilter.addEventListener("change", () => {
+    if (isSyncingSelects) {
       return;
     }
-    if (checkbox.checked) {
-      state.selectedFields.add(checkbox.value);
-    } else {
-      state.selectedFields.delete(checkbox.value);
-    }
+    state.selectedFields = new Set(selectedControlValues(els.fieldFilter, fieldSelect));
     renderDashboard();
   });
 
@@ -1165,6 +1593,7 @@ function bindEvents() {
       if (action === "clear") {
         state.selectedFields = new Set();
       }
+      syncFieldChoiceSelection();
       renderDashboard();
     });
   });
@@ -1183,12 +1612,39 @@ function bindEvents() {
     });
   });
 
-  document.getElementById("resetWindowButton").addEventListener("click", () => {
+  els.resetWindowButton.addEventListener("click", () => {
     setDefaultWindow();
     if (chart) {
       chart.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
     }
     renderDashboard();
+  });
+
+  els.reloadSettingsButton.addEventListener("click", () => {
+    loadSettings("已刷新");
+  });
+
+  els.saveSettingsButton.addEventListener("click", () => {
+    saveSettings();
+  });
+
+  [
+    els.targetedEnabled,
+    els.targetedLevelSelect,
+    els.targetedIdsInput,
+    els.targetedIntervalInput,
+    els.targetedDatePresetSelect,
+    els.targetedResultActionInput,
+    els.activeCampaignsEnabled,
+    els.activeCampaignIntervalInput,
+    els.activeCampaignDatePresetSelect,
+    els.activeCampaignLimitInput,
+    els.activeCampaignResultActionInput
+  ].forEach((input) => {
+    input.addEventListener("change", () => {
+      state.samplingSettings = collectSamplingSettings();
+      renderSamplingSettings();
+    });
   });
 
   window.addEventListener("resize", () => {
@@ -1206,13 +1662,15 @@ function initIcons() {
 
 async function init() {
   rawRows = await loadCollectedRows() || buildRawRows();
+  await loadSettings();
   renderFilters();
+  initChoicePickers();
   setDefaultWindow();
   els.normalizeToggle.checked = state.normalize;
   bindEvents();
-  renderFieldList();
   renderDashboard();
   renderView();
+  renderSettingsTabs();
   initIcons();
 }
 

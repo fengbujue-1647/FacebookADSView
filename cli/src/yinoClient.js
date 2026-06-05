@@ -8,12 +8,22 @@ function appendQuery(url, query) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function isRetryableError(error) {
+  return error?.name === 'AbortError' || /network|timeout|aborted/i.test(error?.message || '');
+}
+
 export class YinoClient {
   constructor({ baseUrl = config.baseUrl } = {}) {
     this.baseUrl = baseUrl;
   }
 
-  async request(pathname, query = {}, { retryAuth = true } = {}) {
+  async request(pathname, query = {}, { retryAuth = true, attempt = 0 } = {}) {
     const url = new URL(pathname, this.baseUrl);
     appendQuery(url, query);
 
@@ -32,7 +42,12 @@ export class YinoClient {
       const payload = await response.json();
       if ((response.status === 401 || payload.code === 401) && retryAuth) {
         await getToken({ forceRefresh: true });
-        return this.request(pathname, query, { retryAuth: false });
+        return this.request(pathname, query, { retryAuth: false, attempt });
+      }
+
+      if ((response.status === 429 || payload.code === 429 || payload.code === 203) && attempt < 2) {
+        await sleep(800 * (attempt + 1));
+        return this.request(pathname, query, { retryAuth, attempt: attempt + 1 });
       }
 
       if (!response.ok || payload.code !== 200) {
@@ -40,6 +55,12 @@ export class YinoClient {
       }
 
       return payload;
+    } catch (error) {
+      if (isRetryableError(error) && attempt < 2) {
+        await sleep(800 * (attempt + 1));
+        return this.request(pathname, query, { retryAuth, attempt: attempt + 1 });
+      }
+      throw error;
     } finally {
       clearTimeout(timeout);
     }

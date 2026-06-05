@@ -1,10 +1,14 @@
 node_modules/
 .env
 .env.*
+!.env.example
+!**/.env.example
 data/
 .cache/
 logs/
 artifacts/
+cli/config/monitored-accounts.json
+cli/config/sampling-plans.json
 *.log
 .server.pid
 .DS_Store

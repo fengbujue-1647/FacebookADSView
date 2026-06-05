@@ -1,0 +1,21 @@
+{
+  "targeted": {
+    "enabled": true,
+    "level": "ads",
+    "ids": [
+      "123456789012345"
+    ],
+    "intervalMinutes": 15,
+    "datePreset": "today",
+    "resultAction": "",
+    "hourly": true
+  },
+  "activeCampaigns": {
+    "enabled": true,
+    "intervalMinutes": 60,
+    "datePreset": "today",
+    "resultAction": "",
+    "limit": 0,
+    "hourly": true
+  }
+}

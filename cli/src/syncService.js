@@ -4,6 +4,7 @@ import { YinoClient } from './yinoClient.js';
 import { info } from './logger.js';
 import { normalizeInsight, insightColumns } from './normalizer.js';
 import { outputFile, outputJsonFile, rawFile, writeCsv, writeJson } from './storage.js';
+import { writeInsightBatch } from './database.js';
 
 const ACCOUNT_FIELDS = [
   'account_id',
@@ -43,6 +44,8 @@ const INSIGHT_FIELDS = [
   'date_stop'
 ];
 
+const HOURLY_BREAKDOWN = 'hourly_stats_aggregated_by_advertiser_time_zone';
+
 function chunks(items, size) {
   const result = [];
   for (let i = 0; i < items.length; i += size) result.push(items.slice(i, i + size));
@@ -57,6 +60,51 @@ function resourceTypeForLevel(level) {
   if (level === 'campaigns') return 'campaigns';
   if (level === 'adsets') return 'adsets';
   return 'ads';
+}
+
+function isActive(row) {
+  return String(row?.effective_status || row?.status || '').toUpperCase() === 'ACTIVE';
+}
+
+function resourceIdentity(row, level) {
+  const id = String(row?.id || row?.ad_id || row?.adset_id || row?.campaign_id || '').trim();
+  const resource = {
+    ...row,
+    id,
+    __level: level
+  };
+
+  if (level === 'campaigns') {
+    resource.campaign_id = resource.campaign_id || id;
+  }
+  if (level === 'adsets') {
+    resource.adset_id = resource.adset_id || id;
+  }
+  if (level === 'ads') {
+    resource.ad_id = resource.ad_id || id;
+  }
+
+  return resource;
+}
+
+function resourcesForLevel(level, rows) {
+  return {
+    campaigns: level === 'campaigns' ? rows : [],
+    adsets: level === 'adsets' ? rows : [],
+    ads: level === 'ads' ? rows : []
+  };
+}
+
+function rankProbeRows(rowsById) {
+  return [...rowsById.entries()]
+    .map(([id, rows]) => ({
+      id,
+      rows: rows.length,
+      spend: rows.reduce((total, row) => total + Number(row.spend || 0), 0),
+      impressions: rows.reduce((total, row) => total + Number(row.impressions || 0), 0),
+      clicks: rows.reduce((total, row) => total + Number(row.clicks || 0), 0)
+    }))
+    .sort((a, b) => (b.impressions - a.impressions) || (b.spend - a.spend));
 }
 
 export class SyncService {
@@ -98,9 +146,40 @@ export class SyncService {
     return result;
   }
 
-  async syncInsights({ resources, accounts, level = 'ads', datePreset = 'yesterday', since, until, limit = 0, resultAction = '' }) {
+  async syncResourceType({ accountIds, getType, limitPerAccount = 0 } = {}) {
+    const rows = [];
+
+    for (const accountId of accountIds) {
+      info(`拉取账户 ${accountId} 的 ${getType}`);
+      rows.push(...await this.client.getAllResources({
+        accountId,
+        getType,
+        limit: limitPerAccount || undefined
+      }));
+    }
+
+    await writeJson(rawFile(getType), rows);
+    return rows;
+  }
+
+  async syncInsights({
+    resources,
+    accounts = [],
+    level = 'ads',
+    datePreset = 'yesterday',
+    since,
+    until,
+    limit = 0,
+    resultAction = '',
+    hourly = false,
+    source = '',
+    outputName = ''
+  }) {
     const resourceType = resourceTypeForLevel(level);
-    const sourceRows = (resources[resourceType] || []).slice(0, limit || undefined);
+    const sourceRows = (resources[resourceType] || [])
+      .map((row) => resourceIdentity(row, resourceType))
+      .filter((row) => row.id)
+      .slice(0, limit || undefined);
     info(`Insights 层级：${resourceType}，待拉取对象：${sourceRows.length}`);
 
     const tasks = sourceRows.map((resource) => this.limit(async () => {
@@ -109,7 +188,8 @@ export class SyncService {
         fields: INSIGHT_FIELDS,
         datePreset,
         since,
-        until
+        until,
+        breakdowns: hourly ? HOURLY_BREAKDOWN : ''
       });
       return rows.map((row) => ({ ...row, id: resource.id }));
     }));
@@ -117,9 +197,9 @@ export class SyncService {
     const rawRows = (await Promise.all(tasks)).flat();
     const accountMap = mapById(accounts, 'account_id');
     const resourceMap = new Map([
-      ...(resources.campaigns || []).map((row) => [String(row.id), row]),
-      ...(resources.adsets || []).map((row) => [String(row.id), row]),
-      ...(resources.ads || []).map((row) => [String(row.id), row])
+      ...(resources.campaigns || []).map((row) => resourceIdentity(row, 'campaigns')).map((row) => [String(row.id), row]),
+      ...(resources.adsets || []).map((row) => resourceIdentity(row, 'adsets')).map((row) => [String(row.id), row]),
+      ...(resources.ads || []).map((row) => resourceIdentity(row, 'ads')).map((row) => [String(row.id), row])
     ]);
 
     const normalizedRows = rawRows.map((row) => normalizeInsight(row, {
@@ -129,12 +209,31 @@ export class SyncService {
     }));
 
     await writeJson(rawFile('insights'), rawRows);
-    const jsonPath = await writeJson(outputJsonFile('facebook_ads_daily'), normalizedRows);
-    const csvPath = await writeCsv(outputFile('facebook_ads_daily'), normalizedRows, insightColumns);
+    const baseOutputName = outputName || (hourly ? 'facebook_ads_hourly' : 'facebook_ads_daily');
+    const jsonPath = await writeJson(outputJsonFile(baseOutputName), normalizedRows);
+    const csvPath = await writeCsv(outputFile(baseOutputName), normalizedRows, insightColumns);
+    const db = writeInsightBatch({
+      source: source || `pull:${resourceType}`,
+      level: resourceType,
+      accountIds: accounts.map((account) => account.account_id).filter(Boolean),
+      rows: normalizedRows,
+      metadata: {
+        datePreset,
+        since: since || '',
+        until: until || '',
+        resultAction,
+        hourly,
+        requestedObjectCount: sourceRows.length,
+        jsonPath,
+        csvPath,
+        rawRowCount: rawRows.length
+      }
+    });
 
     return {
       csvPath,
       jsonPath,
+      db,
       rawRows,
       normalizedRows
     };
@@ -211,6 +310,23 @@ export class SyncService {
     const outputName = hourly ? 'facebook_ads_active_ads_hourly' : 'facebook_ads_active_ads';
     const jsonPath = await writeJson(outputJsonFile(outputName), normalizedRows);
     const csvPath = await writeCsv(outputFile(outputName), normalizedRows, insightColumns);
+    const db = writeInsightBatch({
+      source: hourly ? 'active-ads-hourly' : 'active-ads',
+      level: 'ads',
+      accountIds: accountsResult.ids,
+      rows: normalizedRows,
+      metadata: {
+        datePreset,
+        since: since || '',
+        until: until || '',
+        resultAction,
+        hourly,
+        activeAdCount: activeAds.length,
+        jsonPath,
+        csvPath,
+        rawRowCount: rawRows.length
+      }
+    });
 
     return {
       accounts: accountsResult.accounts,
@@ -218,10 +334,209 @@ export class SyncService {
       insights: {
         csvPath,
         jsonPath,
+        db,
         rawRows,
         normalizedRows
       }
     };
+  }
+
+  async pullTargets({
+    accounts: accountIds = [],
+    level = 'ads',
+    ids = [],
+    datePreset = 'today',
+    since,
+    until,
+    resultAction = '',
+    hourly = true
+  } = {}) {
+    const resourceType = resourceTypeForLevel(level);
+    const accountsResult = accountIds.length
+      ? await this.syncAccounts({ accountIds })
+      : { ids: [], accounts: [] };
+    const targets = ids.map((id) => resourceIdentity({ id, name: id }, resourceType));
+
+    const insights = await this.syncInsights({
+      resources: resourcesForLevel(resourceType, targets),
+      accounts: accountsResult.accounts,
+      level: resourceType,
+      datePreset,
+      since,
+      until,
+      resultAction,
+      hourly,
+      source: hourly ? `targeted-${resourceType}-hourly` : `targeted-${resourceType}`,
+      outputName: hourly ? `facebook_ads_targeted_${resourceType}_hourly` : `facebook_ads_targeted_${resourceType}`
+    });
+
+    return {
+      accounts: accountsResult.accounts,
+      targets,
+      insights
+    };
+  }
+
+  async pullActiveCampaigns({
+    accounts: accountIds = [],
+    datePreset = 'today',
+    since,
+    until,
+    limit = 0,
+    resourceLimit = 0,
+    resultAction = '',
+    hourly = true
+  } = {}) {
+    const accountsResult = await this.syncAccounts({ accountIds });
+    const campaigns = await this.syncResourceType({
+      accountIds: accountsResult.ids,
+      getType: 'campaigns',
+      limitPerAccount: resourceLimit
+    });
+    const activeCampaigns = campaigns
+      .filter(isActive)
+      .map((row) => resourceIdentity(row, 'campaigns'));
+    const selectedCampaigns = activeCampaigns.slice(0, limit || undefined);
+
+    info(`ACTIVE 广告系列：${activeCampaigns.length}`);
+    info(`本次拉取广告系列：${selectedCampaigns.length}`);
+
+    const insights = await this.syncInsights({
+      resources: resourcesForLevel('campaigns', selectedCampaigns),
+      accounts: accountsResult.accounts,
+      level: 'campaigns',
+      datePreset,
+      since,
+      until,
+      resultAction,
+      hourly,
+      source: hourly ? 'active-campaigns-hourly' : 'active-campaigns',
+      outputName: hourly ? 'facebook_ads_active_campaigns_hourly' : 'facebook_ads_active_campaigns',
+      limit: 0
+    });
+
+    return {
+      accounts: accountsResult.accounts,
+      campaigns,
+      activeCampaigns,
+      selectedCampaigns,
+      insights
+    };
+  }
+
+  async evaluateMonitoringPlans({
+    accounts: accountIds = [],
+    resourceLimit = 0,
+    probeLevel = 'ads',
+    probeLimit = 0,
+    datePreset = 'yesterday',
+    since,
+    until,
+    resultAction = ''
+  } = {}) {
+    const accountsResult = await this.syncAccounts({ accountIds });
+    const resources = {};
+
+    for (const getType of ['campaigns', 'adsets', 'ads']) {
+      resources[getType] = await this.syncResourceType({
+        accountIds: accountsResult.ids,
+        getType,
+        limitPerAccount: resourceLimit
+      });
+    }
+
+    const counts = Object.fromEntries(Object.entries(resources).map(([type, rows]) => [
+      type,
+      {
+        total: rows.length,
+        active: rows.filter(isActive).length
+      }
+    ]));
+    const activeCampaigns = resources.campaigns.filter(isActive);
+    const activeAds = resources.ads.filter(isActive);
+    const activeAdsets = resources.adsets.filter(isActive);
+    const probeType = resourceTypeForLevel(probeLevel);
+    const probeCandidates = (resources[probeType] || [])
+      .filter(isActive)
+      .slice(0, probeLimit || 0)
+      .map((row) => resourceIdentity(row, probeType));
+    const rowsById = new Map();
+    const probeErrors = [];
+
+    if (probeCandidates.length) {
+      info(`抽样验证 ${probeCandidates.length} 个 ${probeType}`);
+      const tasks = probeCandidates.map((resource) => this.limit(async () => {
+        try {
+          const rows = await this.client.getAllInsights({
+            id: resource.id,
+            fields: INSIGHT_FIELDS,
+            datePreset,
+            since,
+            until
+          });
+          rowsById.set(resource.id, rows);
+        } catch (error) {
+          rowsById.set(resource.id, []);
+          probeErrors.push({
+            id: resource.id,
+            message: error.message
+          });
+        }
+      }));
+      await Promise.all(tasks);
+    }
+
+    const probeRanking = rankProbeRows(rowsById);
+    const report = {
+      generatedAt: new Date().toISOString(),
+      accounts: {
+        requested: accountIds,
+        resolved: accountsResult.ids,
+        count: accountsResult.ids.length
+      },
+      resourceLimit,
+      counts,
+      feasibility: {
+        targetedAdsOrAdsets: {
+          intervalMinutes: '15-30',
+          callsPerCycle: '等于配置的广告或广告组 ID 数量',
+          activeAds: activeAds.length,
+          activeAdsets: activeAdsets.length,
+          assessment: '适合少量定向对象伪实时监控；不适合把所有 ACTIVE 广告或广告组都放入 15-30 分钟循环。'
+        },
+        activeCampaigns: {
+          intervalMinutes: '30-60',
+          callsPerCycle: activeCampaigns.length,
+          assessment: activeCampaigns.length <= 100
+            ? '当前 ACTIVE 广告系列数量适合全量轮询；建议保留并发限制和 SQLite 覆盖写。'
+            : 'ACTIVE 广告系列数量偏高；建议先限流或分账户分批，再做全量轮询。'
+        }
+      },
+      probe: {
+        level: probeType,
+        datePreset,
+        since: since || '',
+        until: until || '',
+        resultAction,
+        candidates: probeCandidates.map((row) => ({
+          id: row.id,
+          name: row.name || '',
+          account_id: row.account_id || '',
+          campaign_id: row.campaign_id || '',
+          adset_id: row.adset_id || ''
+        })),
+        ranking: probeRanking,
+        errors: probeErrors,
+        recommendedTarget: probeRanking[0] || null
+      }
+    };
+
+    await writeJson(rawFile('sampling_evaluation'), {
+      resources,
+      probeRows: Object.fromEntries(rowsById)
+    });
+    report.jsonPath = await writeJson(outputJsonFile('facebook_ads_sampling_evaluation'), report);
+    return report;
   }
 
   async pull(options = {}) {

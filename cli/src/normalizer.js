@@ -151,6 +151,9 @@ export function normalizeInsight(row, { accountsById = new Map(), resourcesById 
   const resourceId = row.ad_id || row.adset_id || row.campaign_id || row.id;
   const resource = resourcesById.get(String(resourceId || '')) || {};
   const account = accountsById.get(String(row.account_id || resource.account_id || '')) || {};
+  const resourceCampaignId = resource.campaign_id || (resource.__level === 'campaigns' ? resource.id : '');
+  const resourceAdsetId = resource.adset_id || (resource.__level === 'adsets' ? resource.id : '');
+  const resourceAdId = resource.ad_id || (resource.__level === 'ads' ? resource.id : '');
 
   return {
     date_start: row.date_start || '',
@@ -159,11 +162,11 @@ export function normalizeInsight(row, { accountsById = new Map(), resourcesById 
     hour_start: hourStart(row.date_start, row.hourly_stats_aggregated_by_advertiser_time_zone),
     account_id: row.account_id || resource.account_id || '',
     account_name: row.account_name || account.name || '',
-    campaign_id: row.campaign_id || resource.campaign_id || (row.campaign_name ? resource.id : ''),
+    campaign_id: row.campaign_id || resourceCampaignId || '',
     campaign_name: row.campaign_name || '',
-    adset_id: row.adset_id || resource.adset_id || '',
+    adset_id: row.adset_id || resourceAdsetId || '',
     adset_name: row.adset_name || '',
-    ad_id: row.ad_id || (resource.adset_id ? resource.id : ''),
+    ad_id: row.ad_id || resourceAdId || '',
     ad_name: row.ad_name || resource.name || '',
     effective_status: resource.effective_status || row.effective_status || '',
     spend,

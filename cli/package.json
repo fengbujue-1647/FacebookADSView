@@ -4,16 +4,27 @@
   "private": true,
   "type": "module",
   "description": "YinoCloud Facebook ads data sync CLI.",
+  "engines": {
+    "node": ">=24"
+  },
   "bin": {
     "fb-ads": "./src/cli.js"
   },
   "scripts": {
-    "pull": "node src/cli.js pull",
-    "active-ads": "node src/cli.js active-ads",
-    "active-ads-hourly": "node src/cli.js active-ads-hourly",
-    "accounts": "node src/cli.js accounts",
-    "token": "node src/cli.js token",
-    "doctor": "node src/cli.js doctor"
+    "pull": "node --disable-warning=ExperimentalWarning src/cli.js pull",
+    "active-ads": "node --disable-warning=ExperimentalWarning src/cli.js active-ads",
+    "active-ads-hourly": "node --disable-warning=ExperimentalWarning src/cli.js active-ads-hourly",
+    "active-campaigns": "node --disable-warning=ExperimentalWarning src/cli.js active-campaigns",
+    "targeted-monitor": "node --disable-warning=ExperimentalWarning src/cli.js targeted-monitor",
+    "sampling-config": "node --disable-warning=ExperimentalWarning src/cli.js sampling-config",
+    "sampling-evaluate": "node --disable-warning=ExperimentalWarning src/cli.js sampling-evaluate",
+    "sampling-run": "node --disable-warning=ExperimentalWarning src/cli.js sampling-run",
+    "sampling-loop": "node --disable-warning=ExperimentalWarning src/cli.js sampling-loop",
+    "db-init": "node --disable-warning=ExperimentalWarning src/cli.js db-init",
+    "db-import-output": "node --disable-warning=ExperimentalWarning src/cli.js db-import-output",
+    "accounts": "node --disable-warning=ExperimentalWarning src/cli.js accounts",
+    "token": "node --disable-warning=ExperimentalWarning src/cli.js token",
+    "doctor": "node --disable-warning=ExperimentalWarning src/cli.js doctor"
   },
   "dependencies": {
     "commander": "^14.0.2",
