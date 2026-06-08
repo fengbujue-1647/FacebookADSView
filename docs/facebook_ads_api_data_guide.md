@@ -1,8 +1,9 @@
 # Facebook 广告数据 API 接入信息文档
 
-> 文档整理日期：2026-06-04  
-> 主要来源：YinoLink Apifox 开放 API 网关、YinoCloud API Key 操作说明、Meta Marketing API 官方字段说明入口。  
+> 文档整理日期：2026-06-05
+> 主要来源：YinoLink Apifox 开放 API 网关、YinoCloud API Key 操作说明、Meta Marketing API 官方字段说明入口。
 > 说明：飞书 Wiki 待确认内容已由用户提供的 `YinoCloud——API Key操作说明.docx` 补全。
+> 2026-06-05 补充：已把实时监控压测、Apifox 四个相关接口和 Meta Insights breakdowns 结论沉淀到本地文档，后续优先查本文件和 `docs/yinolink_api_quick_reference.md`。
 
 ## 1. 目标
 
@@ -154,6 +155,7 @@ https://yinocloud.yinolink.com/api_manage
 | 获取Facebook广告3个层级Insights数据 | `/api/v1/meta_api/insights` | 获取广告系列、广告组、广告指标 |
 | 获取Facebook广告3个层级Info数据 | `/api/v1/meta_api/info` | 获取广告系列、广告组、广告静态信息 |
 | 获取Facebook广告3个层级列表 | `/api/v1/meta_api/resource` | 获取广告系列、广告组、广告列表 |
+| 获取Facebook拒登广告账户报告 | `/api/v1/fb/larr_api` | 获取 LARR 拒登广告账户报告，非投放时段监控主链路 |
 
 如果还需要在系统内处理充值和清零，需要额外申请以下服务：
 
@@ -356,7 +358,9 @@ Query 参数：
 | after | 否 | string | 下一页游标 |
 | before | 否 | string | 上一页游标 |
 
-注意：Apifox 文档说明 effective_status 因 FB bug 返回数据有问题，暂时可忽略此筛选项。生产实现中建议先全量拉取，再在本地按 effective_status/status 过滤。
+注意：Apifox 早期文档曾说明 `effective_status` 因 FB bug 返回数据有问题。2026-06-05 实测 `get_type=ads&effective_status=["ACTIVE"]` 可直接返回 ACTIVE 广告列表：账户 `8462513793771963` 首页返回 256 条 ACTIVE ads，耗时约 0.71 秒。生产实现建议优先使用服务端筛选，同时保留本地按 `effective_status/status` 二次过滤，避免接口行为回退。
+
+补充：2026-06-05 实测额外传 `adset_id=<adset_id>` 或 `campaign_id=<campaign_id>` 时，YinoLink 仍返回账户下 ACTIVE ads 列表，当前不能依赖这些未文档化参数做服务端过滤。`resource` 接口也不返回 spend、impressions、clicks 或 hourly breakdown 等时段指标，不能直接作为“整个 adset 的时段数据”接口。
 
 返回结构：
 
@@ -399,6 +403,14 @@ curl 示例：
 ```bash
 curl --location --globoff \
   'https://yl-open-api-lfnsrvbmgm.ap-northeast-1.fcapp.run/api/v1/meta_api/resource?account_id=<account_id>&get_type=campaigns' \
+  --header 'Authorization: Bearer <token>'
+```
+
+curl 示例：直接获取 ACTIVE 广告列表
+
+```bash
+curl --location --globoff \
+  'https://yl-open-api-lfnsrvbmgm.ap-northeast-1.fcapp.run/api/v1/meta_api/resource?account_id=<account_id>&get_type=ads&effective_status=["ACTIVE"]' \
   --header 'Authorization: Bearer <token>'
 ```
 
@@ -565,6 +577,7 @@ Query 参数：
 | id | 是 | string | 广告系列 ID、广告组 ID 或广告 ID |
 | fields | 是 | string | 需要返回字段，逗号分隔 |
 | breakdowns | 否 | string | 按维度拆分，如 age,gender |
+| level | 否 | string | Meta 原生支持 campaign/adset/ad 等层级；YinoLink 当前透传效果需实测确认 |
 | action_attribution_windows | 否 | string | 归因窗口，如 1d_click,7d_click,1d_view |
 | action_breakdowns | 否 | array/string | 专门拆分 actions 的维度，常用 action_type |
 | date_preset | 否 | string | 预定义日期，如 today、yesterday、last_7d |
@@ -579,6 +592,9 @@ Query 参数：
 2. time_range 格式：`{"since":"YYYY-MM-DD","until":"YYYY-MM-DD"}`。
 3. time_ranges 格式：`[{"since":"2025-11-01","until":"2025-11-01"},{"since":"2025-11-02","until":"2025-11-02"}]`。
 4. breakdowns 组合限制较多，需要按 Meta 官方 Combined Breakdowns 规则验证。
+5. `hourly_stats_aggregated_by_advertiser_time_zone` 返回固定小时桶，不能切成 15 分钟或 30 分钟。
+6. 2026-06-05 实测：YinoLink 在 `time_range` 跨多天且带 hourly breakdown 时，返回的是 24 个“小时-of-day”聚合桶，不是逐日逐小时明细；监控单日小时图优先用 `date_preset=today/yesterday`。
+7. 2026-06-05 实测：对 `campaign_id/adset_id` 传 `level=ad` 时，YinoLink 仍返回 campaign/adset 聚合行，不返回子级 `ad_id` 明细。当前不能依赖“一次请求下载整个 adset 下所有 ad 指标”。
 
 curl 示例：获取广告系列近 7 天核心指标
 
@@ -597,6 +613,19 @@ curl --location --globoff \
 ```
 
 生产代码中必须对 JSON 参数做 URL 编码。
+
+#### YinoLink level 实测结论
+
+Meta 原生 Insights API 通常支持在 account、campaign、adset 等对象上加 `level=ad` 获取下级广告明细。但 YinoLink 当前网关行为与原生 Meta 不完全一致，2026-06-05 实测如下：
+
+| 请求方式 | 返回结果 | 结论 |
+| --- | --- | --- |
+| `id=<ad_id>` | 返回 24 个小时桶，并包含 `ad_id/ad_name/adset_id/campaign_id` | 可用于广告级监控 |
+| `id=<campaign_id>` | 返回 24 个 campaign 聚合小时桶，不包含 `ad_id` | 只能做 campaign 级汇总 |
+| `id=<campaign_id>&level=ad` | 仍返回 campaign 聚合小时桶，不包含 `ad_id` | 当前不能用于 campaign 下广告级批量下载 |
+| `id=<adset_id>&level=ad` | 返回 adset 聚合小时桶，不包含 `ad_id` | 当前不能用于 adset 下广告级批量下载 |
+
+因此当前生产策略仍是：用 `/meta_api/resource` 维护 ACTIVE ad 维表，再按 `ad_id` 拉 `/meta_api/insights`；若 YinoLink 后续确认支持 `level=ad`、`filtering`、`limit` 或异步报表，再改成按 account/campaign/adset 批量拉取。
 
 ### 6.2 核心指标字段映射
 
@@ -964,8 +993,10 @@ while after exists and after not seen before
 
 1. 不要对每个广告 ID 无限制并发请求 insights。
 2. 建议按账户维度排队，限制每账户并发。
-3. 若资源量大，应优先按 campaign/adset 拉汇总，再按异常或重点广告拉 ad 级明细。
-4. 若 YinoLink 后续支持 account + level 方式拉 insights，应优先使用该方式减少 API 次数。
+3. 2026-06-05 实测 YinoLink 存在 `client QPS limit exceeded (limit: 5/s)`，裸并发 10 会出现 429；并发 6 连续 20 轮全部最终成功，但出现 14 次 429 和 7 次 30 秒 Abort。
+4. 建议生产配置从并发 4-5、QPS 不超过 5/s 开始，429/Abort 立即重新入队并记录。
+5. 若资源量大，应优先按 campaign/adset 拉汇总，再按异常或重点广告拉 ad 级明细。
+6. 若 YinoLink 后续支持 account/campaign/adset + `level=ad` 方式拉 insights，应优先使用该方式减少 API 次数。
 
 ## 10. 监控看板建议字段
 
@@ -1027,7 +1058,7 @@ while after exists and after not seen before
 以下信息需要业务或接口提供方进一步确认，确认后文档可继续补全：
 
 1. YinoLink 的 `/api/v1/meta_api/info` 是否支持 Meta Graph 字段展开，例如 `creative{title,body,image_url}`。
-2. YinoLink 的 `/api/v1/meta_api/insights` 是否支持未在 Apifox 参数表中列出的 Meta 参数，例如 `level`、`time_increment`、`filtering`、`limit`。
+2. YinoLink 的 `/api/v1/meta_api/insights` 是否真正支持 Meta 子级明细参数，例如 `level=ad`、`time_increment`、`filtering`、`limit`。2026-06-05 初测可传 `level` 但未返回子级 `ad_id` 明细，需接口提供方确认。
 3. `action_breakdowns` 在 YinoLink 中应传 `action_breakdowns=action_type`、逗号字符串，还是数组格式。
 4. 预算字段 daily_budget/lifetime_budget/budget_remaining 通过 YinoLink 返回时的单位。
 5. 业务看板中的“成效”最终口径：购买、加购、发起结账、链接点击、落地页浏览，还是按广告目标自动映射。
@@ -1047,8 +1078,10 @@ while after exists and after not seen before
 8. 获取广告资源列表：`https://s.apifox.cn/c385a75f-e176-42f5-899f-bf2ea59ca700/398488189e0`
 9. 获取广告 Insights：`https://s.apifox.cn/c385a75f-e176-42f5-899f-bf2ea59ca700/392142609e0`
 10. 获取广告 Info：`https://s.apifox.cn/c385a75f-e176-42f5-899f-bf2ea59ca700/392646820e0`
-11. Meta Ads Insights Breakdowns：`https://developers.facebook.com/docs/marketing-api/insights/breakdowns/`
-12. Meta Ad Account Reference：`https://developers.facebook.com/docs/marketing-api/reference/ad-account/`
-13. Meta Campaign Reference：`https://developers.facebook.com/docs/marketing-api/reference/ad-campaign-group/`
-14. Meta AdSet Reference：`https://developers.facebook.com/docs/marketing-api/reference/ad-campaign/`
-15. Meta Ads Reference：`https://developers.facebook.com/docs/marketing-api/reference/ad-account/ads/`
+11. 获取 Facebook 拒登广告账户报告 LARR：`https://s.apifox.cn/c385a75f-e176-42f5-899f-bf2ea59ca700/444065949e0`
+12. Meta Ads Insights Breakdowns：`https://developers.facebook.com/docs/marketing-api/insights/breakdowns/`
+13. Meta Ads Insights Breakdowns alternate：`https://developers.facebook.com/documentation/ads-commerce/marketing-api/insights/breakdowns`
+14. Meta Ad Account Reference：`https://developers.facebook.com/docs/marketing-api/reference/ad-account/`
+15. Meta Campaign Reference：`https://developers.facebook.com/docs/marketing-api/reference/ad-campaign-group/`
+16. Meta AdSet Reference：`https://developers.facebook.com/docs/marketing-api/reference/ad-campaign/`
+17. Meta Ads Reference：`https://developers.facebook.com/docs/marketing-api/reference/ad-account/ads/`

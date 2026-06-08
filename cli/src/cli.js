@@ -3,12 +3,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Command } from 'commander';
 import { config, assertCredentials } from './config.js';
-import { info } from './logger.js';
+import { info, warn } from './logger.js';
 import { getToken, getTokenStatus } from './tokenManager.js';
 import { SyncService } from './syncService.js';
 import { readMonitoredAccountIds, readMonitoredAccounts, monitoredAccountsFile } from './accountSettings.js';
 import { readSamplingSettings, writeSamplingSettings, samplingSettingsFile } from './samplingSettings.js';
-import { initDatabase, writeInsightBatch } from './database.js';
+import { initDatabase, writeInsightBatch, writeMonitorRun } from './database.js';
 import { latestOutputJson } from './storage.js';
 
 function parseAccounts(value) {
@@ -19,6 +19,30 @@ function parseAccounts(value) {
 function parseInteger(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function addMinutes(date, minutes) {
+  return new Date(date.getTime() + minutes * 60_000);
+}
+
+function parseIdList(value) {
+  return parseAccounts(value);
+}
+
+function logQueuedInsightResult(result) {
+  info(`队列任务：${result.queue.stats.total} 个`);
+  info(`成功/失败：${result.queue.stats.success}/${result.queue.stats.failed}`);
+  info(`重试次数：${result.queue.stats.retries}`);
+  info(`返回行数：${result.normalizedRows.length}`);
+  info(`JSON 输出：${result.jsonPath}`);
+  info(`CSV 输出：${result.csvPath}`);
+  logDbResult(result.db);
+}
+
+function summarizeErrors(taskRecords = []) {
+  const failed = taskRecords.filter((record) => record.status === 'failed');
+  if (!failed.length) return '';
+  return failed.slice(0, 3).map((record) => `${record.objectId}:${record.code}:${record.error}`).join(' | ');
 }
 
 async function resolveAccountIds(options = {}) {
@@ -161,6 +185,333 @@ async function runSamplingCycle(options = {}) {
   return results;
 }
 
+async function runAdMonitorCycle({ service, settings, options = {} }) {
+  const monitor = settings.adMonitor;
+  if (!monitor.enabled && !options.force) {
+    info('List 2 广告监控未启用，跳过');
+    return null;
+  }
+
+  const started = new Date();
+  const explicitIds = parseIdList(options.ids);
+  let ids = explicitIds.length ? explicitIds : monitor.adIds;
+  let resources = [];
+  let status = 'success';
+  let result = null;
+  let errorSummary = '';
+
+  try {
+    if (!ids.length) {
+      throw new Error('List 2 缺少 ad_id，请先运行 monitor-bootstrap 或在设置页保存广告 ID');
+    }
+
+    const accountIds = await resolveAccountIds(options);
+    if (accountIds.length) {
+      resources = await service.syncResourceType({
+        accountIds,
+        getType: 'ads',
+        activeOnly: true
+      });
+      const activeIds = new Set(resources.map((row) => String(row.id || row.ad_id)));
+      ids = ids.filter((id) => activeIds.has(String(id)));
+      if (!ids.length) {
+        throw new Error('List 2 中没有仍为 ACTIVE 的广告');
+      }
+    }
+
+    result = await service.pullAdInsightsTool({
+      ids,
+      accounts: accountIds,
+      resources,
+      datePreset: options.datePreset || monitor.datePreset || undefined,
+      since: options.since,
+      until: options.until,
+      resultAction: options.resultAction || monitor.resultAction,
+      hourly: options.daily ? false : monitor.hourly,
+      concurrency: parseInteger(options.concurrency) || monitor.concurrency,
+      qps: parseInteger(options.qps) || monitor.qps,
+      timeoutMs: parseInteger(options.timeoutMs) || monitor.requestTimeoutMs,
+      maxAttempts: parseInteger(options.maxAttempts) || monitor.maxAttempts
+    });
+    if (result.queue.stats.failed > 0) {
+      status = 'partial';
+      errorSummary = summarizeErrors(result.queue.taskRecords);
+    }
+  } catch (error) {
+    status = 'failed';
+    errorSummary = error.message;
+    throw error;
+  } finally {
+    const completed = new Date();
+    const nextRunAt = addMinutes(completed, monitor.intervalMinutes);
+    const stats = result?.queue?.stats || {};
+    writeMonitorRun({
+      listType: 'ads',
+      status,
+      startedAt: started.toISOString(),
+      completedAt: completed.toISOString(),
+      nextRunAt: nextRunAt.toISOString(),
+      requestedCount: ids.length,
+      successCount: stats.success || 0,
+      failedCount: stats.failed || (status === 'failed' ? ids.length : 0),
+      retryCount: stats.retries || 0,
+      durationMs: completed.getTime() - started.getTime(),
+      errorSummary,
+      metadata: {
+        runId: result?.runId || '',
+        rowCount: result?.normalizedRows?.length || 0,
+        slices: result?.slices || [],
+        source: 'monitor-run:ads'
+      }
+    });
+  }
+
+  return result;
+}
+
+async function runCampaignMonitorCycle({ service, settings, options = {} }) {
+  const monitor = settings.campaignMonitor;
+  if (!monitor.enabled && !options.force) {
+    info('List 1 广告系列监控未启用，跳过');
+    return null;
+  }
+
+  const started = new Date();
+  const explicitIds = parseIdList(options.ids);
+  let campaignIds = explicitIds.length ? explicitIds : monitor.campaignIds;
+  let activeCampaigns = [];
+  let status = 'success';
+  let result = null;
+  let errorSummary = '';
+
+  try {
+    const resolvedAccounts = monitor.accountIds.length ? monitor.accountIds : await resolveAccountIds(options);
+    if (!resolvedAccounts.length && monitor.autoActiveCampaigns) {
+      throw new Error('List 1 启用自动解析 ACTIVE campaigns 时必须配置账户');
+    }
+
+    if (resolvedAccounts.length) {
+      activeCampaigns = await service.syncResourceType({
+        accountIds: resolvedAccounts,
+        getType: 'campaigns',
+        activeOnly: true
+      });
+      const activeIds = new Set(activeCampaigns.map((row) => String(row.id || row.campaign_id)));
+      const manualActiveIds = campaignIds.filter((id) => activeIds.has(String(id)));
+      campaignIds = monitor.autoActiveCampaigns
+        ? [...new Set([...activeIds, ...manualActiveIds])]
+        : manualActiveIds;
+    }
+
+    if (!campaignIds.length) {
+      throw new Error('List 1 没有可运行的 ACTIVE campaign');
+    }
+
+    result = await service.pullCampaignInsightsTool({
+      ids: campaignIds,
+      accounts: resolvedAccounts,
+      resources: activeCampaigns,
+      datePreset: options.datePreset || monitor.datePreset || undefined,
+      since: options.since,
+      until: options.until,
+      resultAction: options.resultAction || monitor.resultAction,
+      hourly: options.daily ? false : monitor.hourly,
+      concurrency: parseInteger(options.concurrency) || 20,
+      qps: parseInteger(options.qps) || 5,
+      timeoutMs: parseInteger(options.timeoutMs) || 7000,
+      maxAttempts: parseInteger(options.maxAttempts) || 8
+    });
+    if (result.queue.stats.failed > 0) {
+      status = 'partial';
+      errorSummary = summarizeErrors(result.queue.taskRecords);
+    }
+  } catch (error) {
+    status = 'failed';
+    errorSummary = error.message;
+    throw error;
+  } finally {
+    const completed = new Date();
+    const nextRunAt = addMinutes(completed, monitor.intervalMinutes);
+    const stats = result?.queue?.stats || {};
+    writeMonitorRun({
+      listType: 'campaigns',
+      status,
+      startedAt: started.toISOString(),
+      completedAt: completed.toISOString(),
+      nextRunAt: nextRunAt.toISOString(),
+      requestedCount: campaignIds.length,
+      successCount: stats.success || 0,
+      failedCount: stats.failed || (status === 'failed' ? campaignIds.length : 0),
+      retryCount: stats.retries || 0,
+      durationMs: completed.getTime() - started.getTime(),
+      errorSummary,
+      metadata: {
+        runId: result?.runId || '',
+        rowCount: result?.normalizedRows?.length || 0,
+        slices: result?.slices || [],
+        autoActiveCampaigns: monitor.autoActiveCampaigns,
+        source: 'monitor-run:campaigns'
+      }
+    });
+  }
+
+  return result;
+}
+
+async function runMonitorCycle(options = {}) {
+  assertCredentials();
+  assertDateRange(options);
+  const mode = options.mode || 'all';
+  if (!['all', 'campaigns', 'ads'].includes(mode)) {
+    throw new Error('--mode 只能是 all、campaigns 或 ads');
+  }
+
+  const settings = await readSamplingSettings();
+  const service = new SyncService();
+  const results = {};
+  const errors = [];
+
+  if (mode === 'all' || mode === 'campaigns') {
+    try {
+      results.campaigns = await runCampaignMonitorCycle({ service, settings, options });
+    } catch (error) {
+      errors.push(`campaigns: ${error.message}`);
+      warn(`List 1 运行失败：${error.message}`);
+    }
+  }
+  if (mode === 'all' || mode === 'ads') {
+    try {
+      results.ads = await runAdMonitorCycle({ service, settings, options });
+    } catch (error) {
+      errors.push(`ads: ${error.message}`);
+      warn(`List 2 运行失败：${error.message}`);
+    }
+  }
+
+  if (errors.length) {
+    throw new Error(errors.join('；'));
+  }
+
+  return results;
+}
+
+async function bootstrapMonitorSettings(options = {}) {
+  assertCredentials();
+  const service = new SyncService();
+  const accountIds = await resolveAccountIds(options);
+  if (!accountIds.length) {
+    throw new Error('初始化监控列表需要至少一个监控账户');
+  }
+
+  const resourceResult = await service.pullResourceList({
+    accounts: accountIds,
+    getType: 'all',
+    activeOnly: true
+  });
+  const activeAds = resourceResult.resources.ads || [];
+  const activeCampaigns = resourceResult.resources.campaigns || [];
+  let selectedAds = activeAds.slice(0, 50).map((row) => String(row.id || row.ad_id));
+  let selectedCampaigns = activeCampaigns.slice(0, 5).map((row) => String(row.id || row.campaign_id));
+
+  if (selectedAds.length) {
+    const adRanking = await service.pullAdInsightsTool({
+      ids: selectedAds,
+      accounts: accountIds,
+      resources: activeAds,
+      datePreset: options.datePreset || 'yesterday',
+      hourly: false,
+      concurrency: parseInteger(options.concurrency) || 20,
+      qps: parseInteger(options.qps) || 5,
+      timeoutMs: parseInteger(options.timeoutMs) || 7000,
+      maxAttempts: parseInteger(options.maxAttempts) || 8
+    });
+    const spendByAd = new Map();
+    for (const row of adRanking.normalizedRows) {
+      const id = String(row.ad_id || '');
+      spendByAd.set(id, (spendByAd.get(id) || 0) + Number(row.spend || 0));
+    }
+    selectedAds = selectedAds
+      .sort((a, b) => (spendByAd.get(b) || 0) - (spendByAd.get(a) || 0))
+      .slice(0, 50);
+  }
+
+  if (activeCampaigns.length) {
+    const campaignRanking = await service.pullCampaignInsightsTool({
+      ids: activeCampaigns.map((row) => String(row.id || row.campaign_id)).slice(0, 100),
+      accounts: accountIds,
+      resources: activeCampaigns,
+      datePreset: options.datePreset || 'yesterday',
+      hourly: false,
+      concurrency: parseInteger(options.concurrency) || 20,
+      qps: parseInteger(options.qps) || 5,
+      timeoutMs: parseInteger(options.timeoutMs) || 7000,
+      maxAttempts: parseInteger(options.maxAttempts) || 8
+    });
+    const spendByCampaign = new Map();
+    for (const row of campaignRanking.normalizedRows) {
+      const id = String(row.campaign_id || '');
+      spendByCampaign.set(id, (spendByCampaign.get(id) || 0) + Number(row.spend || 0));
+    }
+    selectedCampaigns = activeCampaigns
+      .map((row) => String(row.id || row.campaign_id))
+      .sort((a, b) => (spendByCampaign.get(b) || 0) - (spendByCampaign.get(a) || 0))
+      .slice(0, 5);
+  }
+
+  const settings = await readSamplingSettings();
+  settings.campaignMonitor = {
+    ...settings.campaignMonitor,
+    enabled: true,
+    intervalMinutes: 180,
+    accountIds,
+    autoActiveCampaigns: false,
+    campaignIds: selectedCampaigns,
+    datePreset: '',
+    hourly: true
+  };
+  settings.adMonitor = {
+    ...settings.adMonitor,
+    enabled: true,
+    intervalMinutes: 60,
+    adIds: selectedAds,
+    datePreset: '',
+    hourly: true,
+    concurrency: 20,
+    qps: 5,
+    requestTimeoutMs: 7000,
+    maxAttempts: 8
+  };
+  settings.targeted = {
+    ...settings.targeted,
+    enabled: true,
+    level: 'ads',
+    ids: selectedAds,
+    intervalMinutes: 15,
+    datePreset: 'today',
+    hourly: true
+  };
+  settings.activeCampaigns = {
+    ...settings.activeCampaigns,
+    enabled: true,
+    intervalMinutes: 180,
+    limit: selectedCampaigns.length,
+    datePreset: 'today',
+    hourly: true
+  };
+
+  const written = await writeSamplingSettings(settings);
+  info(`List 2 已写入广告：${selectedAds.length}`);
+  info(`List 1 已写入广告系列：${selectedCampaigns.length}`);
+  info(`配置文件：${samplingSettingsFile}`);
+  return {
+    settings: written,
+    selectedAds,
+    selectedCampaigns,
+    activeAds,
+    activeCampaigns
+  };
+}
+
 function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -190,6 +541,11 @@ program
     console.log(`monitoredAccountsFile: ${monitoredAccountsFile}`);
     const samplingSettings = await readSamplingSettings();
     console.log(`samplingSettingsFile: ${samplingSettingsFile}`);
+    console.log(`campaignMonitorIds: ${samplingSettings.campaignMonitor.campaignIds.length}`);
+    console.log(`campaignMonitorAccounts: ${samplingSettings.campaignMonitor.accountIds.length}`);
+    console.log(`campaignMonitorInterval: ${samplingSettings.campaignMonitor.intervalMinutes}m`);
+    console.log(`adMonitorIds: ${samplingSettings.adMonitor.adIds.length}`);
+    console.log(`adMonitorInterval: ${samplingSettings.adMonitor.intervalMinutes}m`);
     console.log(`targetedMonitorIds: ${samplingSettings.targeted.ids.length}`);
     console.log(`activeCampaignInterval: ${samplingSettings.activeCampaigns.intervalMinutes}m`);
     const token = await getTokenStatus();
@@ -275,6 +631,194 @@ program
     const service = new SyncService();
     const result = await service.syncAccounts({ accountIds: await resolveAccountIds(options) });
     info(`完成：${result.accounts.length} 个账户详情`);
+  });
+
+program
+  .command('resource-list')
+  .description('Tool 2：列出账户下 campaigns/adsets/ads 资源并写入 SQLite 维表')
+  .option('--accounts <ids>', '只扫描指定账户，多个用英文逗号分隔')
+  .option('--all-accounts', '忽略监控账户设置，扫描全部账户')
+  .option('--type <type>', '资源类型：campaigns/adsets/ads/all', 'all')
+  .option('--active', '只取 ACTIVE，并做本地二次过滤')
+  .option('--limit <number>', '限制每个账户每类资源数量，验证时可用')
+  .action(async (options) => {
+    assertCredentials();
+    if (!['campaigns', 'adsets', 'ads', 'all'].includes(options.type)) {
+      throw new Error('--type 只能是 campaigns、adsets、ads 或 all');
+    }
+    const service = new SyncService();
+    const result = await service.pullResourceList({
+      accounts: await resolveAccountIds(options),
+      getType: options.type,
+      activeOnly: Boolean(options.active),
+      limit: parseInteger(options.limit)
+    });
+    info(`账户：${result.accountIds.length}`);
+    for (const [type, rows] of Object.entries(result.resources)) {
+      info(`${type}：${rows.length}`);
+    }
+  });
+
+program
+  .command('ad-insights')
+  .description('Tool 1：按 1-50 个 ad_id 拉广告级 hourly insights，队列重试并写入 SQLite/JSON/CSV')
+  .requiredOption('--ids <ids>', 'ad_id 列表，多个用英文逗号/换行分隔')
+  .option('--accounts <ids>', '用于补充 ACTIVE 维表和账户名，多个用英文逗号分隔')
+  .option('--date-preset <preset>', 'Meta 预设日期；不传则按 SQLite 自动增量/补近 7 天')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--result-action <actionType>', '指定“成效”使用的 action_type')
+  .option('--daily', '拉日级 Insights，不使用小时 breakdown')
+  .option('--concurrency <number>', '队列并发，默认 20')
+  .option('--qps <number>', '请求启动速率，默认 5/s')
+  .option('--timeout-ms <number>', '单请求 Abort 超时，默认 7000')
+  .option('--max-attempts <number>', '429/Abort 最大尝试次数，默认 8')
+  .action(async (options) => {
+    assertCredentials();
+    assertDateRange(options);
+    const service = new SyncService();
+    const result = await service.pullAdInsightsTool({
+      ids: parseIdList(options.ids),
+      accounts: parseAccounts(options.accounts),
+      datePreset: options.datePreset,
+      since: options.since,
+      until: options.until,
+      resultAction: options.resultAction || '',
+      hourly: !options.daily,
+      concurrency: parseInteger(options.concurrency) || 20,
+      qps: parseInteger(options.qps) || 5,
+      timeoutMs: parseInteger(options.timeoutMs) || 7000,
+      maxAttempts: parseInteger(options.maxAttempts) || 8
+    });
+    logQueuedInsightResult(result);
+  });
+
+program
+  .command('campaign-insights')
+  .description('Tool 3：按 campaign_id 列表拉 campaign 级聚合 hourly insights 并覆盖写入 SQLite')
+  .requiredOption('--ids <ids>', 'campaign_id 列表，多个用英文逗号/换行分隔')
+  .option('--accounts <ids>', '用于补充 ACTIVE 维表和账户名，多个用英文逗号分隔')
+  .option('--date-preset <preset>', 'Meta 预设日期；不传则按 SQLite 自动增量/补近 7 天')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--result-action <actionType>', '指定“成效”使用的 action_type')
+  .option('--daily', '拉日级 Insights，不使用小时 breakdown')
+  .option('--concurrency <number>', '队列并发，默认 20')
+  .option('--qps <number>', '请求启动速率，默认 5/s')
+  .option('--timeout-ms <number>', '单请求 Abort 超时，默认 7000')
+  .option('--max-attempts <number>', '429/Abort 最大尝试次数，默认 8')
+  .action(async (options) => {
+    assertCredentials();
+    assertDateRange(options);
+    const service = new SyncService();
+    const result = await service.pullCampaignInsightsTool({
+      ids: parseIdList(options.ids),
+      accounts: parseAccounts(options.accounts),
+      datePreset: options.datePreset,
+      since: options.since,
+      until: options.until,
+      resultAction: options.resultAction || '',
+      hourly: !options.daily,
+      concurrency: parseInteger(options.concurrency) || 20,
+      qps: parseInteger(options.qps) || 5,
+      timeoutMs: parseInteger(options.timeoutMs) || 7000,
+      maxAttempts: parseInteger(options.maxAttempts) || 8
+    });
+    logQueuedInsightResult(result);
+  });
+
+program
+  .command('monitor-bootstrap')
+  .description('初始化 List 1/List 2：从监控账户挑选 ACTIVE ads/campaigns 写入本地配置')
+  .option('--accounts <ids>', '覆盖监控账户，多个用英文逗号分隔')
+  .option('--all-accounts', '忽略监控账户设置，扫描全部账户')
+  .option('--date-preset <preset>', '用于 spend 排名的日期，默认 yesterday')
+  .option('--concurrency <number>', '队列并发，默认 20')
+  .option('--qps <number>', '请求启动速率，默认 5/s')
+  .option('--timeout-ms <number>', '单请求 Abort 超时，默认 7000')
+  .option('--max-attempts <number>', '429/Abort 最大尝试次数，默认 8')
+  .action(async (options) => {
+    const result = await bootstrapMonitorSettings(options);
+    info(`ACTIVE 广告候选：${result.activeAds.length}`);
+    info(`ACTIVE 广告系列候选：${result.activeCampaigns.length}`);
+  });
+
+program
+  .command('monitor-run')
+  .description('按 List 1/List 2 监控配置执行一次')
+  .option('--mode <mode>', 'all/campaigns/ads', 'all')
+  .option('--accounts <ids>', '覆盖账户，多个用英文逗号分隔')
+  .option('--all-accounts', '忽略监控账户设置，扫描全部账户')
+  .option('--ids <ids>', '覆盖当前 mode 的对象 ID')
+  .option('--date-preset <preset>', '覆盖日期预设；不传则自动增量/缺口补近 7 天')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--result-action <actionType>', '覆盖成效 action_type')
+  .option('--daily', '拉日级 Insights，不使用小时 breakdown')
+  .option('--concurrency <number>', '队列并发')
+  .option('--qps <number>', '请求启动速率')
+  .option('--timeout-ms <number>', '单请求 Abort 超时')
+  .option('--max-attempts <number>', '最大尝试次数')
+  .option('--force', '即使配置未启用也执行')
+  .action(async (options) => {
+    const result = await runMonitorCycle(options);
+    if (result.campaigns) {
+      info('List 1 广告系列监控完成');
+      logQueuedInsightResult(result.campaigns);
+    }
+    if (result.ads) {
+      info('List 2 广告监控完成');
+      logQueuedInsightResult(result.ads);
+    }
+  });
+
+program
+  .command('monitor-loop')
+  .description('按 List 1/List 2 的 180/60 分钟频率循环运行')
+  .option('--mode <mode>', 'all/campaigns/ads', 'all')
+  .option('--accounts <ids>', '覆盖账户，多个用英文逗号分隔')
+  .option('--all-accounts', '忽略监控账户设置，扫描全部账户')
+  .option('--max-cycles <number>', '最多执行多少个循环；0 表示一直运行', '0')
+  .option('--force', '即使配置未启用也执行')
+  .action(async (options) => {
+    assertCredentials();
+    const maxCycles = parseInteger(options.maxCycles);
+    let cycles = 0;
+    let nextCampaignAt = 0;
+    let nextAdsAt = 0;
+
+    while (!maxCycles || cycles < maxCycles) {
+      const settings = await readSamplingSettings();
+      const now = Date.now();
+      let ran = false;
+
+      if ((options.mode === 'all' || options.mode === 'campaigns') && now >= nextCampaignAt) {
+        await runMonitorCycle({ ...options, mode: 'campaigns' });
+        nextCampaignAt = Date.now() + settings.campaignMonitor.intervalMinutes * 60_000;
+        ran = true;
+      }
+
+      if ((options.mode === 'all' || options.mode === 'ads') && now >= nextAdsAt) {
+        await runMonitorCycle({ ...options, mode: 'ads' });
+        nextAdsAt = Date.now() + settings.adMonitor.intervalMinutes * 60_000;
+        ran = true;
+      }
+
+      if (ran) {
+        cycles += 1;
+      }
+      if (maxCycles && cycles >= maxCycles) {
+        break;
+      }
+
+      const waitUntil = Math.min(
+        (options.mode === 'all' || options.mode === 'campaigns') ? nextCampaignAt : Number.POSITIVE_INFINITY,
+        (options.mode === 'all' || options.mode === 'ads') ? nextAdsAt : Number.POSITIVE_INFINITY
+      );
+      const waitMs = Math.max(5_000, waitUntil - Date.now());
+      info(`等待 ${Math.round(waitMs / 1000)} 秒后继续`);
+      await sleep(waitMs);
+    }
   });
 
 program

@@ -1,10 +1,13 @@
 import pLimit from 'p-limit';
+import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 import { YinoClient } from './yinoClient.js';
 import { info } from './logger.js';
 import { normalizeInsight, insightColumns } from './normalizer.js';
 import { outputFile, outputJsonFile, rawFile, writeCsv, writeJson } from './storage.js';
-import { writeInsightBatch } from './database.js';
+import { getInsightCoverage, writeApiTaskRuns, writeInsightBatch, writeResources } from './database.js';
+import { runTaskQueue } from './taskQueue.js';
+import { API_FALLBACK_TIME_ZONE, dateRangeDays, normalizeTimeZone, recentSevenDays } from './time.js';
 
 const ACCOUNT_FIELDS = [
   'account_id',
@@ -107,6 +110,43 @@ function rankProbeRows(rowsById) {
     .sort((a, b) => (b.impressions - a.impressions) || (b.spend - a.spend));
 }
 
+function normalizeObjectIds(ids = [], { min = 1, max = 50, label = 'ID' } = {}) {
+  const normalized = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
+  if (normalized.length < min || normalized.length > max) {
+    throw new Error(`${label} 数量必须在 ${min}-${max} 个之间，当前 ${normalized.length} 个`);
+  }
+  return normalized;
+}
+
+function localActiveFilter(rows, activeOnly) {
+  return activeOnly ? rows.filter(isActive) : rows;
+}
+
+function sourceTimeZoneFor(resource, accountsById) {
+  const accountId = String(resource?.account_id || '').trim();
+  const account = accountId ? accountsById.get(accountId) : null;
+  if (account?.timezone_name) {
+    return normalizeTimeZone(account.timezone_name);
+  }
+
+  if (accountsById.size === 1) {
+    const [onlyAccount] = accountsById.values();
+    if (onlyAccount?.timezone_name) {
+      return normalizeTimeZone(onlyAccount.timezone_name);
+    }
+  }
+
+  return API_FALLBACK_TIME_ZONE;
+}
+
+function tagSlicesWithTimeZone(slices, sourceTimeZone) {
+  const normalized = normalizeTimeZone(sourceTimeZone);
+  return slices.map((slice) => ({
+    ...slice,
+    sourceTimeZone: normalized
+  }));
+}
+
 export class SyncService {
   constructor({ client = new YinoClient(), concurrency = config.concurrency } = {}) {
     this.client = client;
@@ -126,7 +166,7 @@ export class SyncService {
     return { ids, accounts };
   }
 
-  async syncResources({ accountIds, limitPerType = 0 } = {}) {
+  async syncResources({ accountIds, limitPerType = 0, activeOnly = false } = {}) {
     const types = ['campaigns', 'adsets', 'ads'];
     const result = { campaigns: [], adsets: [], ads: [] };
 
@@ -136,17 +176,21 @@ export class SyncService {
         const rows = await this.client.getAllResources({
           accountId,
           getType,
+          effectiveStatus: activeOnly ? ['ACTIVE'] : undefined,
           limit: limitPerType || undefined
         });
-        result[getType].push(...rows);
+        result[getType].push(...localActiveFilter(rows, activeOnly));
       }
     }
 
+    for (const getType of types) {
+      writeResources({ getType, rows: result[getType] });
+    }
     await writeJson(rawFile('resources'), result);
     return result;
   }
 
-  async syncResourceType({ accountIds, getType, limitPerAccount = 0 } = {}) {
+  async syncResourceType({ accountIds, getType, limitPerAccount = 0, activeOnly = false } = {}) {
     const rows = [];
 
     for (const accountId of accountIds) {
@@ -154,12 +198,15 @@ export class SyncService {
       rows.push(...await this.client.getAllResources({
         accountId,
         getType,
+        effectiveStatus: activeOnly ? ['ACTIVE'] : undefined,
         limit: limitPerAccount || undefined
       }));
     }
 
-    await writeJson(rawFile(getType), rows);
-    return rows;
+    const filtered = localActiveFilter(rows, activeOnly);
+    writeResources({ getType, rows: filtered });
+    await writeJson(rawFile(getType), filtered);
+    return filtered;
   }
 
   async syncInsights({
@@ -239,6 +286,299 @@ export class SyncService {
     };
   }
 
+  resolveDateSlices({ level, ids, since, until, datePreset, hourly = true, sourceTimeZone = API_FALLBACK_TIME_ZONE }) {
+    const resolvedTimeZone = normalizeTimeZone(sourceTimeZone);
+    if (since && until) {
+      return tagSlicesWithTimeZone(hourly ? dateRangeDays(since, until) : [{ since, until }], resolvedTimeZone);
+    }
+    if (datePreset) {
+      return tagSlicesWithTimeZone([{ datePreset }], resolvedTimeZone);
+    }
+
+    const recent = recentSevenDays(resolvedTimeZone);
+    const coverage = getInsightCoverage({
+      level,
+      ids,
+      since: recent.since,
+      hourlyOnly: hourly
+    });
+    const requiredDateCount = hourly ? 7 : 1;
+    const hasMissingHistory = ids.some((id) => {
+      const row = coverage.get(String(id));
+      return !row?.row_count || Number(row.date_count || 0) < requiredDateCount;
+    });
+
+    if (hasMissingHistory) {
+      return tagSlicesWithTimeZone(hourly ? dateRangeDays(recent.since, recent.until) : [recent], resolvedTimeZone);
+    }
+
+    return tagSlicesWithTimeZone([{ datePreset: 'today' }], resolvedTimeZone);
+  }
+
+  async pullQueuedInsights({
+    ids = [],
+    resources = {},
+    accounts = [],
+    level = 'ads',
+    datePreset,
+    since,
+    until,
+    resultAction = '',
+    hourly = true,
+    concurrency = 20,
+    qps = 5,
+    timeoutMs = 7000,
+    maxAttempts = 8,
+    source = '',
+    outputName = '',
+    tool = ''
+  } = {}) {
+    const resourceType = resourceTypeForLevel(level);
+    const normalizedIds = normalizeObjectIds(ids, {
+      min: 1,
+      max: resourceType === 'ads' ? 50 : 100,
+      label: resourceType === 'ads' ? 'ad_id' : 'campaign_id'
+    });
+    const resourceRows = (resources[resourceType] || [])
+      .map((row) => resourceIdentity(row, resourceType))
+      .filter((row) => row.id);
+    const resourceMap = new Map(resourceRows.map((row) => [String(row.id), row]));
+    const sourceRows = normalizedIds.map((id) => resourceMap.get(String(id)) || resourceIdentity({ id, name: id }, resourceType));
+    const accountMap = mapById(accounts, 'account_id');
+    const runId = randomUUID();
+    const resolvedSlices = [];
+    const tasks = sourceRows.flatMap((resource) => {
+      const slices = this.resolveDateSlices({
+        level: resourceType,
+        ids: [resource.id],
+        since,
+        until,
+        datePreset,
+        hourly,
+        sourceTimeZone: sourceTimeZoneFor(resource, accountMap)
+      });
+
+      resolvedSlices.push(...slices.map((slice) => ({
+        objectId: resource.id,
+        ...slice
+      })));
+
+      return slices.map((slice) => ({
+        taskId: `${resourceType}:${resource.id}:${slice.datePreset || `${slice.since}_${slice.until}`}`,
+        objectId: resource.id,
+        objectType: resourceType,
+        label: resource.name || resource.id,
+        ...slice
+      }));
+    });
+
+    info(`Insights 队列：${resourceType} ${sourceRows.length} 个对象，${tasks.length} 个任务，并发 ${concurrency}，QPS ${qps}`);
+
+    const queue = await runTaskQueue({
+      tasks,
+      concurrency,
+      qps,
+      maxAttempts,
+      worker: async (task) => {
+        const stats = await this.client.getAllInsightsWithStats({
+          id: task.objectId,
+          fields: INSIGHT_FIELDS,
+          datePreset: task.datePreset,
+          since: task.since,
+          until: task.until,
+          breakdowns: hourly ? HOURLY_BREAKDOWN : '',
+          timeoutMs
+        });
+        return {
+          code: stats.code,
+          bodySize: stats.bodySize,
+          rows: stats.rows.length,
+          rawRows: stats.rows.map((row) => ({ ...row, id: task.objectId }))
+        };
+      }
+    });
+
+    const rawRows = queue.results.flatMap((item) => item.result?.rawRows || []);
+    const combinedResourceMap = new Map([
+      ...(resources.campaigns || []).map((row) => resourceIdentity(row, 'campaigns')).map((row) => [String(row.id), row]),
+      ...(resources.adsets || []).map((row) => resourceIdentity(row, 'adsets')).map((row) => [String(row.id), row]),
+      ...(resources.ads || []).map((row) => resourceIdentity(row, 'ads')).map((row) => [String(row.id), row]),
+      ...sourceRows.map((row) => [String(row.id), row])
+    ]);
+    const normalizedRows = rawRows.map((row) => normalizeInsight(row, {
+      accountsById: accountMap,
+      resourcesById: combinedResourceMap,
+      resultAction
+    }));
+
+    await writeJson(rawFile(`${tool || resourceType}_queue`), {
+      runId,
+      tasks: queue.taskRecords,
+      rawRows
+    });
+    const baseOutputName = outputName || `facebook_ads_${resourceType}_hourly`;
+    const jsonPath = await writeJson(outputJsonFile(baseOutputName), normalizedRows);
+    const csvPath = await writeCsv(outputFile(baseOutputName), normalizedRows, insightColumns);
+    const db = writeInsightBatch({
+      source: source || tool || `queue:${resourceType}`,
+      level: resourceType,
+      accountIds: accounts.map((account) => account.account_id).filter(Boolean),
+      rows: normalizedRows,
+      metadata: {
+        runId,
+        datePreset: datePreset || '',
+        since: since || '',
+        until: until || '',
+        resolvedSlices,
+        resultAction,
+        hourly,
+        requestedObjectCount: sourceRows.length,
+        taskCount: tasks.length,
+        queue: queue.stats,
+        jsonPath,
+        csvPath,
+        rawRowCount: rawRows.length
+      }
+    });
+    writeApiTaskRuns({
+      runId,
+      tool: tool || `queue:${resourceType}`,
+      taskRecords: queue.taskRecords,
+      metadata: {
+        datePreset: datePreset || '',
+        since: since || '',
+        until: until || '',
+        hourly
+      }
+    });
+
+    return {
+      runId,
+      queue,
+      csvPath,
+      jsonPath,
+      db,
+      rawRows,
+      normalizedRows,
+      tasks,
+      slices: resolvedSlices
+    };
+  }
+
+  async pullAdInsightsTool({
+    ids = [],
+    accounts: accountIds = [],
+    resources = [],
+    datePreset,
+    since,
+    until,
+    resultAction = '',
+    hourly = true,
+    concurrency = 20,
+    qps = 5,
+    timeoutMs = 7000,
+    maxAttempts = 8
+  } = {}) {
+    const normalizedIds = normalizeObjectIds(ids, { min: 1, max: 50, label: 'ad_id' });
+    const accountsResult = accountIds.length
+      ? await this.syncAccounts({ accountIds })
+      : { ids: [], accounts: [] };
+    const adResources = resources.length
+      ? resources
+      : accountIds.length
+        ? await this.syncResourceType({ accountIds: accountsResult.ids, getType: 'ads', activeOnly: true })
+        : normalizedIds.map((id) => ({ id, ad_id: id, name: id }));
+
+    return this.pullQueuedInsights({
+      ids: normalizedIds,
+      resources: { ads: adResources },
+      accounts: accountsResult.accounts,
+      level: 'ads',
+      datePreset,
+      since,
+      until,
+      resultAction,
+      hourly,
+      concurrency,
+      qps,
+      timeoutMs,
+      maxAttempts,
+      source: 'tool1:ad-insights',
+      outputName: 'facebook_ads_tool1_ad_hourly',
+      tool: 'tool1-ad-insights'
+    });
+  }
+
+  async pullCampaignInsightsTool({
+    ids = [],
+    accounts: accountIds = [],
+    resources = [],
+    datePreset,
+    since,
+    until,
+    resultAction = '',
+    hourly = true,
+    concurrency = 20,
+    qps = 5,
+    timeoutMs = 7000,
+    maxAttempts = 8
+  } = {}) {
+    const normalizedIds = normalizeObjectIds(ids, { min: 1, max: 100, label: 'campaign_id' });
+    const accountsResult = accountIds.length
+      ? await this.syncAccounts({ accountIds })
+      : { ids: [], accounts: [] };
+    const campaignResources = resources.length
+      ? resources
+      : accountIds.length
+        ? await this.syncResourceType({ accountIds: accountsResult.ids, getType: 'campaigns', activeOnly: true })
+        : normalizedIds.map((id) => ({ id, campaign_id: id, name: id }));
+
+    return this.pullQueuedInsights({
+      ids: normalizedIds,
+      resources: { campaigns: campaignResources },
+      accounts: accountsResult.accounts,
+      level: 'campaigns',
+      datePreset,
+      since,
+      until,
+      resultAction,
+      hourly,
+      concurrency,
+      qps,
+      timeoutMs,
+      maxAttempts,
+      source: 'tool3:campaign-insights',
+      outputName: 'facebook_ads_tool3_campaign_hourly',
+      tool: 'tool3-campaign-insights'
+    });
+  }
+
+  async pullResourceList({
+    accounts: accountIds = [],
+    getType = 'all',
+    activeOnly = false,
+    limit = 0
+  } = {}) {
+    const accountsResult = await this.syncAccounts({ accountIds });
+    const types = getType === 'all' ? ['campaigns', 'adsets', 'ads'] : [getType];
+    const resources = {};
+
+    for (const type of types) {
+      resources[type] = await this.syncResourceType({
+        accountIds: accountsResult.ids,
+        getType: type,
+        limitPerAccount: limit,
+        activeOnly
+      });
+    }
+
+    return {
+      accounts: accountsResult.accounts,
+      accountIds: accountsResult.ids,
+      resources
+    };
+  }
+
   async findActiveAds({ accountIds, limit = 5 }) {
     const activeAds = [];
 
@@ -253,6 +593,7 @@ export class SyncService {
         const payload = await this.client.getResourcePage({
           accountId,
           getType: 'ads',
+          effectiveStatus: ['ACTIVE'],
           after
         });
 
@@ -391,7 +732,8 @@ export class SyncService {
     const campaigns = await this.syncResourceType({
       accountIds: accountsResult.ids,
       getType: 'campaigns',
-      limitPerAccount: resourceLimit
+      limitPerAccount: resourceLimit,
+      activeOnly: true
     });
     const activeCampaigns = campaigns
       .filter(isActive)

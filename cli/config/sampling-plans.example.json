@@ -1,4 +1,32 @@
 {
+  "campaignMonitor": {
+    "enabled": true,
+    "intervalMinutes": 180,
+    "accountIds": [
+      "123456789012345"
+    ],
+    "autoActiveCampaigns": false,
+    "campaignIds": [
+      "123456789012345"
+    ],
+    "datePreset": "",
+    "resultAction": "",
+    "hourly": true
+  },
+  "adMonitor": {
+    "enabled": true,
+    "intervalMinutes": 60,
+    "adIds": [
+      "123456789012345"
+    ],
+    "datePreset": "",
+    "resultAction": "",
+    "hourly": true,
+    "concurrency": 20,
+    "qps": 5,
+    "requestTimeoutMs": 7000,
+    "maxAttempts": 8
+  },
   "targeted": {
     "enabled": true,
     "level": "ads",

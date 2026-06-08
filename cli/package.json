@@ -23,6 +23,12 @@
     "db-init": "node --disable-warning=ExperimentalWarning src/cli.js db-init",
     "db-import-output": "node --disable-warning=ExperimentalWarning src/cli.js db-import-output",
     "accounts": "node --disable-warning=ExperimentalWarning src/cli.js accounts",
+    "resource-list": "node --disable-warning=ExperimentalWarning src/cli.js resource-list",
+    "ad-insights": "node --disable-warning=ExperimentalWarning src/cli.js ad-insights",
+    "campaign-insights": "node --disable-warning=ExperimentalWarning src/cli.js campaign-insights",
+    "monitor-bootstrap": "node --disable-warning=ExperimentalWarning src/cli.js monitor-bootstrap",
+    "monitor-run": "node --disable-warning=ExperimentalWarning src/cli.js monitor-run",
+    "monitor-loop": "node --disable-warning=ExperimentalWarning src/cli.js monitor-loop",
     "token": "node --disable-warning=ExperimentalWarning src/cli.js token",
     "doctor": "node --disable-warning=ExperimentalWarning src/cli.js doctor"
   },

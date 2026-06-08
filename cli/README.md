@@ -128,6 +128,14 @@ npm run sampling-config -- --write
 npm run sampling-evaluate -- --accounts 8462513793771963 --resource-limit 100 --probe-level ads --probe-limit 10 --date-preset yesterday
 ```
 
+三个生产取数工具：
+
+```bash
+npm run resource-list -- --accounts 8462513793771963 --type all --active
+npm run ad-insights -- --ids 120000000000000001,120000000000000002 --accounts 8462513793771963 --date-preset yesterday
+npm run campaign-insights -- --ids 120000000000000001 --accounts 8462513793771963 --date-preset yesterday
+```
+
 按广告或广告组 ID 拉取小时级伪实时数据：
 
 ```bash
@@ -145,6 +153,14 @@ npm run active-campaigns -- --accounts 8462513793771963 --date-preset today
 ```bash
 npm run sampling-run -- --mode all
 npm run sampling-loop -- --mode all --max-cycles 1
+```
+
+按设置页的 List 1/List 2 执行一次或循环执行：
+
+```bash
+npm run monitor-bootstrap -- --accounts 8462513793771963
+npm run monitor-run -- --mode all
+npm run monitor-loop -- --mode all
 ```
 
 ## 重要说明

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FB 广告数据看板</title>
   <link rel="stylesheet" href="/vendor/tom-select.min.css">
-  <link rel="stylesheet" href="/styles.css?v=20260605-7">
+  <link rel="stylesheet" href="/styles.css?v=20260608-1">
   <script src="/vendor/echarts.min.js"></script>
   <script src="/vendor/tom-select.complete.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -74,11 +74,11 @@
         <div class="options-popover" id="optionsPanel" hidden>
           <div class="option-grid">
             <div class="control-group">
-              <label for="fromDate">开始时间</label>
+              <label for="fromDate">开始时间(北京时间)</label>
               <input id="fromDate" type="datetime-local" step="3600">
             </div>
             <div class="control-group">
-              <label for="toDate">结束时间</label>
+              <label for="toDate">结束时间(北京时间)</label>
               <input id="toDate" type="datetime-local" step="3600">
             </div>
             <div class="control-group">
@@ -186,8 +186,8 @@
         <section class="panel settings-panel">
           <div class="panel-head">
             <div>
-              <h2>取样监控设置</h2>
-              <span id="settingsCaption">账户与取数方案</span>
+              <h2>监控设置</h2>
+              <span id="settingsCaption">List 1 广告系列 · List 2 广告</span>
             </div>
             <div class="settings-actions">
               <button class="icon-button" id="reloadSettingsButton" type="button" title="刷新账户设置" aria-label="刷新账户设置">
@@ -200,94 +200,120 @@
             </div>
           </div>
           <div class="settings-body">
-            <div class="settings-tabs" role="tablist" aria-label="设置页签">
-              <button class="settings-tab active" type="button" data-settings-tab="accounts">账户</button>
-              <button class="settings-tab" type="button" data-settings-tab="targeted">定向伪实时</button>
-              <button class="settings-tab" type="button" data-settings-tab="activeCampaigns">ACTIVE 系列</button>
+            <div class="monitor-status-strip" id="monitorStatusGrid"></div>
+
+            <div class="monitor-grid">
+              <section class="monitor-card">
+                <div class="monitor-card-head">
+                  <div>
+                    <span class="monitor-kicker">List 1</span>
+                    <h3>广告系列监控</h3>
+                  </div>
+                  <label class="switch settings-switch">
+                    <input id="campaignMonitorEnabled" type="checkbox">
+                    <span>启用</span>
+                  </label>
+                </div>
+                <div class="settings-grid two-col">
+                  <div class="control-group">
+                    <label for="campaignIntervalInput">频率(分钟)</label>
+                    <input id="campaignIntervalInput" type="number" min="60" max="360" step="1">
+                  </div>
+                  <div class="control-group">
+                    <label for="campaignResultActionInput">成效口径</label>
+                    <input id="campaignResultActionInput" type="text" placeholder="omni_purchase">
+                  </div>
+                  <label class="switch settings-switch wide-switch">
+                    <input id="campaignAutoActiveInput" type="checkbox">
+                    <span>账户解析 ACTIVE campaigns</span>
+                  </label>
+                  <div class="control-group settings-field wide">
+                    <label for="monitorAccountsInput">监控账户 ID</label>
+                    <textarea id="monitorAccountsInput" rows="5" spellcheck="false" placeholder="8462513793771963"></textarea>
+                  </div>
+                  <div class="control-group settings-field wide">
+                    <label for="campaignIdsInput">手动 campaign ID</label>
+                    <textarea id="campaignIdsInput" rows="6" spellcheck="false" placeholder="120238379067340623"></textarea>
+                  </div>
+                </div>
+                <div class="settings-summary" id="campaignMonitorSummary"></div>
+                <div class="resolved-list" id="campaignResolvedList"></div>
+              </section>
+
+              <section class="monitor-card">
+                <div class="monitor-card-head">
+                  <div>
+                    <span class="monitor-kicker">List 2</span>
+                    <h3>广告数据监控</h3>
+                  </div>
+                  <label class="switch settings-switch">
+                    <input id="adMonitorEnabled" type="checkbox">
+                    <span>启用</span>
+                  </label>
+                </div>
+                <div class="settings-grid two-col">
+                  <div class="control-group">
+                    <label for="adIntervalInput">频率(分钟)</label>
+                    <input id="adIntervalInput" type="number" min="30" max="180" step="1">
+                  </div>
+                  <div class="control-group">
+                    <label for="adResultActionInput">成效口径</label>
+                    <input id="adResultActionInput" type="text" placeholder="omni_purchase">
+                  </div>
+                  <div class="control-group">
+                    <label for="adConcurrencyInput">并发</label>
+                    <input id="adConcurrencyInput" type="number" min="1" max="20" step="1">
+                  </div>
+                  <div class="control-group">
+                    <label for="adQpsInput">QPS</label>
+                    <input id="adQpsInput" type="number" min="1" max="20" step="1">
+                  </div>
+                  <div class="control-group">
+                    <label for="adTimeoutInput">超时(ms)</label>
+                    <input id="adTimeoutInput" type="number" min="1000" max="60000" step="500">
+                  </div>
+                  <div class="control-group">
+                    <label for="adMaxAttemptsInput">最大尝试</label>
+                    <input id="adMaxAttemptsInput" type="number" min="1" max="20" step="1">
+                  </div>
+                  <div class="control-group settings-field wide">
+                    <label for="adIdsInput">ad ID</label>
+                    <textarea id="adIdsInput" rows="10" spellcheck="false" placeholder="120238379067340623"></textarea>
+                  </div>
+                </div>
+                <div class="settings-summary" id="adMonitorSummary"></div>
+              </section>
             </div>
 
-            <div class="settings-pane active" data-settings-pane="accounts">
-              <div class="control-group settings-field">
-                <label for="monitorAccountsInput">账户 ID</label>
-                <textarea id="monitorAccountsInput" rows="8" spellcheck="false" placeholder="8462513793771963"></textarea>
+            <section class="recent-runs">
+              <div class="recent-runs-head">
+                <h3>最近批次</h3>
+                <span id="settingsStatus" role="status"></span>
               </div>
-              <div class="account-list" id="settingsAccountList"></div>
-            </div>
-
-            <div class="settings-pane" data-settings-pane="targeted" hidden>
-              <div class="settings-grid">
-                <label class="switch settings-switch">
-                  <input id="targetedEnabled" type="checkbox">
-                  <span>启用</span>
-                </label>
-                <div class="control-group">
-                  <label for="targetedLevelSelect">对象层级</label>
-                  <select id="targetedLevelSelect">
-                    <option value="ads">广告</option>
-                    <option value="adsets">广告组</option>
-                  </select>
-                </div>
-                <div class="control-group">
-                  <label for="targetedIntervalInput">频率(分钟)</label>
-                  <input id="targetedIntervalInput" type="number" min="15" max="30" step="1">
-                </div>
-                <div class="control-group">
-                  <label for="targetedDatePresetSelect">日期</label>
-                  <select id="targetedDatePresetSelect">
-                    <option value="today">today</option>
-                    <option value="yesterday">yesterday</option>
-                    <option value="last_7d">last_7d</option>
-                  </select>
-                </div>
-                <div class="control-group">
-                  <label for="targetedResultActionInput">成效口径</label>
-                  <input id="targetedResultActionInput" type="text" placeholder="omni_purchase">
-                </div>
-                <div class="control-group settings-field wide">
-                  <label for="targetedIdsInput">对象 ID</label>
-                  <textarea id="targetedIdsInput" rows="7" spellcheck="false" placeholder="120238379067340623"></textarea>
-                </div>
+              <div class="table-scroll compact-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>列表</th>
+                      <th>状态</th>
+                      <th>上次运行</th>
+                      <th>下次运行</th>
+                      <th>成功/失败</th>
+                      <th>重试</th>
+                      <th>耗时</th>
+                      <th>错误</th>
+                    </tr>
+                  </thead>
+                  <tbody id="recentRunsBody"></tbody>
+                </table>
               </div>
-              <div class="settings-summary" id="targetedSummary"></div>
-            </div>
-
-            <div class="settings-pane" data-settings-pane="activeCampaigns" hidden>
-              <div class="settings-grid">
-                <label class="switch settings-switch">
-                  <input id="activeCampaignsEnabled" type="checkbox">
-                  <span>启用</span>
-                </label>
-                <div class="control-group">
-                  <label for="activeCampaignIntervalInput">频率(分钟)</label>
-                  <input id="activeCampaignIntervalInput" type="number" min="30" max="60" step="1">
-                </div>
-                <div class="control-group">
-                  <label for="activeCampaignDatePresetSelect">日期</label>
-                  <select id="activeCampaignDatePresetSelect">
-                    <option value="today">today</option>
-                    <option value="yesterday">yesterday</option>
-                    <option value="last_7d">last_7d</option>
-                  </select>
-                </div>
-                <div class="control-group">
-                  <label for="activeCampaignLimitInput">验证上限</label>
-                  <input id="activeCampaignLimitInput" type="number" min="0" step="1">
-                </div>
-                <div class="control-group">
-                  <label for="activeCampaignResultActionInput">成效口径</label>
-                  <input id="activeCampaignResultActionInput" type="text" placeholder="omni_purchase">
-                </div>
-              </div>
-              <div class="settings-summary" id="activeCampaignSummary"></div>
-            </div>
-
-            <div class="settings-status" id="settingsStatus" role="status"></div>
+            </section>
           </div>
         </section>
       </section>
     </main>
   </div>
 
-  <script src="/app.js?v=20260605-7"></script>
+  <script src="/app.js?v=20260608-1"></script>
 </body>
 </html>

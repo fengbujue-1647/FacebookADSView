@@ -49,6 +49,15 @@ http://127.0.0.1:3100/api/fb-ads/latest
 
 采集模块放在 `cli/` 目录，密钥只保存在 CLI 的 `.env` 中，不会进入前端代码。
 
+本地 API 文档入口：
+
+```text
+docs/facebook_ads_api_data_guide.md
+docs/yinolink_api_quick_reference.md
+```
+
+`docs/yinolink_api_quick_reference.md` 已整理 YinoLink Apifox 四个相关接口、Meta breakdowns 入口，以及 2026-06-05 对 ACTIVE 维表筛选、`level=ad`、hourly 桶和 QPS 限制的实测结论。
+
 安装 CLI 依赖：
 
 ```bash
@@ -130,6 +139,19 @@ npm run cli:active-ads -- --accounts 8462513793771963,2152108598945788 --date-pr
 npm run cli:active-ads-hourly -- --accounts 8462513793771963 --date-preset yesterday --limit 30
 ```
 
+三个生产取数工具：
+
+```bash
+# Tool 1：1-50 个 ad_id，20 worker、7s Abort、429/Abort 重试，写 SQLite/JSON/CSV
+npm run cli:ad-insights -- --accounts 8462513793771963 --ids 120000000000000001,120000000000000002 --date-preset yesterday
+
+# Tool 2：账户资源维表，优先 resource?effective_status=["ACTIVE"]，并本地二次过滤
+npm run cli:resource-list -- --accounts 8462513793771963 --type all --active
+
+# Tool 3：campaign 聚合 hourly insights，覆盖同一 campaign + hour
+npm run cli:campaign-insights -- --accounts 8462513793771963 --ids 120000000000000001 --date-preset yesterday
+```
+
 评估两条取样监控方案的数据量，并可抽样探测 ACTIVE 广告中数据量最大的对象：
 
 ```bash
@@ -153,6 +175,14 @@ npm run cli:active-campaigns -- --accounts 8462513793771963 --date-preset today
 ```bash
 npm run cli:sampling-run -- --mode all
 npm run cli:sampling-loop -- --mode all --max-cycles 1
+```
+
+按新设置页的两个监控列表执行或循环执行：
+
+```bash
+npm run cli:monitor-bootstrap -- --accounts 8462513793771963
+npm run cli:monitor-run -- --mode all
+npm run cli:monitor-loop -- --mode all
 ```
 
 输出文件：

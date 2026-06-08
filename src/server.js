@@ -1,7 +1,7 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
-const { readLatestInsightData } = require("./database");
+const { readLatestInsightData, readMonitorOverview } = require("./database");
 
 const port = Number(process.env.PORT || 3100);
 const host = process.env.HOST || "127.0.0.1";
@@ -11,6 +11,7 @@ const databaseFile = path.join(repoRoot, "cli", "data", "fb-ads.sqlite");
 const cliOutputDir = path.join(repoRoot, "cli", "data", "output");
 const monitoredAccountsFile = path.join(repoRoot, "cli", "config", "monitored-accounts.json");
 const samplingSettingsFile = path.join(repoRoot, "cli", "config", "sampling-plans.json");
+const displayTimeZone = "Asia/Shanghai";
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -138,9 +139,35 @@ function normalizeIds(ids = []) {
 function normalizeSamplingSettings(input = {}) {
   const targetedInput = input.targeted || {};
   const activeInput = input.activeCampaigns || {};
+  const campaignInput = input.campaignMonitor || {};
+  const adInput = input.adMonitor || {};
   const targetedLevel = ["ads", "adsets"].includes(targetedInput.level) ? targetedInput.level : "ads";
+  const campaignMonitor = {
+    enabled: campaignInput.enabled !== false,
+    intervalMinutes: clampInteger(campaignInput.intervalMinutes, 180, 60, 360),
+    accountIds: normalizeIds(campaignInput.accountIds),
+    autoActiveCampaigns: campaignInput.autoActiveCampaigns !== false,
+    campaignIds: normalizeIds(campaignInput.campaignIds),
+    datePreset: String(campaignInput.datePreset ?? "").trim(),
+    resultAction: String(campaignInput.resultAction || "").trim(),
+    hourly: campaignInput.hourly !== false
+  };
+  const adMonitor = {
+    enabled: adInput.enabled !== false,
+    intervalMinutes: clampInteger(adInput.intervalMinutes, 60, 30, 180),
+    adIds: normalizeIds(adInput.adIds || (targetedLevel === "ads" ? targetedInput.ids : [])),
+    datePreset: String(adInput.datePreset ?? "").trim(),
+    resultAction: String(adInput.resultAction || "").trim(),
+    hourly: adInput.hourly !== false,
+    concurrency: clampInteger(adInput.concurrency, 20, 1, 20),
+    qps: clampInteger(adInput.qps, 5, 1, 20),
+    requestTimeoutMs: clampInteger(adInput.requestTimeoutMs, 7000, 1000, 60000),
+    maxAttempts: clampInteger(adInput.maxAttempts, 8, 1, 20)
+  };
 
   return {
+    campaignMonitor,
+    adMonitor,
     targeted: {
       enabled: targetedInput.enabled === true,
       level: targetedLevel,
@@ -152,7 +179,7 @@ function normalizeSamplingSettings(input = {}) {
     },
     activeCampaigns: {
       enabled: activeInput.enabled !== false,
-      intervalMinutes: clampInteger(activeInput.intervalMinutes, 60, 30, 60),
+      intervalMinutes: clampInteger(activeInput.intervalMinutes, 60, 30, 180),
       datePreset: String(activeInput.datePreset || "today").trim() || "today",
       resultAction: String(activeInput.resultAction || "").trim(),
       limit: Math.max(0, Number.parseInt(activeInput.limit, 10) || 0),
@@ -228,6 +255,7 @@ function sendLatestAdsData(res) {
           completed_at: latestFromDb.batch.completed_at
         },
         updated_at: latestFromDb.batch.completed_at,
+        display_time_zone: displayTimeZone,
         rows: latestFromDb.rows
       });
       return;
@@ -247,6 +275,7 @@ function sendLatestAdsData(res) {
       ok: true,
       source: latest.file,
       updated_at: new Date(latest.mtimeMs).toISOString(),
+      display_time_zone: displayTimeZone,
       rows: latest.rows
     });
   } catch (readError) {
@@ -265,13 +294,30 @@ const server = http.createServer((req, res) => {
     writeJson(res, 200, {
       ok: true,
       module: "fb-ads-dashboard",
-      time: new Date().toISOString()
+      time: new Date().toISOString(),
+      display_time_zone: displayTimeZone
     });
     return;
   }
 
   if (url.pathname === "/api/fb-ads/latest") {
     sendLatestAdsData(res);
+    return;
+  }
+
+  if (url.pathname === "/api/monitor/status") {
+    try {
+      writeJson(res, 200, {
+        ok: true,
+        status: readMonitorOverview({ databaseFile })
+      });
+    } catch (error) {
+      writeJson(res, 500, {
+        ok: false,
+        error: "read_monitor_status_failed",
+        message: error.message
+      });
+    }
     return;
   }
 

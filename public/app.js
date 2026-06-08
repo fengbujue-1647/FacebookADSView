@@ -10,6 +10,19 @@ const GRANULARITY_MIN_DAYS = {
   week: 7,
   month: 28
 };
+const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+const DISPLAY_TIME_ZONE_LABEL = "北京时间";
+const DISPLAY_TIME_ZONE_OFFSET_LABEL = "UTC+8";
+const displayClockFormatter = new Intl.DateTimeFormat("en-US-u-nu-latn", {
+  timeZone: DISPLAY_TIME_ZONE,
+  hourCycle: "h23",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit"
+});
 
 const CAMPAIGNS = [
   { id: "camp_us_brf_v2", name: "US - BRF V2 - Prospecting", delivery: "投放中", objective: "Purchase", dailyBudget: 320, scale: 1.18, ctr: 2.4, aov: 64 },
@@ -60,8 +73,30 @@ const state = {
   to: "",
   activeWindowPreset: "",
   monitoredAccounts: [],
-  activeSettingsTab: "accounts",
+  monitorStatus: null,
   samplingSettings: {
+    campaignMonitor: {
+      enabled: true,
+      intervalMinutes: 180,
+      accountIds: [],
+      autoActiveCampaigns: true,
+      campaignIds: [],
+      datePreset: "",
+      resultAction: "",
+      hourly: true
+    },
+    adMonitor: {
+      enabled: true,
+      intervalMinutes: 60,
+      adIds: [],
+      datePreset: "",
+      resultAction: "",
+      hourly: true,
+      concurrency: 20,
+      qps: 5,
+      requestTimeoutMs: 7000,
+      maxAttempts: 8
+    },
     targeted: {
       enabled: false,
       level: "ads",
@@ -152,24 +187,28 @@ const els = {
   mainChart: document.getElementById("mainChart"),
   resetWindowButton: document.getElementById("resetWindowButton"),
   settingsCaption: document.getElementById("settingsCaption"),
+  monitorStatusGrid: document.getElementById("monitorStatusGrid"),
   monitorAccountsInput: document.getElementById("monitorAccountsInput"),
-  settingsAccountList: document.getElementById("settingsAccountList"),
   settingsStatus: document.getElementById("settingsStatus"),
   reloadSettingsButton: document.getElementById("reloadSettingsButton"),
   saveSettingsButton: document.getElementById("saveSettingsButton"),
-  targetedEnabled: document.getElementById("targetedEnabled"),
-  targetedLevelSelect: document.getElementById("targetedLevelSelect"),
-  targetedIdsInput: document.getElementById("targetedIdsInput"),
-  targetedIntervalInput: document.getElementById("targetedIntervalInput"),
-  targetedDatePresetSelect: document.getElementById("targetedDatePresetSelect"),
-  targetedResultActionInput: document.getElementById("targetedResultActionInput"),
-  targetedSummary: document.getElementById("targetedSummary"),
-  activeCampaignsEnabled: document.getElementById("activeCampaignsEnabled"),
-  activeCampaignIntervalInput: document.getElementById("activeCampaignIntervalInput"),
-  activeCampaignDatePresetSelect: document.getElementById("activeCampaignDatePresetSelect"),
-  activeCampaignLimitInput: document.getElementById("activeCampaignLimitInput"),
-  activeCampaignResultActionInput: document.getElementById("activeCampaignResultActionInput"),
-  activeCampaignSummary: document.getElementById("activeCampaignSummary")
+  campaignMonitorEnabled: document.getElementById("campaignMonitorEnabled"),
+  campaignIntervalInput: document.getElementById("campaignIntervalInput"),
+  campaignResultActionInput: document.getElementById("campaignResultActionInput"),
+  campaignAutoActiveInput: document.getElementById("campaignAutoActiveInput"),
+  campaignIdsInput: document.getElementById("campaignIdsInput"),
+  campaignMonitorSummary: document.getElementById("campaignMonitorSummary"),
+  campaignResolvedList: document.getElementById("campaignResolvedList"),
+  adMonitorEnabled: document.getElementById("adMonitorEnabled"),
+  adIntervalInput: document.getElementById("adIntervalInput"),
+  adResultActionInput: document.getElementById("adResultActionInput"),
+  adConcurrencyInput: document.getElementById("adConcurrencyInput"),
+  adQpsInput: document.getElementById("adQpsInput"),
+  adTimeoutInput: document.getElementById("adTimeoutInput"),
+  adMaxAttemptsInput: document.getElementById("adMaxAttemptsInput"),
+  adIdsInput: document.getElementById("adIdsInput"),
+  adMonitorSummary: document.getElementById("adMonitorSummary"),
+  recentRunsBody: document.getElementById("recentRunsBody")
 };
 
 const dataSourceName = document.getElementById("dataSourceName");
@@ -179,75 +218,157 @@ function pad(value) {
   return String(value).padStart(2, "0");
 }
 
+function invalidDate() {
+  return new Date(Number.NaN);
+}
+
+function displayPartsFromInstant(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) {
+    return null;
+  }
+
+  const parts = Object.fromEntries(
+    displayClockFormatter
+      .formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, Number(part.value)])
+  );
+
+  return {
+    year: parts.year,
+    month: parts.month,
+    day: parts.day,
+    hour: parts.hour,
+    minute: parts.minute,
+    second: parts.second
+  };
+}
+
+function clockDateFromParts(parts) {
+  return new Date(Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour || 0,
+    parts.minute || 0,
+    parts.second || 0,
+    0
+  ));
+}
+
+function clockDateFromInstant(value) {
+  const parts = displayPartsFromInstant(value);
+  return parts ? clockDateFromParts(parts) : invalidDate();
+}
+
+function nowDisplayClockDate() {
+  return clockDateFromInstant(new Date());
+}
+
+function parseDateTimeParts(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?)?/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: match[4] === undefined ? 0 : Number(match[4]),
+    minute: match[5] === undefined ? 0 : Number(match[5]),
+    second: match[6] === undefined ? 0 : Number(match[6]),
+    hasTime: match[4] !== undefined
+  };
+}
+
+function hasExplicitOffset(value) {
+  return /(?:Z|[+-]\d{2}:?\d{2})$/i.test(String(value || "").trim());
+}
+
 function toDateValue(date) {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
 }
 
 function toDateTimeInputValue(date) {
-  return `${toDateValue(date)}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${toDateValue(date)}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
 }
 
 function toMonthInputValue(date) {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}`;
 }
 
 function startOfDay(date) {
   const next = new Date(date);
-  next.setHours(0, 0, 0, 0);
+  next.setUTCHours(0, 0, 0, 0);
   return next;
 }
 
 function endOfDay(date) {
   const next = new Date(date);
-  next.setHours(23, 0, 0, 0);
+  next.setUTCHours(23, 0, 0, 0);
   return next;
 }
 
 function parseDateInput(value, endOfRange = false) {
-  if (!value) {
-    return new Date(Number.NaN);
-  }
-
-  const [datePart, timePart] = value.split("T");
-  const [year, month, day] = datePart.split("-").map(Number);
-  const [hour = 0, minute = 0] = (timePart || "").split(":").map(Number);
-  const date = new Date(year, month - 1, day, hour, minute || 0, 0, 0);
-
-  if (endOfRange && !timePart) {
-    date.setHours(23, 59, 59, 999);
+  const parts = parseDateTimeParts(value);
+  if (!parts) return invalidDate();
+  const date = clockDateFromParts(parts);
+  if (endOfRange && !parts.hasTime) {
+    date.setUTCHours(23, 59, 59, 999);
   }
   return date;
 }
 
+function timestampFromCollectedTime(value) {
+  if (!value) return Number.NaN;
+  if (hasExplicitOffset(value)) {
+    return clockDateFromInstant(value).getTime();
+  }
+  return parseDateInput(value).getTime();
+}
+
+function formatInstantInDisplayTimeZone(value) {
+  if (!value) return "-";
+  const date = value instanceof Date ? value : new Date(value);
+  const clockDate = clockDateFromInstant(date);
+  if (!Number.isFinite(clockDate.getTime())) {
+    return String(value).slice(0, 19).replace("T", " ");
+  }
+  return `${toDateTimeInputValue(clockDate).replace("T", " ")} ${DISPLAY_TIME_ZONE_OFFSET_LABEL}`;
+}
+
 function monthStart(value) {
   const [year, month] = value.split("-").map(Number);
-  return new Date(year, month - 1, 1, 0, 0, 0, 0);
+  return new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
 }
 
 function monthEnd(value) {
   const [year, month] = value.split("-").map(Number);
-  return new Date(year, month, 0, 23, 0, 0, 0);
+  return new Date(Date.UTC(year, month, 0, 23, 0, 0, 0));
 }
 
 function addDays(date, amount) {
   const next = new Date(date);
-  next.setDate(next.getDate() + amount);
+  next.setUTCDate(next.getUTCDate() + amount);
   return next;
 }
 
 function startOfWeek(date) {
   const next = new Date(date);
-  const day = next.getDay() || 7;
-  next.setDate(next.getDate() - day + 1);
-  next.setHours(0, 0, 0, 0);
+  const day = next.getUTCDay() || 7;
+  next.setUTCDate(next.getUTCDate() - day + 1);
+  next.setUTCHours(0, 0, 0, 0);
   return next;
 }
 
 function labelForBucket(date, granularity) {
-  const year = date.getFullYear();
-  const month = pad(date.getMonth() + 1);
-  const day = pad(date.getDate());
-  const hour = pad(date.getHours());
+  const year = date.getUTCFullYear();
+  const month = pad(date.getUTCMonth() + 1);
+  const day = pad(date.getUTCDate());
+  const hour = pad(date.getUTCHours());
 
   if (granularity === "hour") {
     return `${month}-${day} ${hour}:00`;
@@ -264,37 +385,37 @@ function labelForBucket(date, granularity) {
 function bucketDate(date, granularity) {
   const next = new Date(date);
   if (granularity === "hour") {
-    next.setMinutes(0, 0, 0);
+    next.setUTCMinutes(0, 0, 0);
     return next;
   }
   if (granularity === "week") {
     return startOfWeek(next);
   }
   if (granularity === "month") {
-    next.setDate(1);
+    next.setUTCDate(1);
   }
-  next.setHours(0, 0, 0, 0);
+  next.setUTCHours(0, 0, 0, 0);
   return next;
 }
 
 function nextBucketDate(date, granularity) {
   const next = new Date(date);
   if (granularity === "hour") {
-    next.setHours(next.getHours() + 1, 0, 0, 0);
+    next.setUTCHours(next.getUTCHours() + 1, 0, 0, 0);
     return next;
   }
   if (granularity === "day") {
-    next.setDate(next.getDate() + 1);
-    next.setHours(0, 0, 0, 0);
+    next.setUTCDate(next.getUTCDate() + 1);
+    next.setUTCHours(0, 0, 0, 0);
     return next;
   }
   if (granularity === "week") {
-    next.setDate(next.getDate() + 7);
-    next.setHours(0, 0, 0, 0);
+    next.setUTCDate(next.getUTCDate() + 7);
+    next.setUTCHours(0, 0, 0, 0);
     return next;
   }
-  next.setMonth(next.getMonth() + 1, 1);
-  next.setHours(0, 0, 0, 0);
+  next.setUTCMonth(next.getUTCMonth() + 1, 1);
+  next.setUTCHours(0, 0, 0, 0);
   return next;
 }
 
@@ -330,7 +451,7 @@ function bucketCountFor(granularity, bounds = selectedRangeBounds()) {
   if (granularity === "week") {
     return Math.floor((end.getTime() - start.getTime()) / (MS_DAY * 7)) + 1;
   }
-  return (end.getFullYear() - start.getFullYear()) * 12 + end.getMonth() - start.getMonth() + 1;
+  return (end.getUTCFullYear() - start.getUTCFullYear()) * 12 + end.getUTCMonth() - start.getUTCMonth() + 1;
 }
 
 function granularityAvailability(granularity) {
@@ -377,17 +498,17 @@ function seededNoise(value) {
 }
 
 function buildRawRows() {
-  const today = new Date();
-  today.setHours(23, 0, 0, 0);
+  const today = nowDisplayClockDate();
+  today.setUTCHours(23, 0, 0, 0);
   const start = addDays(today, -180);
-  start.setHours(0, 0, 0, 0);
+  start.setUTCHours(0, 0, 0, 0);
   const rows = [];
 
   for (let time = start.getTime(); time <= today.getTime(); time += MS_HOUR) {
     const date = new Date(time);
     const dayIndex = Math.floor((time - start.getTime()) / MS_DAY);
-    const hour = date.getHours();
-    const weekday = date.getDay();
+    const hour = date.getUTCHours();
+    const weekday = date.getUTCDay();
     const hourWave = 0.72 + 0.38 * Math.sin(((hour - 9) / 24) * Math.PI * 2);
     const weekWave = weekday === 0 || weekday === 6 ? 0.84 : 1.06;
     const trend = 0.92 + Math.min(dayIndex / 220, 0.38);
@@ -435,8 +556,11 @@ function buildRawRows() {
 
 function mapCollectedRow(row) {
   const dateValue = row.date_stop || row.date_start;
-  const timestampSource = row.hour_start || (dateValue ? `${dateValue}T00:00:00` : '');
-  const timestamp = timestampSource ? new Date(timestampSource).getTime() : Date.now();
+  const timestampSource = row.hour_start_beijing
+    || row.date_start_beijing
+    || row.hour_start
+    || (dateValue ? `${dateValue}T00:00:00` : '');
+  const timestamp = timestampSource ? timestampFromCollectedTime(timestampSource) : nowDisplayClockDate().getTime();
   const spend = Number(row.spend || 0);
   const roas = Number(row.roas || 0);
   const purchaseValue = Number(row.purchase_value || 0) || spend * roas;
@@ -507,7 +631,31 @@ function parseAccountInput(value) {
 function normalizeSamplingSettings(settings = {}) {
   const targeted = settings.targeted || {};
   const activeCampaigns = settings.activeCampaigns || {};
+  const campaignMonitor = settings.campaignMonitor || {};
+  const adMonitor = settings.adMonitor || {};
   return {
+    campaignMonitor: {
+      enabled: campaignMonitor.enabled !== false,
+      intervalMinutes: clampNumber(campaignMonitor.intervalMinutes, 180, 60, 360),
+      accountIds: Array.isArray(campaignMonitor.accountIds) ? campaignMonitor.accountIds.filter((id) => /^\d{3,32}$/.test(String(id))) : [],
+      autoActiveCampaigns: campaignMonitor.autoActiveCampaigns !== false,
+      campaignIds: Array.isArray(campaignMonitor.campaignIds) ? campaignMonitor.campaignIds.filter((id) => /^\d{3,32}$/.test(String(id))) : [],
+      datePreset: String(campaignMonitor.datePreset || "").trim(),
+      resultAction: String(campaignMonitor.resultAction || "").trim(),
+      hourly: campaignMonitor.hourly !== false
+    },
+    adMonitor: {
+      enabled: adMonitor.enabled !== false,
+      intervalMinutes: clampNumber(adMonitor.intervalMinutes, 60, 30, 180),
+      adIds: Array.isArray(adMonitor.adIds) ? adMonitor.adIds.filter((id) => /^\d{3,32}$/.test(String(id))) : [],
+      datePreset: String(adMonitor.datePreset || "").trim(),
+      resultAction: String(adMonitor.resultAction || "").trim(),
+      hourly: adMonitor.hourly !== false,
+      concurrency: clampNumber(adMonitor.concurrency, 20, 1, 20),
+      qps: clampNumber(adMonitor.qps, 5, 1, 20),
+      requestTimeoutMs: clampNumber(adMonitor.requestTimeoutMs, 7000, 1000, 60000),
+      maxAttempts: clampNumber(adMonitor.maxAttempts, 8, 1, 20)
+    },
     targeted: {
       enabled: targeted.enabled === true,
       level: ["ads", "adsets"].includes(targeted.level) ? targeted.level : "ads",
@@ -519,7 +667,7 @@ function normalizeSamplingSettings(settings = {}) {
     },
     activeCampaigns: {
       enabled: activeCampaigns.enabled !== false,
-      intervalMinutes: clampNumber(activeCampaigns.intervalMinutes, 60, 30, 60),
+      intervalMinutes: clampNumber(activeCampaigns.intervalMinutes, 60, 30, 180),
       datePreset: activeCampaigns.datePreset || "today",
       resultAction: String(activeCampaigns.resultAction || "").trim(),
       limit: Math.max(0, Number.parseInt(activeCampaigns.limit, 10) || 0),
@@ -532,74 +680,209 @@ function summaryChips(items) {
   return items.map((item) => `<span>${item}</span>`).join("");
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function formatIso(value) {
+  return formatInstantInDisplayTimeZone(value);
+}
+
+function formatDuration(ms) {
+  const value = Number(ms || 0);
+  if (!value) return "-";
+  if (value < 1000) return `${value}ms`;
+  if (value < 60_000) return `${(value / 1000).toFixed(1)}s`;
+  return `${(value / 60_000).toFixed(1)}m`;
+}
+
+function stateForList(listType) {
+  return (state.monitorStatus?.state || []).find((item) => item.list_type === listType) || null;
+}
+
+function statusLabel(value) {
+  if (value === "success") return "成功";
+  if (value === "partial") return "部分成功";
+  if (value === "failed") return "失败";
+  return "未运行";
+}
+
+function historyLabel(run) {
+  const slices = run?.metadata?.slices || [];
+  if (slices.length >= 7) return `补全 ${slices.length} 天`;
+  if (slices.length > 1) return `${slices.length} 天增量`;
+  if (slices.length === 1) return "增量覆盖";
+  return "等待运行";
+}
+
+function renderMonitorStatus() {
+  const overview = state.monitorStatus;
+  const campaignState = stateForList("campaigns");
+  const adState = stateForList("ads");
+  const resourceCounts = overview?.resourceCounts || {};
+  const latestCampaignRun = (overview?.recentRuns || []).find((run) => run.list_type === "campaigns");
+  const latestAdRun = (overview?.recentRuns || []).find((run) => run.list_type === "ads");
+
+  els.monitorStatusGrid.innerHTML = [
+    {
+      title: "List 1 广告系列",
+      value: statusLabel(campaignState?.last_status),
+      meta: `${state.samplingSettings.campaignMonitor.intervalMinutes} 分钟 · ${historyLabel(latestCampaignRun)}`,
+      status: campaignState?.last_status || "idle"
+    },
+    {
+      title: "List 2 广告",
+      value: statusLabel(adState?.last_status),
+      meta: `${state.samplingSettings.adMonitor.intervalMinutes} 分钟 · ${historyLabel(latestAdRun)}`,
+      status: adState?.last_status || "idle"
+    },
+    {
+      title: "ACTIVE 资源",
+      value: `${Number(resourceCounts.ads?.active || 0).toLocaleString("en-US")} ads`,
+      meta: `${Number(resourceCounts.campaigns?.active || 0)} campaigns · ${Number(resourceCounts.adsets?.active || 0)} adsets`,
+      status: "success"
+    }
+  ].map((item) => `
+    <article class="status-tile ${item.status}">
+      <span>${escapeHtml(item.title)}</span>
+      <strong>${escapeHtml(item.value)}</strong>
+      <small>${escapeHtml(item.meta)}</small>
+    </article>
+  `).join("");
+
+  const activeCampaigns = overview?.activeCampaigns || [];
+  els.campaignResolvedList.innerHTML = activeCampaigns.length
+    ? `
+      <div class="resolved-head">
+        <strong>解析出的 ACTIVE campaigns</strong>
+        <span>${activeCampaigns.length} / 维表最多显示 50</span>
+      </div>
+      <div class="resolved-items">
+        ${activeCampaigns.slice(0, 12).map((campaign) => `
+          <span title="${escapeHtml(campaign.campaign_id)}">${escapeHtml(campaign.name || campaign.campaign_id)}</span>
+        `).join("")}
+      </div>
+    `
+    : `<div class="empty-inline">资源维表还没有 ACTIVE campaigns，运行 Tool 2 或 monitor-bootstrap 后显示</div>`;
+
+  const runs = overview?.recentRuns || [];
+  els.recentRunsBody.innerHTML = runs.length
+    ? runs.map((run) => `
+      <tr>
+        <td>${run.list_type === "ads" ? "List 2" : "List 1"}</td>
+        <td><span class="run-badge ${escapeHtml(run.status)}">${statusLabel(run.status)}</span></td>
+        <td>${formatIso(run.completed_at || run.started_at)}</td>
+        <td>${formatIso(run.next_run_at)}</td>
+        <td>${Number(run.success_count || 0)} / ${Number(run.failed_count || 0)}</td>
+        <td>${Number(run.retry_count || 0)}</td>
+        <td>${formatDuration(run.duration_ms)}</td>
+        <td class="error-cell">${escapeHtml(run.error_summary || historyLabel(run))}</td>
+      </tr>
+    `).join("")
+    : `<tr><td colspan="8">还没有监控批次，运行 monitor-run 后显示。</td></tr>`;
+}
+
 function renderAccountSettings(message = "") {
-  const accounts = state.monitoredAccounts;
+  const accounts = state.samplingSettings.campaignMonitor.accountIds.length
+    ? state.samplingSettings.campaignMonitor.accountIds
+    : state.monitoredAccounts.map((account) => account.id);
   renderSettingsCaption();
-  els.monitorAccountsInput.value = accounts.map((account) => account.id).join("\n");
-  els.settingsAccountList.innerHTML = accounts.map((account) => `
-    <span class="account-pill">${account.id}</span>
-  `).join("") || `<div class="empty-inline">暂无监控账户</div>`;
+  els.monitorAccountsInput.value = accounts.join("\n");
   els.settingsStatus.textContent = message;
 }
 
 function renderSettingsCaption() {
-  const targeted = state.samplingSettings.targeted;
-  const activeCampaigns = state.samplingSettings.activeCampaigns;
+  const campaign = state.samplingSettings.campaignMonitor;
+  const ad = state.samplingSettings.adMonitor;
   els.settingsCaption.textContent = [
-    `账户 ${state.monitoredAccounts.length} 个`,
-    `定向 ${targeted.ids.length} 个`,
-    `ACTIVE ${activeCampaigns.intervalMinutes} 分钟`
+    `账户 ${campaign.accountIds.length || state.monitoredAccounts.length} 个`,
+    `campaign ${campaign.campaignIds.length} 个`,
+    `ad ${ad.adIds.length} 个`
   ].join(" · ");
 }
 
 function renderSamplingSettings() {
   const settings = state.samplingSettings;
-  const targeted = settings.targeted;
-  const activeCampaigns = settings.activeCampaigns;
+  const campaign = settings.campaignMonitor;
+  const ad = settings.adMonitor;
 
-  els.targetedEnabled.checked = targeted.enabled;
-  els.targetedLevelSelect.value = targeted.level;
-  els.targetedIdsInput.value = targeted.ids.join("\n");
-  els.targetedIntervalInput.value = targeted.intervalMinutes;
-  els.targetedDatePresetSelect.value = targeted.datePreset;
-  els.targetedResultActionInput.value = targeted.resultAction;
-  els.targetedSummary.innerHTML = summaryChips([
-    targeted.enabled ? "启用" : "停用",
-    targeted.level === "ads" ? "广告" : "广告组",
-    `${targeted.ids.length} 个对象`,
-    `${targeted.intervalMinutes} 分钟`
+  els.campaignMonitorEnabled.checked = campaign.enabled;
+  els.campaignIntervalInput.value = campaign.intervalMinutes;
+  els.campaignResultActionInput.value = campaign.resultAction;
+  els.campaignAutoActiveInput.checked = campaign.autoActiveCampaigns;
+  els.campaignIdsInput.value = campaign.campaignIds.join("\n");
+  els.campaignMonitorSummary.innerHTML = summaryChips([
+    campaign.enabled ? "启用" : "停用",
+    `${campaign.intervalMinutes} 分钟`,
+    campaign.autoActiveCampaigns ? "自动解析 ACTIVE" : "手动列表",
+    `${campaign.campaignIds.length} 个 campaign`
   ]);
 
-  els.activeCampaignsEnabled.checked = activeCampaigns.enabled;
-  els.activeCampaignIntervalInput.value = activeCampaigns.intervalMinutes;
-  els.activeCampaignDatePresetSelect.value = activeCampaigns.datePreset;
-  els.activeCampaignLimitInput.value = activeCampaigns.limit;
-  els.activeCampaignResultActionInput.value = activeCampaigns.resultAction;
-  els.activeCampaignSummary.innerHTML = summaryChips([
-    activeCampaigns.enabled ? "启用" : "停用",
-    `${activeCampaigns.intervalMinutes} 分钟`,
-    activeCampaigns.limit > 0 ? `上限 ${activeCampaigns.limit}` : "全量"
+  els.adMonitorEnabled.checked = ad.enabled;
+  els.adIntervalInput.value = ad.intervalMinutes;
+  els.adResultActionInput.value = ad.resultAction;
+  els.adConcurrencyInput.value = ad.concurrency;
+  els.adQpsInput.value = ad.qps;
+  els.adTimeoutInput.value = ad.requestTimeoutMs;
+  els.adMaxAttemptsInput.value = ad.maxAttempts;
+  els.adIdsInput.value = ad.adIds.join("\n");
+  els.adMonitorSummary.innerHTML = summaryChips([
+    ad.enabled ? "启用" : "停用",
+    `${ad.intervalMinutes} 分钟`,
+    `${ad.adIds.length} 个 ad`,
+    `${ad.concurrency} 并发`,
+    `${ad.qps}/s`
   ]);
   renderSettingsCaption();
+  renderMonitorStatus();
 }
 
 function collectSamplingSettings() {
+  const accountIds = parseIdInput(els.monitorAccountsInput.value);
+  const campaignIds = parseIdInput(els.campaignIdsInput.value);
+  const adIds = parseIdInput(els.adIdsInput.value);
   return normalizeSamplingSettings({
+    campaignMonitor: {
+      enabled: els.campaignMonitorEnabled.checked,
+      intervalMinutes: els.campaignIntervalInput.value,
+      accountIds,
+      autoActiveCampaigns: els.campaignAutoActiveInput.checked,
+      campaignIds,
+      datePreset: "",
+      resultAction: els.campaignResultActionInput.value,
+      hourly: true
+    },
+    adMonitor: {
+      enabled: els.adMonitorEnabled.checked,
+      intervalMinutes: els.adIntervalInput.value,
+      adIds,
+      datePreset: "",
+      resultAction: els.adResultActionInput.value,
+      hourly: true,
+      concurrency: els.adConcurrencyInput.value,
+      qps: els.adQpsInput.value,
+      requestTimeoutMs: els.adTimeoutInput.value,
+      maxAttempts: els.adMaxAttemptsInput.value
+    },
     targeted: {
-      enabled: els.targetedEnabled.checked,
-      level: els.targetedLevelSelect.value,
-      ids: parseIdInput(els.targetedIdsInput.value),
-      intervalMinutes: els.targetedIntervalInput.value,
-      datePreset: els.targetedDatePresetSelect.value,
-      resultAction: els.targetedResultActionInput.value,
+      enabled: els.adMonitorEnabled.checked,
+      level: "ads",
+      ids: adIds,
+      intervalMinutes: 15,
+      datePreset: "today",
+      resultAction: els.adResultActionInput.value,
       hourly: true
     },
     activeCampaigns: {
-      enabled: els.activeCampaignsEnabled.checked,
-      intervalMinutes: els.activeCampaignIntervalInput.value,
-      datePreset: els.activeCampaignDatePresetSelect.value,
-      limit: els.activeCampaignLimitInput.value,
-      resultAction: els.activeCampaignResultActionInput.value,
+      enabled: els.campaignMonitorEnabled.checked,
+      intervalMinutes: els.campaignIntervalInput.value,
+      datePreset: "today",
+      limit: campaignIds.length,
+      resultAction: els.campaignResultActionInput.value,
       hourly: true
     }
   });
@@ -631,11 +914,22 @@ async function loadSamplingSettings(message = "") {
   }
 }
 
+async function loadMonitorStatus() {
+  try {
+    const response = await fetch("/api/monitor/status", { cache: "no-store" });
+    const payload = await response.json();
+    state.monitorStatus = payload.ok ? payload.status : null;
+  } catch {
+    state.monitorStatus = null;
+  }
+  renderMonitorStatus();
+}
+
 async function loadSettings(message = "") {
-  await Promise.all([
-    loadAccountSettings(),
-    loadSamplingSettings()
-  ]);
+  await loadAccountSettings();
+  await loadSamplingSettings();
+  renderAccountSettings();
+  await loadMonitorStatus();
   if (message) {
     els.settingsStatus.textContent = message;
   }
@@ -673,6 +967,7 @@ async function saveSettings() {
     state.samplingSettings = normalizeSamplingSettings(samplingPayload.settings);
     renderAccountSettings("已保存");
     renderSamplingSettings();
+    await loadMonitorStatus();
   } catch (error) {
     els.settingsStatus.textContent = error.message || "保存失败";
   } finally {
@@ -696,7 +991,7 @@ async function loadCollectedRows() {
     applyCampaignsFromRows(rows);
     dataSourceName.textContent = payload.storage === "sqlite" ? "SQLite Insights" : "Collected Insights";
     const rowText = `${rows.length.toLocaleString("en-US")} 行`;
-    const updateText = payload.updated_at ? `更新于 ${payload.updated_at.slice(0, 19).replace("T", " ")}` : payload.source;
+    const updateText = payload.updated_at ? `更新于 ${formatInstantInDisplayTimeZone(payload.updated_at)}` : payload.source;
     dataSourceMeta.textContent = [rowText, updateText].filter(Boolean).join(" · ");
     return rows;
   } catch {
@@ -1008,7 +1303,7 @@ function formatDateTimeLabel(value) {
 }
 
 function formatRangeText() {
-  return `${formatDateTimeLabel(state.from)} 至 ${formatDateTimeLabel(state.to)}`;
+  return `${formatDateTimeLabel(state.from)} 至 ${formatDateTimeLabel(state.to)} · ${DISPLAY_TIME_ZONE_LABEL}`;
 }
 
 function renderActiveChips() {
@@ -1375,21 +1670,21 @@ function renderDashboard() {
 
 function latestDataDate() {
   if (rawRows.length === 0) {
-    return new Date();
+    return nowDisplayClockDate();
   }
   const maxTimestamp = Math.max(...rawRows.map((row) => row.timestamp));
   return new Date(maxTimestamp);
 }
 
 function sameDate(a, b) {
-  return a.getFullYear() === b.getFullYear()
-    && a.getMonth() === b.getMonth()
-    && a.getDate() === b.getDate();
+  return a.getUTCFullYear() === b.getUTCFullYear()
+    && a.getUTCMonth() === b.getUTCMonth()
+    && a.getUTCDate() === b.getUTCDate();
 }
 
 function currentHour() {
-  const now = new Date();
-  now.setMinutes(0, 0, 0);
+  const now = nowDisplayClockDate();
+  now.setUTCMinutes(0, 0, 0);
   return now;
 }
 
@@ -1629,17 +1924,20 @@ function bindEvents() {
   });
 
   [
-    els.targetedEnabled,
-    els.targetedLevelSelect,
-    els.targetedIdsInput,
-    els.targetedIntervalInput,
-    els.targetedDatePresetSelect,
-    els.targetedResultActionInput,
-    els.activeCampaignsEnabled,
-    els.activeCampaignIntervalInput,
-    els.activeCampaignDatePresetSelect,
-    els.activeCampaignLimitInput,
-    els.activeCampaignResultActionInput
+    els.campaignMonitorEnabled,
+    els.campaignIntervalInput,
+    els.campaignResultActionInput,
+    els.campaignAutoActiveInput,
+    els.monitorAccountsInput,
+    els.campaignIdsInput,
+    els.adMonitorEnabled,
+    els.adIntervalInput,
+    els.adResultActionInput,
+    els.adConcurrencyInput,
+    els.adQpsInput,
+    els.adTimeoutInput,
+    els.adMaxAttemptsInput,
+    els.adIdsInput
   ].forEach((input) => {
     input.addEventListener("change", () => {
       state.samplingSettings = collectSamplingSettings();

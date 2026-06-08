@@ -1,3 +1,5 @@
+import { dateStartInDisplayTimeZone, hourStartInDisplayTimeZone, normalizeTimeZone } from './time.js';
+
 const ADD_TO_CART_TYPES = [
   'omni_add_to_cart',
   'add_to_cart',
@@ -100,18 +102,21 @@ function selectResult({ actions, costs, spend, forcedAction }) {
 
 function hourStart(dateStart, hourlyRange) {
   if (!dateStart || !hourlyRange) return '';
-  const match = String(hourlyRange).match(/^(\d{2}):/);
+  const match = String(hourlyRange).match(/^(\d{1,2}):/);
   if (!match) return '';
-  return `${dateStart}T${match[1]}:00:00`;
+  return `${dateStart}T${String(match[1]).padStart(2, '0')}:00:00`;
 }
 
 export const insightColumns = [
   { key: 'date_start', header: '日期开始' },
+  { key: 'date_start_beijing', header: '北京时间日期开始' },
   { key: 'date_stop', header: '日期结束' },
   { key: 'hourly_range', header: '小时区间' },
   { key: 'hour_start', header: '小时开始' },
+  { key: 'hour_start_beijing', header: '北京时间小时开始' },
   { key: 'account_id', header: '广告账户ID' },
   { key: 'account_name', header: '广告账户' },
+  { key: 'account_timezone', header: '广告账户时区' },
   { key: 'campaign_id', header: '广告系列ID' },
   { key: 'campaign_name', header: '广告系列' },
   { key: 'adset_id', header: '广告组ID' },
@@ -154,14 +159,23 @@ export function normalizeInsight(row, { accountsById = new Map(), resourcesById 
   const resourceCampaignId = resource.campaign_id || (resource.__level === 'campaigns' ? resource.id : '');
   const resourceAdsetId = resource.adset_id || (resource.__level === 'adsets' ? resource.id : '');
   const resourceAdId = resource.ad_id || (resource.__level === 'ads' ? resource.id : '');
+  const accountTimezone = normalizeTimeZone(row.account_timezone || row.timezone_name || account.timezone_name || '', '');
+  const sourceTimezone = accountTimezone || 'UTC';
 
   return {
     date_start: row.date_start || '',
+    date_start_beijing: dateStartInDisplayTimeZone(row.date_start, sourceTimezone),
     date_stop: row.date_stop || '',
     hourly_range: row.hourly_stats_aggregated_by_advertiser_time_zone || '',
     hour_start: hourStart(row.date_start, row.hourly_stats_aggregated_by_advertiser_time_zone),
+    hour_start_beijing: hourStartInDisplayTimeZone({
+      dateStart: row.date_start,
+      hourlyRange: row.hourly_stats_aggregated_by_advertiser_time_zone,
+      sourceTimeZone: sourceTimezone
+    }),
     account_id: row.account_id || resource.account_id || '',
     account_name: row.account_name || account.name || '',
+    account_timezone: accountTimezone,
     campaign_id: row.campaign_id || resourceCampaignId || '',
     campaign_name: row.campaign_name || '',
     adset_id: row.adset_id || resourceAdsetId || '',
