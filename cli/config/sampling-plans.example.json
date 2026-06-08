@@ -34,14 +34,14 @@
       "123456789012345"
     ],
     "intervalMinutes": 15,
-    "datePreset": "today",
+    "datePreset": "",
     "resultAction": "",
     "hourly": true
   },
   "activeCampaigns": {
     "enabled": true,
     "intervalMinutes": 60,
-    "datePreset": "today",
+    "datePreset": "",
     "resultAction": "",
     "limit": 0,
     "hourly": true

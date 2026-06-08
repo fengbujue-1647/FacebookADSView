@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const { DatabaseSync } = require("node:sqlite");
+const { enrichInsightRowsWithTimeZone } = require("./time");
 
 const insightDbColumns = [
   "date_start",
@@ -48,7 +49,7 @@ function selectableColumns(db, tableName, columns) {
   return columns.map((column) => (existing.has(column) ? column : `'' AS ${column}`));
 }
 
-function readLatestInsightData({ databaseFile, limit = 50_000 } = {}) {
+function readLatestInsightData({ databaseFile, limit = 50_000, accountTimeZones = new Map() } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return null;
   }
@@ -86,6 +87,7 @@ function readLatestInsightData({ databaseFile, limit = 50_000 } = {}) {
       ORDER BY COALESCE(NULLIF(hour_start, ''), date_start), campaign_name, adset_name, ad_name
       LIMIT ?
     `).all(latestFact.max_date, limit);
+    const enriched = enrichInsightRowsWithTimeZone(rows, accountTimeZones);
 
     const metadata = parseJson(batch.metadata_json, {});
 
@@ -100,10 +102,11 @@ function readLatestInsightData({ databaseFile, limit = 50_000 } = {}) {
           latest_fact_date: latestFact.max_date,
           source_batch_id: batch.id,
           source_batch_row_count: batch.row_count,
-          read_mode: "recent_fact_rows"
+          read_mode: "recent_fact_rows",
+          time_zone_enriched_fields: enriched.enrichedCount
         }
       },
-      rows
+      rows: enriched.rows
     };
   } finally {
     db.close();

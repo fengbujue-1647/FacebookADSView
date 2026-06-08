@@ -32,14 +32,14 @@ const defaultSamplingSettings = {
     level: 'ads',
     ids: [],
     intervalMinutes: 15,
-    datePreset: 'today',
+    datePreset: '',
     resultAction: '',
     hourly: true
   },
   activeCampaigns: {
     enabled: true,
     intervalMinutes: 60,
-    datePreset: 'today',
+    datePreset: '',
     resultAction: '',
     limit: 0,
     hourly: true
@@ -67,6 +67,11 @@ function normalizeIds(ids = []) {
   }
 
   return normalized;
+}
+
+function normalizeStoredDatePreset(value) {
+  const text = String(value ?? '').trim();
+  return text === 'today' ? '' : text;
 }
 
 export function normalizeSamplingSettings(input = {}) {
@@ -108,14 +113,14 @@ export function normalizeSamplingSettings(input = {}) {
       level,
       ids: normalizeIds(targetedInput.ids),
       intervalMinutes: clampInteger(targetedInput.intervalMinutes, 15, 15, 30),
-      datePreset: String(targetedInput.datePreset || 'today').trim() || 'today',
+      datePreset: normalizeStoredDatePreset(targetedInput.datePreset),
       resultAction: String(targetedInput.resultAction || '').trim(),
       hourly: targetedInput.hourly !== false
     },
     activeCampaigns: {
       enabled: activeInput.enabled !== false,
       intervalMinutes: clampInteger(activeInput.intervalMinutes, 60, 30, 180),
-      datePreset: String(activeInput.datePreset || 'today').trim() || 'today',
+      datePreset: normalizeStoredDatePreset(activeInput.datePreset),
       resultAction: String(activeInput.resultAction || '').trim(),
       limit: Math.max(0, Number.parseInt(activeInput.limit, 10) || 0),
       hourly: activeInput.hourly !== false

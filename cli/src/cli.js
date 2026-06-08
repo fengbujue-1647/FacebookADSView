@@ -487,7 +487,7 @@ async function bootstrapMonitorSettings(options = {}) {
     level: 'ads',
     ids: selectedAds,
     intervalMinutes: 15,
-    datePreset: 'today',
+    datePreset: '',
     hourly: true
   };
   settings.activeCampaigns = {
@@ -495,7 +495,7 @@ async function bootstrapMonitorSettings(options = {}) {
     enabled: true,
     intervalMinutes: 180,
     limit: selectedCampaigns.length,
-    datePreset: 'today',
+    datePreset: '',
     hourly: true
   };
 
@@ -664,9 +664,9 @@ program
   .description('Tool 1：按 1-50 个 ad_id 拉广告级 hourly insights，队列重试并写入 SQLite/JSON/CSV')
   .requiredOption('--ids <ids>', 'ad_id 列表，多个用英文逗号/换行分隔')
   .option('--accounts <ids>', '用于补充 ACTIVE 维表和账户名，多个用英文逗号分隔')
-  .option('--date-preset <preset>', 'Meta 预设日期；不传则按 SQLite 自动增量/补近 7 天')
-  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
-  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--date-preset <preset>', 'Meta 预设日期（按广告账户时区解释）；不传则按账户时区自动增量/补近 7 天')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD（广告账户时区）')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--result-action <actionType>', '指定“成效”使用的 action_type')
   .option('--daily', '拉日级 Insights，不使用小时 breakdown')
   .option('--concurrency <number>', '队列并发，默认 20')
@@ -698,9 +698,9 @@ program
   .description('Tool 3：按 campaign_id 列表拉 campaign 级聚合 hourly insights 并覆盖写入 SQLite')
   .requiredOption('--ids <ids>', 'campaign_id 列表，多个用英文逗号/换行分隔')
   .option('--accounts <ids>', '用于补充 ACTIVE 维表和账户名，多个用英文逗号分隔')
-  .option('--date-preset <preset>', 'Meta 预设日期；不传则按 SQLite 自动增量/补近 7 天')
-  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
-  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--date-preset <preset>', 'Meta 预设日期（按广告账户时区解释）；不传则按账户时区自动增量/补近 7 天')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD（广告账户时区）')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--result-action <actionType>', '指定“成效”使用的 action_type')
   .option('--daily', '拉日级 Insights，不使用小时 breakdown')
   .option('--concurrency <number>', '队列并发，默认 20')
@@ -732,7 +732,7 @@ program
   .description('初始化 List 1/List 2：从监控账户挑选 ACTIVE ads/campaigns 写入本地配置')
   .option('--accounts <ids>', '覆盖监控账户，多个用英文逗号分隔')
   .option('--all-accounts', '忽略监控账户设置，扫描全部账户')
-  .option('--date-preset <preset>', '用于 spend 排名的日期，默认 yesterday')
+  .option('--date-preset <preset>', '用于 spend 排名的日期，默认 yesterday（按广告账户时区解释）')
   .option('--concurrency <number>', '队列并发，默认 20')
   .option('--qps <number>', '请求启动速率，默认 5/s')
   .option('--timeout-ms <number>', '单请求 Abort 超时，默认 7000')
@@ -750,9 +750,9 @@ program
   .option('--accounts <ids>', '覆盖账户，多个用英文逗号分隔')
   .option('--all-accounts', '忽略监控账户设置，扫描全部账户')
   .option('--ids <ids>', '覆盖当前 mode 的对象 ID')
-  .option('--date-preset <preset>', '覆盖日期预设；不传则自动增量/缺口补近 7 天')
-  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
-  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--date-preset <preset>', '覆盖日期预设（按广告账户时区解释）；不传则自动增量/缺口补近 7 天')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD（广告账户时区）')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--result-action <actionType>', '覆盖成效 action_type')
   .option('--daily', '拉日级 Insights，不使用小时 breakdown')
   .option('--concurrency <number>', '队列并发')
@@ -826,9 +826,9 @@ program
   .description('拉取账户、广告三层级资源和 Insights，并导出 CSV')
   .option('--accounts <ids>', '只拉指定账户，多个用英文逗号分隔')
   .option('--all-accounts', '忽略监控账户设置，拉取全部账户')
-  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d', 'yesterday')
-  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
-  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d（按广告账户时区解释）', 'yesterday')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD（广告账户时区）')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--level <level>', 'Insights 层级：campaigns/adsets/ads', 'ads')
   .option('--limit <number>', '限制 Insights 对象数量，联调时建议 10')
   .option('--resource-limit <number>', '限制每个账户每个资源类型的拉取数量')
@@ -870,9 +870,9 @@ program
   .description('只扫描并拉取前 N 个 ACTIVE 广告的 Insights')
   .option('--accounts <ids>', '只扫描指定账户，多个用英文逗号分隔')
   .option('--all-accounts', '忽略监控账户设置，扫描全部账户')
-  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d', 'yesterday')
-  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
-  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d（按广告账户时区解释）', 'yesterday')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD（广告账户时区）')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--limit <number>', 'ACTIVE 广告数量', '5')
   .option('--result-action <actionType>', '指定“成效”使用的 action_type，如 omni_purchase')
   .action(async (options) => {
@@ -904,9 +904,9 @@ program
   .description('只扫描并拉取前 N 个 ACTIVE 广告的小时级 Insights')
   .option('--accounts <ids>', '只扫描指定账户，多个用英文逗号分隔')
   .option('--all-accounts', '忽略监控账户设置，扫描全部账户')
-  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d', 'yesterday')
-  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
-  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d（按广告账户时区解释）', 'yesterday')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD（广告账户时区）')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--limit <number>', 'ACTIVE 广告数量', '30')
   .option('--result-action <actionType>', '指定“成效”使用的 action_type，如 omni_purchase')
   .action(async (options) => {
@@ -942,9 +942,9 @@ program
   .option('--resource-limit <number>', '限制每个账户每个资源类型的拉取数量；0 为不限制')
   .option('--probe-level <level>', '抽样验证层级：campaigns/adsets/ads', 'ads')
   .option('--probe-limit <number>', '抽样验证 ACTIVE 对象数量；0 为只统计资源量', '0')
-  .option('--date-preset <preset>', '抽样验证 Insights 日期，如 yesterday/last_7d', 'yesterday')
-  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
-  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--date-preset <preset>', '抽样验证 Insights 日期，如 yesterday/last_7d（按广告账户时区解释）', 'yesterday')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD（广告账户时区）')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--result-action <actionType>', '指定“成效”使用的 action_type')
   .action(async (options) => {
     assertCredentials();
@@ -980,9 +980,9 @@ program
   .option('--all-accounts', '忽略监控账户设置；定向对象仍按 --ids 或配置执行')
   .option('--level <level>', '监控层级：ads/adsets')
   .option('--ids <ids>', '广告或广告组 ID，多个用英文逗号分隔')
-  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d')
-  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
-  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d（按广告账户时区解释）')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD（广告账户时区）')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--result-action <actionType>', '指定“成效”使用的 action_type')
   .option('--daily', '拉日级 Insights，不使用小时 breakdown')
   .option('--force', '即使配置未启用也执行')
@@ -998,9 +998,9 @@ program
   .description('扫描 ACTIVE 广告系列并拉取全量 campaign 层级监控数据')
   .option('--accounts <ids>', '只扫描指定账户，多个用英文逗号分隔')
   .option('--all-accounts', '忽略监控账户设置，扫描全部账户')
-  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d')
-  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
-  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--date-preset <preset>', 'Meta 预设日期，如 today/yesterday/last_7d（按广告账户时区解释）')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD（广告账户时区）')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--limit <number>', '限制本次拉取的 ACTIVE campaign 数量，验证时可用')
   .option('--resource-limit <number>', '限制每个账户扫描的 campaign 数量，验证时可用')
   .option('--result-action <actionType>', '指定“成效”使用的 action_type')
@@ -1021,9 +1021,9 @@ program
   .option('--all-accounts', '忽略监控账户设置，扫描全部账户')
   .option('--level <level>', '覆盖定向监控层级：ads/adsets')
   .option('--ids <ids>', '覆盖定向监控 ID，多个用英文逗号分隔')
-  .option('--date-preset <preset>', '覆盖日期预设')
-  .option('--since <date>', '自定义开始日期 YYYY-MM-DD')
-  .option('--until <date>', '自定义结束日期 YYYY-MM-DD')
+  .option('--date-preset <preset>', '覆盖日期预设（按广告账户时区解释）')
+  .option('--since <date>', '自定义开始日期 YYYY-MM-DD（广告账户时区）')
+  .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--limit <number>', '覆盖 ACTIVE campaign 拉取数量')
   .option('--resource-limit <number>', '限制每个账户扫描的资源数量，验证时可用')
   .option('--result-action <actionType>', '覆盖成效 action_type')

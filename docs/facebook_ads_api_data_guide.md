@@ -593,7 +593,7 @@ Query 参数：
 3. time_ranges 格式：`[{"since":"2025-11-01","until":"2025-11-01"},{"since":"2025-11-02","until":"2025-11-02"}]`。
 4. breakdowns 组合限制较多，需要按 Meta 官方 Combined Breakdowns 规则验证。
 5. `hourly_stats_aggregated_by_advertiser_time_zone` 返回固定小时桶，不能切成 15 分钟或 30 分钟。
-6. 2026-06-05 实测：YinoLink 在 `time_range` 跨多天且带 hourly breakdown 时，返回的是 24 个“小时-of-day”聚合桶，不是逐日逐小时明细；监控单日小时图优先用 `date_preset=today/yesterday`。
+6. 2026-06-05 实测：YinoLink 在 `time_range` 跨多天且带 hourly breakdown 时，返回的是 24 个“小时-of-day”聚合桶，不是逐日逐小时明细；监控单日小时图应按账户 `timezone_name` 算出明确账户日期，再用 `time_range={"since":"YYYY-MM-DD","until":"YYYY-MM-DD"}`。
 7. 2026-06-05 实测：对 `campaign_id/adset_id` 传 `level=ad` 时，YinoLink 仍返回 campaign/adset 聚合行，不返回子级 `ad_id` 明细。当前不能依赖“一次请求下载整个 adset 下所有 ad 指标”。
 
 curl 示例：获取广告系列近 7 天核心指标
@@ -922,10 +922,11 @@ Meta Insights 中很多数字会以字符串返回。建议统一转换：
 
 ### 8.3 时间和时区
 
-1. account/info 可返回 timezone_name。
-2. insights 返回 date_start/date_stop。
-3. 监控口径建议使用广告账户时区，而不是服务器时区。
-4. 当前环境日期为 2026-06-04；today/yesterday 由 Meta/YinoLink 按账户时区解释，需以实际返回为准。
+1. `account/info` 可返回 `timezone_name`，这是取数目标日期的权威时区。
+2. Insights 的 `date_start/date_stop` 和 `hourly_stats_aggregated_by_advertiser_time_zone` 都是广告账户时区口径。
+3. 监控请求日期必须使用广告账户时区，而不是服务器时区或北京时间。
+4. 看板展示必须统一转换成北京时间 `Asia/Shanghai`；本项目入库字段保留原始 `hour_start`，并额外写 `account_timezone/date_start_beijing/hour_start_beijing`。
+5. 如果旧 SQLite 行缺少北京时间字段，服务端读取时会尝试用最近的 `accounts_*.json` 中的 `timezone_name` 即时补算后返回前端。
 
 ### 8.4 状态字段
 

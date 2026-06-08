@@ -58,6 +58,13 @@ docs/yinolink_api_quick_reference.md
 
 `docs/yinolink_api_quick_reference.md` 已整理 YinoLink Apifox 四个相关接口、Meta breakdowns 入口，以及 2026-06-05 对 ACTIVE 维表筛选、`level=ad`、hourly 桶和 QPS 限制的实测结论。
 
+时间口径规则：
+
+- 取数侧按广告账户 `timezone_name` 解释 `today/yesterday` 和 hourly 桶，不按服务器本地时区，也不按北京时间。
+- 默认监控不传 `date_preset=today`，会先按账户时区算出明确的 `since=until=YYYY-MM-DD` 再请求 YinoLink。
+- 前端筛选、聚合、批次时间和数据更新时间统一显示为北京时间 `Asia/Shanghai`。
+- 旧 SQLite 行如果缺少北京时间字段，服务端会用最近一次 `accounts_*.json` 的账户时区即时补算后再返回前端。
+
 安装 CLI 依赖：
 
 ```bash
@@ -161,13 +168,13 @@ npm run cli:sampling-evaluate -- --accounts 8462513793771963 --resource-limit 10
 按设置页或命令行指定的广告/广告组 ID 拉取小时级伪实时监控数据：
 
 ```bash
-npm run cli:targeted-monitor -- --level ads --ids 120238379067340623 --date-preset today
+npm run cli:targeted-monitor -- --level ads --ids 120238379067340623
 ```
 
 扫描并拉取 ACTIVE 广告系列的小时级监控数据：
 
 ```bash
-npm run cli:active-campaigns -- --accounts 8462513793771963 --date-preset today
+npm run cli:active-campaigns -- --accounts 8462513793771963
 ```
 
 按设置页配置执行一次或循环执行取样监控：

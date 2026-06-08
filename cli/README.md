@@ -136,16 +136,22 @@ npm run ad-insights -- --ids 120000000000000001,120000000000000002 --accounts 84
 npm run campaign-insights -- --ids 120000000000000001 --accounts 8462513793771963 --date-preset yesterday
 ```
 
+时间口径：
+
+- `--since/--until` 是广告账户时区下的日期，不是北京时间日期。
+- 自动监控在未显式传 `--date-preset` 时，会按账户 `timezone_name` 计算明确的单日 `time_range`。
+- Web 看板只负责把返回的账户时区小时桶转换成北京时间显示；不要把前端北京时间反向当成 YinoLink 请求日期。
+
 按广告或广告组 ID 拉取小时级伪实时数据：
 
 ```bash
-npm run targeted-monitor -- --level ads --ids 120238379067340623 --date-preset today
+npm run targeted-monitor -- --level ads --ids 120238379067340623
 ```
 
 扫描 ACTIVE 广告系列并拉取 campaign 层级小时级数据：
 
 ```bash
-npm run active-campaigns -- --accounts 8462513793771963 --date-preset today
+npm run active-campaigns -- --accounts 8462513793771963
 ```
 
 按配置执行一次或循环执行：

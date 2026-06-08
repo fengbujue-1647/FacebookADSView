@@ -102,14 +102,14 @@ const state = {
       level: "ads",
       ids: [],
       intervalMinutes: 15,
-      datePreset: "today",
+      datePreset: "",
       resultAction: "",
       hourly: true
     },
     activeCampaigns: {
       enabled: true,
       intervalMinutes: 60,
-      datePreset: "today",
+      datePreset: "",
       resultAction: "",
       limit: 0,
       hourly: true
@@ -628,6 +628,11 @@ function parseAccountInput(value) {
   return parseIdInput(value).map((id) => ({ id, name: "" }));
 }
 
+function normalizeStoredDatePreset(value) {
+  const text = String(value ?? "").trim();
+  return text === "today" ? "" : text;
+}
+
 function normalizeSamplingSettings(settings = {}) {
   const targeted = settings.targeted || {};
   const activeCampaigns = settings.activeCampaigns || {};
@@ -661,14 +666,14 @@ function normalizeSamplingSettings(settings = {}) {
       level: ["ads", "adsets"].includes(targeted.level) ? targeted.level : "ads",
       ids: Array.isArray(targeted.ids) ? targeted.ids.filter((id) => /^\d{3,32}$/.test(String(id))) : [],
       intervalMinutes: clampNumber(targeted.intervalMinutes, 15, 15, 30),
-      datePreset: targeted.datePreset || "today",
+      datePreset: normalizeStoredDatePreset(targeted.datePreset),
       resultAction: String(targeted.resultAction || "").trim(),
       hourly: targeted.hourly !== false
     },
     activeCampaigns: {
       enabled: activeCampaigns.enabled !== false,
       intervalMinutes: clampNumber(activeCampaigns.intervalMinutes, 60, 30, 180),
-      datePreset: activeCampaigns.datePreset || "today",
+      datePreset: normalizeStoredDatePreset(activeCampaigns.datePreset),
       resultAction: String(activeCampaigns.resultAction || "").trim(),
       limit: Math.max(0, Number.parseInt(activeCampaigns.limit, 10) || 0),
       hourly: activeCampaigns.hourly !== false
@@ -873,14 +878,14 @@ function collectSamplingSettings() {
       level: "ads",
       ids: adIds,
       intervalMinutes: 15,
-      datePreset: "today",
+      datePreset: "",
       resultAction: els.adResultActionInput.value,
       hourly: true
     },
     activeCampaigns: {
       enabled: els.campaignMonitorEnabled.checked,
       intervalMinutes: els.campaignIntervalInput.value,
-      datePreset: "today",
+      datePreset: "",
       limit: campaignIds.length,
       resultAction: els.campaignResultActionInput.value,
       hourly: true

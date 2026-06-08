@@ -2,16 +2,18 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const { readLatestInsightData, readMonitorOverview } = require("./database");
+const { DISPLAY_TIME_ZONE, enrichInsightRowsWithTimeZone } = require("./time");
 
 const port = Number(process.env.PORT || 3100);
 const host = process.env.HOST || "127.0.0.1";
 const publicDir = path.resolve(__dirname, "..", "public");
 const repoRoot = path.resolve(__dirname, "..");
 const databaseFile = path.join(repoRoot, "cli", "data", "fb-ads.sqlite");
+const cliRawDir = path.join(repoRoot, "cli", "data", "raw");
 const cliOutputDir = path.join(repoRoot, "cli", "data", "output");
 const monitoredAccountsFile = path.join(repoRoot, "cli", "config", "monitored-accounts.json");
 const samplingSettingsFile = path.join(repoRoot, "cli", "config", "sampling-plans.json");
-const displayTimeZone = "Asia/Shanghai";
+const displayTimeZone = DISPLAY_TIME_ZONE;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -136,6 +138,11 @@ function normalizeIds(ids = []) {
   return normalized;
 }
 
+function normalizeStoredDatePreset(value) {
+  const text = String(value ?? "").trim();
+  return text === "today" ? "" : text;
+}
+
 function normalizeSamplingSettings(input = {}) {
   const targetedInput = input.targeted || {};
   const activeInput = input.activeCampaigns || {};
@@ -173,14 +180,14 @@ function normalizeSamplingSettings(input = {}) {
       level: targetedLevel,
       ids: normalizeIds(targetedInput.ids),
       intervalMinutes: clampInteger(targetedInput.intervalMinutes, 15, 15, 30),
-      datePreset: String(targetedInput.datePreset || "today").trim() || "today",
+      datePreset: normalizeStoredDatePreset(targetedInput.datePreset),
       resultAction: String(targetedInput.resultAction || "").trim(),
       hourly: targetedInput.hourly !== false
     },
     activeCampaigns: {
       enabled: activeInput.enabled !== false,
       intervalMinutes: clampInteger(activeInput.intervalMinutes, 60, 30, 180),
-      datePreset: String(activeInput.datePreset || "today").trim() || "today",
+      datePreset: normalizeStoredDatePreset(activeInput.datePreset),
       resultAction: String(activeInput.resultAction || "").trim(),
       limit: Math.max(0, Number.parseInt(activeInput.limit, 10) || 0),
       hourly: activeInput.hourly !== false
@@ -239,9 +246,48 @@ function latestAdsDataFile() {
   return null;
 }
 
+function readRecentAccountTimeZones(limit = 30) {
+  const timeZones = new Map();
+  if (!fs.existsSync(cliRawDir)) {
+    return timeZones;
+  }
+
+  const files = fs.readdirSync(cliRawDir)
+    .filter((file) => /^accounts_.*\.json$/.test(file))
+    .map((file) => {
+      const filePath = path.join(cliRawDir, file);
+      return {
+        filePath,
+        mtimeMs: fs.statSync(filePath).mtimeMs
+      };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, limit);
+
+  for (const file of files) {
+    try {
+      const text = fs.readFileSync(file.filePath, "utf8").replace(/^\uFEFF/, "");
+      const payload = JSON.parse(text);
+      const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+      accounts.forEach((account) => {
+        const accountId = String(account.account_id || "").trim();
+        const timeZone = String(account.timezone_name || "").trim();
+        if (accountId && timeZone && !timeZones.has(accountId)) {
+          timeZones.set(accountId, timeZone);
+        }
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return timeZones;
+}
+
 function sendLatestAdsData(res) {
+  const accountTimeZones = readRecentAccountTimeZones();
   try {
-    const latestFromDb = readLatestInsightData({ databaseFile });
+    const latestFromDb = readLatestInsightData({ databaseFile, accountTimeZones });
     if (latestFromDb?.rows?.length) {
       writeJson(res, 200, {
         ok: true,
@@ -256,6 +302,9 @@ function sendLatestAdsData(res) {
         },
         updated_at: latestFromDb.batch.completed_at,
         display_time_zone: displayTimeZone,
+        metadata: {
+          time_zone_enriched_fields: latestFromDb.batch.metadata.time_zone_enriched_fields || 0
+        },
         rows: latestFromDb.rows
       });
       return;
@@ -271,12 +320,16 @@ function sendLatestAdsData(res) {
   }
 
   try {
+    const enriched = enrichInsightRowsWithTimeZone(latest.rows, accountTimeZones);
     writeJson(res, 200, {
       ok: true,
       source: latest.file,
       updated_at: new Date(latest.mtimeMs).toISOString(),
       display_time_zone: displayTimeZone,
-      rows: latest.rows
+      rows: enriched.rows,
+      metadata: {
+        time_zone_enriched_fields: enriched.enrichedCount
+      }
     });
   } catch (readError) {
     writeJson(res, 500, {

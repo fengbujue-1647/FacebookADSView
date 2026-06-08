@@ -65,6 +65,12 @@ function resourceTypeForLevel(level) {
   return 'ads';
 }
 
+function objectIdLabelForResourceType(resourceType) {
+  if (resourceType === 'ads') return 'ad_id';
+  if (resourceType === 'adsets') return 'adset_id';
+  return 'campaign_id';
+}
+
 function isActive(row) {
   return String(row?.effective_status || row?.status || '').toUpperCase() === 'ACTIVE';
 }
@@ -312,7 +318,8 @@ export class SyncService {
       return tagSlicesWithTimeZone(hourly ? dateRangeDays(recent.since, recent.until) : [recent], resolvedTimeZone);
     }
 
-    return tagSlicesWithTimeZone([{ datePreset: 'today' }], resolvedTimeZone);
+    const today = recentSevenDays(resolvedTimeZone).until;
+    return tagSlicesWithTimeZone([{ since: today, until: today }], resolvedTimeZone);
   }
 
   async pullQueuedInsights({
@@ -331,13 +338,17 @@ export class SyncService {
     maxAttempts = 8,
     source = '',
     outputName = '',
-    tool = ''
+    tool = '',
+    maxObjects
   } = {}) {
     const resourceType = resourceTypeForLevel(level);
+    const objectLimit = Number.isFinite(maxObjects)
+      ? maxObjects
+      : (resourceType === 'ads' ? 50 : 100);
     const normalizedIds = normalizeObjectIds(ids, {
       min: 1,
-      max: resourceType === 'ads' ? 50 : 100,
-      label: resourceType === 'ads' ? 'ad_id' : 'campaign_id'
+      max: objectLimit,
+      label: objectIdLabelForResourceType(resourceType)
     });
     const resourceRows = (resources[resourceType] || [])
       .map((row) => resourceIdentity(row, resourceType))
@@ -686,7 +697,7 @@ export class SyncService {
     accounts: accountIds = [],
     level = 'ads',
     ids = [],
-    datePreset = 'today',
+    datePreset,
     since,
     until,
     resultAction = '',
@@ -697,18 +708,32 @@ export class SyncService {
       ? await this.syncAccounts({ accountIds })
       : { ids: [], accounts: [] };
     const targets = ids.map((id) => resourceIdentity({ id, name: id }, resourceType));
+    let resolvedTargetResources = targets;
+    if (accountsResult.ids.length > 1) {
+      const accountResources = await this.syncResourceType({
+        accountIds: accountsResult.ids,
+        getType: resourceType
+      });
+      const resourcesById = new Map(accountResources
+        .map((row) => resourceIdentity(row, resourceType))
+        .map((row) => [String(row.id), row]));
+      resolvedTargetResources = targets.map((target) => resourcesById.get(String(target.id)) || target);
+    }
 
-    const insights = await this.syncInsights({
-      resources: resourcesForLevel(resourceType, targets),
+    const insights = await this.pullQueuedInsights({
+      ids,
+      resources: resourcesForLevel(resourceType, resolvedTargetResources),
       accounts: accountsResult.accounts,
       level: resourceType,
-      datePreset,
+      datePreset: datePreset || undefined,
       since,
       until,
       resultAction,
       hourly,
+      maxObjects: Number.MAX_SAFE_INTEGER,
       source: hourly ? `targeted-${resourceType}-hourly` : `targeted-${resourceType}`,
-      outputName: hourly ? `facebook_ads_targeted_${resourceType}_hourly` : `facebook_ads_targeted_${resourceType}`
+      outputName: hourly ? `facebook_ads_targeted_${resourceType}_hourly` : `facebook_ads_targeted_${resourceType}`,
+      tool: hourly ? `targeted-${resourceType}-hourly` : `targeted-${resourceType}`
     });
 
     return {
@@ -720,7 +745,7 @@ export class SyncService {
 
   async pullActiveCampaigns({
     accounts: accountIds = [],
-    datePreset = 'today',
+    datePreset,
     since,
     until,
     limit = 0,
@@ -743,19 +768,35 @@ export class SyncService {
     info(`ACTIVE 广告系列：${activeCampaigns.length}`);
     info(`本次拉取广告系列：${selectedCampaigns.length}`);
 
-    const insights = await this.syncInsights({
-      resources: resourcesForLevel('campaigns', selectedCampaigns),
-      accounts: accountsResult.accounts,
-      level: 'campaigns',
-      datePreset,
-      since,
-      until,
-      resultAction,
-      hourly,
-      source: hourly ? 'active-campaigns-hourly' : 'active-campaigns',
-      outputName: hourly ? 'facebook_ads_active_campaigns_hourly' : 'facebook_ads_active_campaigns',
-      limit: 0
-    });
+    const insights = selectedCampaigns.length
+      ? await this.pullQueuedInsights({
+        ids: selectedCampaigns.map((row) => String(row.id || row.campaign_id)),
+        resources: resourcesForLevel('campaigns', selectedCampaigns),
+        accounts: accountsResult.accounts,
+        level: 'campaigns',
+        datePreset: datePreset || undefined,
+        since,
+        until,
+        resultAction,
+        hourly,
+        maxObjects: Number.MAX_SAFE_INTEGER,
+        source: hourly ? 'active-campaigns-hourly' : 'active-campaigns',
+        outputName: hourly ? 'facebook_ads_active_campaigns_hourly' : 'facebook_ads_active_campaigns',
+        tool: hourly ? 'active-campaigns-hourly' : 'active-campaigns'
+      })
+      : await this.syncInsights({
+        resources: resourcesForLevel('campaigns', selectedCampaigns),
+        accounts: accountsResult.accounts,
+        level: 'campaigns',
+        datePreset: datePreset || '',
+        since,
+        until,
+        resultAction,
+        hourly,
+        source: hourly ? 'active-campaigns-hourly' : 'active-campaigns',
+        outputName: hourly ? 'facebook_ads_active_campaigns_hourly' : 'facebook_ads_active_campaigns',
+        limit: 0
+      });
 
     return {
       accounts: accountsResult.accounts,
