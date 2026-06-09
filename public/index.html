@@ -4,11 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FB 广告数据看板</title>
-  <link rel="stylesheet" href="/vendor/tom-select.min.css">
-  <link rel="stylesheet" href="/styles.css?v=20260608-1">
-  <script defer src="/vendor/echarts.min.js?v=20260608-2"></script>
-  <script defer src="/vendor/tom-select.complete.min.js?v=20260608-2"></script>
-  <script async src="https://unpkg.com/lucide@latest" onload="window.lucide?.createIcons?.()"></script>
+  <link rel="stylesheet" href="/styles.css?v=20260608-8">
+  <link rel="stylesheet" href="/alert-ai.css?v=20260608-1">
+  <script defer src="/vendor/echarts.simple.min.js?v=20260608-5"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -26,13 +24,17 @@
           <i data-lucide="area-chart"></i>
           <span>图表看板</span>
         </button>
-        <button class="nav-item" type="button" data-view="data">
-          <i data-lucide="gauge"></i>
-          <span>数据看板</span>
-        </button>
         <button class="nav-item" type="button" data-view="list">
           <i data-lucide="list-filter"></i>
           <span>列表看板</span>
+        </button>
+        <button class="nav-item" type="button" data-view="alerts">
+          <i data-lucide="bell-ring"></i>
+          <span>预警监控</span>
+        </button>
+        <button class="nav-item" type="button" data-view="analysis">
+          <i data-lucide="sparkles"></i>
+          <span>AI 分析</span>
         </button>
         <button class="nav-item" type="button" data-view="settings">
           <i data-lucide="settings"></i>
@@ -80,14 +82,6 @@
             <div class="control-group">
               <label for="toDate">结束时间(北京时间)</label>
               <input id="toDate" type="datetime-local" step="3600">
-            </div>
-            <div class="control-group">
-              <label for="fromMonth">开始月份</label>
-              <input id="fromMonth" type="month">
-            </div>
-            <div class="control-group">
-              <label for="toMonth">结束月份</label>
-              <input id="toMonth" type="month">
             </div>
             <div class="control-group">
               <label>计算方式</label>
@@ -151,7 +145,7 @@
         </section>
       </section>
 
-      <section class="view-panel" data-view-panel="data" hidden>
+      <section class="view-panel" data-view-panel="list" hidden>
         <section class="kpi-grid" id="kpiGrid" aria-label="关键指标"></section>
         <section class="panel metric-panel">
           <div class="panel-head">
@@ -162,17 +156,21 @@
           </div>
           <div class="metric-grid" id="metricGrid"></div>
         </section>
-      </section>
 
-      <section class="view-panel" data-view-panel="list" hidden>
         <section class="panel table-panel">
-        <div class="panel-head">
-          <div>
-            <h2>广告系列汇总</h2>
-            <span id="tableCaption">当前时间窗口</span>
+          <div class="panel-head list-panel-head">
+            <div>
+              <h2 id="tableTitle">广告系列汇总</h2>
+              <span id="tableCaption">当前时间窗口</span>
+            </div>
+            <div class="list-actions">
+              <div class="segmented compact-segmented" role="group" aria-label="列表层级">
+                <button type="button" class="segment active" data-list-mode="campaigns">广告系列</button>
+                <button type="button" class="segment" data-list-mode="ads">广告</button>
+              </div>
+              <div class="table-count" id="tableCount">0 行</div>
+            </div>
           </div>
-          <div class="table-count" id="tableCount">0 行</div>
-        </div>
           <div class="table-scroll">
             <table>
               <thead id="tableHead"></thead>
@@ -180,6 +178,27 @@
             </table>
           </div>
         </section>
+
+        <section class="panel chart-panel list-ad-chart-panel" id="listAdChartPanel" hidden>
+          <div class="panel-head">
+            <div>
+              <h2 id="listAdChartTitle">单广告趋势</h2>
+              <span id="listAdChartCaption">从广告列表选择一个 ad 后展示</span>
+            </div>
+            <button class="secondary-button" id="clearAdDrilldownButton" type="button">
+              <i data-lucide="x"></i>
+              <span>清除下钻</span>
+            </button>
+          </div>
+          <div class="chart-wrap compact-chart-wrap">
+            <div id="listAdChart" class="chart compact-chart"></div>
+            <div class="empty-state" id="listAdChartEmpty" hidden>当前广告没有可展示趋势</div>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-panel" data-view-panel="alert-ai" hidden>
+        <section id="alertAiModule" class="alert-ai-module" aria-label="广告预警与智能 AI 分析系统"></section>
       </section>
 
       <section class="view-panel" data-view-panel="settings" hidden>
@@ -193,6 +212,15 @@
               <button class="icon-button" id="reloadSettingsButton" type="button" title="刷新账户设置" aria-label="刷新账户设置">
                 <i data-lucide="refresh-cw"></i>
               </button>
+              <button class="secondary-button" id="refreshResourcesButton" type="button">
+                <i data-lucide="database-zap"></i>
+                <span>刷新 ACTIVE 资源</span>
+              </button>
+              <button class="secondary-button" id="resetSettingsButton" type="button" disabled>
+                <i data-lucide="undo-2"></i>
+                <span>取消改动</span>
+              </button>
+              <span class="settings-status" id="settingsStatus" role="status"></span>
               <button class="primary-button" id="saveSettingsButton" type="button">
                 <i data-lucide="save"></i>
                 <span>保存</span>
@@ -223,17 +251,46 @@
                     <label for="campaignResultActionInput">成效口径</label>
                     <input id="campaignResultActionInput" type="text" placeholder="omni_purchase">
                   </div>
-                  <label class="switch settings-switch wide-switch">
+                  <label class="switch settings-switch wide-switch tooltip-switch" data-tooltip="开启后，List 1 会按监控账户自动拉取账户下 ACTIVE 广告系列；关闭后只使用下方勾选列表。" title="开启后，List 1 会按监控账户自动拉取账户下 ACTIVE 广告系列；关闭后只使用下方勾选列表。">
                     <input id="campaignAutoActiveInput" type="checkbox">
-                    <span>账户解析 ACTIVE campaigns</span>
+                    <span>自动解析 ACTIVE 广告系列</span>
                   </label>
                   <div class="control-group settings-field wide">
                     <label for="monitorAccountsInput">监控账户 ID</label>
-                    <textarea id="monitorAccountsInput" rows="5" spellcheck="false" placeholder="8462513793771963"></textarea>
+                    <textarea id="monitorAccountsInput" rows="3" spellcheck="false" placeholder="8462513793771963"></textarea>
                   </div>
-                  <div class="control-group settings-field wide">
-                    <label for="campaignIdsInput">手动 campaign ID</label>
-                    <textarea id="campaignIdsInput" rows="6" spellcheck="false" placeholder="120238379067340623"></textarea>
+                  <input id="campaignIdsInput" type="hidden">
+                  <div class="control-group settings-field wide resource-field">
+                    <div class="resource-field-head">
+                      <label for="campaignPickerToggle" class="tooltip-label" data-tooltip="List 1 不限制广告系列数量；可从 ACTIVE 候选批量选择，也可手动补充 ID。实际运行频率仍取决于接口 QPS、采集耗时和账户数据量。">广告系列勾选列表</label>
+                      <span id="campaignPickerMeta">候选加载中</span>
+                    </div>
+                    <div class="resource-picker" data-resource-picker="campaigns">
+                      <button class="select-button resource-picker-toggle" id="campaignPickerToggle" type="button" aria-expanded="false" aria-controls="campaignPickerDropdown">
+                        <span id="campaignPickerLabel">选择广告系列</span>
+                        <i data-lucide="chevron-down"></i>
+                      </button>
+                      <div class="resource-dropdown" id="campaignPickerDropdown" hidden>
+                        <div class="resource-search">
+                          <i data-lucide="search"></i>
+                          <input id="campaignSearchInput" type="search" placeholder="搜索广告系列名称或 ID">
+                        </div>
+                        <div class="resource-toolbar">
+                          <button type="button" data-resource-action="select-filtered" data-resource-kind="campaigns">全选当前</button>
+                          <button type="button" data-resource-action="clear" data-resource-kind="campaigns">清空已选</button>
+                          <button type="button" data-resource-action="reload" data-resource-kind="campaigns">重读候选</button>
+                        </div>
+                        <div class="resource-option-list" id="campaignOptionList"></div>
+                      </div>
+                    </div>
+                    <div class="manual-add-row">
+                      <input id="campaignManualIdInput" type="text" inputmode="numeric" placeholder="手动补充广告系列 ID">
+                      <button type="button" data-resource-action="manual-add" data-resource-kind="campaigns">
+                        <i data-lucide="plus"></i>
+                        <span>添加</span>
+                      </button>
+                    </div>
+                    <div class="selected-resource-list" id="campaignSelectedList"></div>
                   </div>
                 </div>
                 <div class="settings-summary" id="campaignMonitorSummary"></div>
@@ -276,9 +333,38 @@
                     <label for="adMaxAttemptsInput">最大尝试</label>
                     <input id="adMaxAttemptsInput" type="number" min="1" max="20" step="1">
                   </div>
-                  <div class="control-group settings-field wide">
-                    <label for="adIdsInput">ad ID</label>
-                    <textarea id="adIdsInput" rows="10" spellcheck="false" placeholder="120238379067340623"></textarea>
+                  <div class="control-group settings-field wide resource-field">
+                    <input id="adIdsInput" type="hidden">
+                    <div class="resource-field-head">
+                      <label for="adPickerToggle" class="tooltip-label" data-tooltip="List 2 不限制 ad 数量；建议优先选择近期有消耗且更新时间较新的广告。数量越大，单轮采集时间和触发限流的概率越高。">ad 勾选列表</label>
+                      <span id="adPickerMeta">候选加载中</span>
+                    </div>
+                    <div class="resource-picker" data-resource-picker="ads">
+                      <button class="select-button resource-picker-toggle" id="adPickerToggle" type="button" aria-expanded="false" aria-controls="adPickerDropdown">
+                        <span id="adPickerLabel">选择 ad</span>
+                        <i data-lucide="chevron-down"></i>
+                      </button>
+                      <div class="resource-dropdown" id="adPickerDropdown" hidden>
+                        <div class="resource-search">
+                          <i data-lucide="search"></i>
+                          <input id="adSearchInput" type="search" placeholder="搜索广告系列、广告组、广告名称或 ID">
+                        </div>
+                        <div class="resource-toolbar">
+                          <button type="button" data-resource-action="select-filtered" data-resource-kind="ads">全选当前</button>
+                          <button type="button" data-resource-action="clear" data-resource-kind="ads">清空已选</button>
+                          <button type="button" data-resource-action="reload" data-resource-kind="ads">重读候选</button>
+                        </div>
+                        <div class="resource-option-list" id="adOptionList"></div>
+                      </div>
+                    </div>
+                    <div class="manual-add-row">
+                      <input id="adManualIdInput" type="text" inputmode="numeric" placeholder="手动补充 ad ID">
+                      <button type="button" data-resource-action="manual-add" data-resource-kind="ads">
+                        <i data-lucide="plus"></i>
+                        <span>添加</span>
+                      </button>
+                    </div>
+                    <div class="selected-resource-list" id="adSelectedList"></div>
                   </div>
                 </div>
                 <div class="settings-summary" id="adMonitorSummary"></div>
@@ -288,7 +374,6 @@
             <section class="recent-runs">
               <div class="recent-runs-head">
                 <h3>最近批次</h3>
-                <span id="settingsStatus" role="status"></span>
               </div>
               <div class="table-scroll compact-table">
                 <table>
@@ -314,6 +399,7 @@
     </main>
   </div>
 
-  <script defer src="/app.js?v=20260608-2"></script>
+  <script defer src="/app.js?v=20260608-8"></script>
+  <script defer src="/alert-ai.js?v=20260608-1"></script>
 </body>
 </html>

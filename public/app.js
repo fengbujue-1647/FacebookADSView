@@ -61,9 +61,20 @@ const metricFieldIds = metricFields.map((field) => field.id);
 const defaultFields = ["spend", "roas", "ctr_all", "clicks_all", "add_to_cart", "initiate_checkout", "purchases"];
 const coreFields = ["spend", "roas", "ctr_all", "clicks_all", "results", "cost_per_result"];
 const sumKeys = ["budget", "spend", "impressions", "clicks_all", "reach", "add_to_cart", "initiate_checkout", "purchases", "revenue", "results", "actions"];
+const ACTIVE_RESOURCE_ACCOUNT_ID = "8462513793771963";
+const TOM_SELECT_STYLE_URL = "/vendor/tom-select.min.css";
+const TOM_SELECT_SCRIPT_URL = "/vendor/tom-select.complete.min.js";
+const RESOURCE_LIMITS = {
+  campaigns: Number.POSITIVE_INFINITY,
+  ads: Number.POSITIVE_INFINITY
+};
+const RESOURCE_SELECTED_PAGE_SIZE = 8;
 
 const state = {
   activeView: "chart",
+  activeSettingsTab: "monitors",
+  listMode: "campaigns",
+  selectedAdId: "",
   granularity: "day",
   selectedFields: new Set(defaultFields),
   selectedCampaigns: new Set(),
@@ -74,6 +85,38 @@ const state = {
   activeWindowPreset: "",
   monitoredAccounts: [],
   monitorStatus: null,
+  resourceCatalog: {
+    account_id: ACTIVE_RESOURCE_ACCOUNT_ID,
+    stale: true,
+    campaigns: [],
+    ads: [],
+    counts: {
+      campaigns: { total: 0, active: 0 },
+      adsets: { total: 0, active: 0 },
+      ads: { total: 0, active: 0, chain_active: 0 }
+    },
+    last_synced_at: ""
+  },
+  resourceRefresh: null,
+  resourceUi: {
+    campaigns: {
+      open: false,
+      query: "",
+      editingId: "",
+      selectedPage: 1
+    },
+    ads: {
+      open: false,
+      query: "",
+      editingId: "",
+      selectedPage: 1
+    }
+  },
+  savedSettingsSnapshot: "",
+  settingsLoaded: false,
+  settingsLoading: false,
+  settingsLoadPromise: null,
+  settingsMessage: "",
   samplingSettings: {
     campaignMonitor: {
       enabled: true,
@@ -122,13 +165,17 @@ const viewCopy = {
     title: "FB 广告图表看板",
     subtitle: "按时间查看广告指标走势和窗口变化。"
   },
-  data: {
-    title: "FB 广告数据看板",
-    subtitle: "查看当前时间窗口内的核心指标和指标总览。"
-  },
   list: {
     title: "FB 广告列表看板",
-    subtitle: "按广告系列查看投放状态、花费和转化表现。"
+    subtitle: "查看核心指标、广告系列与广告明细，并从列表下钻单个广告趋势。"
+  },
+  alerts: {
+    title: "广告预警监控",
+    subtitle: "管理预警模板、历史预警消息和消息推送记录。"
+  },
+  analysis: {
+    title: "AI 分析报告",
+    subtitle: "调用 DeepSeek 分析真实采集数据并输出结论。"
   },
   settings: {
     title: "设置",
@@ -137,6 +184,7 @@ const viewCopy = {
 };
 
 let chart;
+let listChart;
 let rawRows = [];
 let lastChartData = [];
 let lastChartRows = [];
@@ -145,6 +193,8 @@ let currentSeriesRaw = {};
 let campaignSelect;
 let fieldSelect;
 let isSyncingSelects = false;
+let choicePickerPromise = null;
+let iconRefreshPending = false;
 
 const chartPalette = [
   "#2563eb",
@@ -159,6 +209,37 @@ const chartPalette = [
   "#475569"
 ];
 
+const iconPaths = {
+  "area-chart": ["M3 3v18h18", "M7 15l4-4 4 4 5-8"],
+  "gauge": ["M4 14a8 8 0 0 1 16 0", "M12 14l4-4", "M8 18h8"],
+  "list-filter": ["M3 6h18", "M6 12h12", "M10 18h4"],
+  "bell-ring": ["M6 8a6 6 0 0 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9", "M10.3 21a2 2 0 0 0 3.4 0", "M4 2 2 4", "M20 2l2 2"],
+  "settings": ["M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8", "M12 2v3", "M12 19v3", "M4.9 4.9l2.1 2.1", "M17 17l2.1 2.1", "M2 12h3", "M19 12h3", "M4.9 19.1 7 17", "M17 7l2.1-2.1"],
+  "rotate-ccw": ["M3 12a9 9 0 1 0 3-6.7", "M3 3v6h6"],
+  "sliders-horizontal": ["M3 6h10", "M17 6h4", "M14 4v4", "M3 12h4", "M11 12h10", "M8 10v4", "M3 18h12", "M19 18h2", "M16 16v4"],
+  "chevron-down": ["M6 9l6 6 6-6"],
+  "chevron-left": ["M15 18l-6-6 6-6"],
+  "chevron-right": ["M9 18l6-6-6-6"],
+  "chevrons-left": ["M11 17l-5-5 5-5", "M18 17l-5-5 5-5"],
+  "chevrons-right": ["M6 17l5-5-5-5", "M13 17l5-5-5-5"],
+  "refresh-cw": ["M21 12a9 9 0 0 1-15.5 6.2", "M21 3v6h-6", "M3 12a9 9 0 0 1 15.5-6.2", "M3 21v-6h6"],
+  "database-zap": ["M4 6c0 2 4 3 8 3s8-1 8-3-4-3-8-3-8 1-8 3z", "M4 6v6c0 2 4 3 8 3h1", "M4 12v6c0 2 4 3 8 3h1", "M17 12l-3 5h4l-2 5 5-7h-4l2-3z"],
+  "undo-2": ["M9 14 4 9l5-5", "M4 9h10a6 6 0 0 1 0 12h-2"],
+  "save": ["M5 3h14l2 2v16H3V3h2z", "M7 3v6h10V3", "M7 21v-8h10v8"],
+  "search": ["M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16z", "M21 21l-4.3-4.3"],
+  "check": ["M20 6 9 17l-5-5"],
+  "x": ["M18 6 6 18", "M6 6l12 12"],
+  "plus": ["M12 5v14", "M5 12h14"],
+  "pencil": ["M17 3l4 4L8 20H4v-4L17 3z", "M15 5l4 4"],
+  "copy": ["M8 8h12v12H8z", "M4 16V4h12"],
+  "download": ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M7 10l5 5 5-5", "M12 15V3"],
+  "send": ["M22 2 11 13", "M22 2l-7 20-4-9-9-4 20-7z"],
+  "sparkles": ["M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z", "M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z", "M5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14z"],
+  "file-text": ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M8 13h8", "M8 17h8", "M8 9h2"],
+  "triangle-alert": ["M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z", "M12 9v4", "M12 17h.01"],
+  "trash-2": ["M3 6h18", "M8 6V4h8v2", "M6 6l1 16h10l1-16", "M10 11v6", "M14 11v6"]
+};
+
 const els = {
   pageTitle: document.getElementById("pageTitle"),
   pageSubtitle: document.getElementById("pageSubtitle"),
@@ -167,8 +248,6 @@ const els = {
   activeChips: document.getElementById("activeChips"),
   fromDate: document.getElementById("fromDate"),
   toDate: document.getElementById("toDate"),
-  fromMonth: document.getElementById("fromMonth"),
-  toMonth: document.getElementById("toMonth"),
   campaignFilter: document.getElementById("campaignFilter"),
   deliveryFilter: document.getElementById("deliveryFilter"),
   fieldFilter: document.getElementById("fieldFilter"),
@@ -177,8 +256,15 @@ const els = {
   chartCaption: document.getElementById("chartCaption"),
   metricCaption: document.getElementById("metricCaption"),
   metricGrid: document.getElementById("metricGrid"),
+  tableTitle: document.getElementById("tableTitle"),
   tableCaption: document.getElementById("tableCaption"),
   tableCount: document.getElementById("tableCount"),
+  listAdChartPanel: document.getElementById("listAdChartPanel"),
+  listAdChartTitle: document.getElementById("listAdChartTitle"),
+  listAdChartCaption: document.getElementById("listAdChartCaption"),
+  listAdChart: document.getElementById("listAdChart"),
+  listAdChartEmpty: document.getElementById("listAdChartEmpty"),
+  clearAdDrilldownButton: document.getElementById("clearAdDrilldownButton"),
   normalizeToggle: document.getElementById("normalizeToggle"),
   kpiGrid: document.getElementById("kpiGrid"),
   tableHead: document.getElementById("tableHead"),
@@ -191,12 +277,22 @@ const els = {
   monitorAccountsInput: document.getElementById("monitorAccountsInput"),
   settingsStatus: document.getElementById("settingsStatus"),
   reloadSettingsButton: document.getElementById("reloadSettingsButton"),
+  refreshResourcesButton: document.getElementById("refreshResourcesButton"),
+  resetSettingsButton: document.getElementById("resetSettingsButton"),
   saveSettingsButton: document.getElementById("saveSettingsButton"),
   campaignMonitorEnabled: document.getElementById("campaignMonitorEnabled"),
   campaignIntervalInput: document.getElementById("campaignIntervalInput"),
   campaignResultActionInput: document.getElementById("campaignResultActionInput"),
   campaignAutoActiveInput: document.getElementById("campaignAutoActiveInput"),
   campaignIdsInput: document.getElementById("campaignIdsInput"),
+  campaignPickerToggle: document.getElementById("campaignPickerToggle"),
+  campaignPickerDropdown: document.getElementById("campaignPickerDropdown"),
+  campaignPickerLabel: document.getElementById("campaignPickerLabel"),
+  campaignPickerMeta: document.getElementById("campaignPickerMeta"),
+  campaignSearchInput: document.getElementById("campaignSearchInput"),
+  campaignManualIdInput: document.getElementById("campaignManualIdInput"),
+  campaignOptionList: document.getElementById("campaignOptionList"),
+  campaignSelectedList: document.getElementById("campaignSelectedList"),
   campaignMonitorSummary: document.getElementById("campaignMonitorSummary"),
   campaignResolvedList: document.getElementById("campaignResolvedList"),
   adMonitorEnabled: document.getElementById("adMonitorEnabled"),
@@ -207,6 +303,14 @@ const els = {
   adTimeoutInput: document.getElementById("adTimeoutInput"),
   adMaxAttemptsInput: document.getElementById("adMaxAttemptsInput"),
   adIdsInput: document.getElementById("adIdsInput"),
+  adPickerToggle: document.getElementById("adPickerToggle"),
+  adPickerDropdown: document.getElementById("adPickerDropdown"),
+  adPickerLabel: document.getElementById("adPickerLabel"),
+  adPickerMeta: document.getElementById("adPickerMeta"),
+  adSearchInput: document.getElementById("adSearchInput"),
+  adManualIdInput: document.getElementById("adManualIdInput"),
+  adOptionList: document.getElementById("adOptionList"),
+  adSelectedList: document.getElementById("adSelectedList"),
   adMonitorSummary: document.getElementById("adMonitorSummary"),
   recentRunsBody: document.getElementById("recentRunsBody")
 };
@@ -296,10 +400,6 @@ function toDateTimeInputValue(date) {
   return `${toDateValue(date)}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
 }
 
-function toMonthInputValue(date) {
-  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}`;
-}
-
 function startOfDay(date) {
   const next = new Date(date);
   next.setUTCHours(0, 0, 0, 0);
@@ -338,16 +438,6 @@ function formatInstantInDisplayTimeZone(value) {
     return String(value).slice(0, 19).replace("T", " ");
   }
   return `${toDateTimeInputValue(clockDate).replace("T", " ")} ${DISPLAY_TIME_ZONE_OFFSET_LABEL}`;
-}
-
-function monthStart(value) {
-  const [year, month] = value.split("-").map(Number);
-  return new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
-}
-
-function monthEnd(value) {
-  const [year, month] = value.split("-").map(Number);
-  return new Date(Date.UTC(year, month, 0, 23, 0, 0, 0));
 }
 
 function addDays(date, amount) {
@@ -529,13 +619,25 @@ function buildRawRows() {
       const purchases = Math.round(initiateCheckout * purchaseRate);
       const revenue = purchases * campaign.aov * (0.86 + seededNoise(dayIndex * 13 + hour + index) * 0.34);
       const reach = Math.round(impressions / (1.08 + seededNoise(dayIndex + hour + index) * 0.62));
+      const adIndex = 1 + Math.floor(seededNoise(dayIndex * 29 + hour * 7 + index * 11) * 3);
+      const adId = `${campaign.id}_ad_${adIndex}`;
+      const adsetId = `${campaign.id}_set_${adIndex}`;
 
       rows.push({
         timestamp: time,
+        account: "Demo Account",
+        accountId: "demo_account",
         campaign: campaign.name,
         campaignId: campaign.id,
+        campaignName: campaign.name,
+        adsetId,
+        adsetName: `${campaign.name} · Set ${adIndex}`,
+        adId,
+        adName: `${campaign.name} · Creative ${adIndex}`,
         delivery: campaign.delivery,
         objective: campaign.objective,
+        dataDate: labelForBucket(new Date(time), "day"),
+        dataUpdatedAt: new Date(time + MS_HOUR).toISOString(),
         budget: campaign.dailyBudget / 24,
         spend,
         impressions,
@@ -565,13 +667,27 @@ function mapCollectedRow(row) {
   const roas = Number(row.roas || 0);
   const purchaseValue = Number(row.purchase_value || 0) || spend * roas;
   const campaignId = row.campaign_id || row.adset_id || row.ad_id || row.campaign_name || "unknown";
+  const campaignName = row.campaign_name || "";
+  const adsetId = row.adset_id || "";
+  const adsetName = row.adset_name || "";
+  const adId = row.ad_id || "";
+  const adName = row.ad_name || "";
 
   return {
     timestamp,
-    campaign: row.campaign_name || row.adset_name || row.ad_name || campaignId,
+    account: row.account_name || row.account_id || "",
+    accountId: row.account_id || "",
+    campaign: campaignName || adsetName || adName || campaignId,
     campaignId,
+    campaignName,
+    adsetId,
+    adsetName,
+    adId,
+    adName,
     delivery: row.effective_status || "未知",
     objective: row.result_type || "",
+    dataDate: row.date_start_beijing || row.date_start || "",
+    dataUpdatedAt: row.updated_at || "",
     budget: 0,
     spend,
     impressions: Number(row.impressions || 0),
@@ -592,7 +708,7 @@ function applyCampaignsFromRows(rows) {
     if (!campaigns.has(row.campaignId)) {
       campaigns.set(row.campaignId, {
         id: row.campaignId,
-        name: row.campaign,
+        name: row.campaignName || row.campaign,
         delivery: row.delivery,
         objective: row.objective,
         dailyBudget: 0,
@@ -682,7 +798,7 @@ function normalizeSamplingSettings(settings = {}) {
 }
 
 function summaryChips(items) {
-  return items.map((item) => `<span>${item}</span>`).join("");
+  return items.filter(Boolean).map((item) => `<span>${item}</span>`).join("");
 }
 
 function escapeHtml(value) {
@@ -705,6 +821,463 @@ function formatDuration(ms) {
   return `${(value / 60_000).toFixed(1)}m`;
 }
 
+function resourceKindConfig(kind) {
+  if (kind === "campaigns") {
+    return {
+      idsKey: "campaignIds",
+      monitorKey: "campaignMonitor",
+      optionList: els.campaignOptionList,
+      selectedList: els.campaignSelectedList,
+      toggle: els.campaignPickerToggle,
+      dropdown: els.campaignPickerDropdown,
+      label: els.campaignPickerLabel,
+      meta: els.campaignPickerMeta,
+      search: els.campaignSearchInput,
+      manualInput: els.campaignManualIdInput,
+      limit: RESOURCE_LIMITS.campaigns,
+      itemName: "广告系列"
+    };
+  }
+  return {
+    idsKey: "adIds",
+    monitorKey: "adMonitor",
+    optionList: els.adOptionList,
+    selectedList: els.adSelectedList,
+    toggle: els.adPickerToggle,
+    dropdown: els.adPickerDropdown,
+    label: els.adPickerLabel,
+    meta: els.adPickerMeta,
+    search: els.adSearchInput,
+    manualInput: els.adManualIdInput,
+    limit: RESOURCE_LIMITS.ads,
+    itemName: "ad"
+  };
+}
+
+function mapDashboardColumnRows(rows = [], columns = []) {
+  const indexByColumn = new Map(columns.map((column, index) => [column, index]));
+  const valueAt = (values, column, fallback = 0) => {
+    const index = indexByColumn.get(column);
+    return index === undefined ? fallback : values[index];
+  };
+
+  return rows.map((values) => ({
+    timestamp: Number(valueAt(values, "timestamp", Number.NaN)),
+    account: valueAt(values, "account", ""),
+    accountId: valueAt(values, "accountId", ""),
+    campaign: valueAt(values, "campaign", ""),
+    campaignId: valueAt(values, "campaignId", "unknown"),
+    campaignName: valueAt(values, "campaignName", ""),
+    adsetId: valueAt(values, "adsetId", ""),
+    adsetName: valueAt(values, "adsetName", ""),
+    adId: valueAt(values, "adId", ""),
+    adName: valueAt(values, "adName", ""),
+    delivery: valueAt(values, "delivery", "未知"),
+    objective: valueAt(values, "objective", ""),
+    dataDate: valueAt(values, "dataDate", ""),
+    dataUpdatedAt: valueAt(values, "dataUpdatedAt", ""),
+    budget: Number(valueAt(values, "budget", 0)),
+    spend: Number(valueAt(values, "spend", 0)),
+    impressions: Number(valueAt(values, "impressions", 0)),
+    clicks_all: Number(valueAt(values, "clicks_all", 0)),
+    reach: Number(valueAt(values, "reach", 0)),
+    add_to_cart: Number(valueAt(values, "add_to_cart", 0)),
+    initiate_checkout: Number(valueAt(values, "initiate_checkout", 0)),
+    purchases: Number(valueAt(values, "purchases", 0)),
+    revenue: Number(valueAt(values, "revenue", 0)),
+    results: Number(valueAt(values, "results", 0)),
+    actions: Number(valueAt(values, "actions", 0))
+  })).filter((row) => Number.isFinite(row.timestamp));
+}
+
+function resourceId(row, kind) {
+  if (kind === "campaigns") return String(row?.campaign_id || row?.id || "").trim();
+  return String(row?.ad_id || row?.id || "").trim();
+}
+
+function nameIdLabel(name, id) {
+  const cleanName = String(name || "").trim();
+  const cleanId = String(id || "").trim();
+  return cleanName ? `${cleanName}|${cleanId}` : cleanId;
+}
+
+function resourcePrimaryLabel(row, kind) {
+  const id = resourceId(row, kind);
+  return nameIdLabel(row?.name, id);
+}
+
+function resourceSecondaryLabel(row, kind) {
+  const freshness = [
+    row?.latest_updated_at ? `更新 ${formatInstantInDisplayTimeZone(row.latest_updated_at)}` : "暂无采集更新",
+    `最近一天消耗 ${formatValue("spend", row?.latest_day_spend || 0)}`
+  ].join(" · ");
+  if (kind === "campaigns") {
+    return [
+      row?.account_id ? `账户 ${row.account_id}` : "",
+      row?.effective_status || row?.status || "ACTIVE",
+      freshness
+    ].filter(Boolean).join(" · ");
+  }
+  return [
+    row?.campaign_name ? `广告系列 ${nameIdLabel(row.campaign_name, row.campaign_id)}` : `广告系列 ${row?.campaign_id || "-"}`,
+    row?.adset_name ? `广告组 ${nameIdLabel(row.adset_name, row.adset_id)}` : `广告组 ${row?.adset_id || "-"}`,
+    freshness
+  ].join(" · ");
+}
+
+function resourceSearchText(row, kind) {
+  return [
+    resourcePrimaryLabel(row, kind),
+    row?.account_id,
+    row?.campaign_id,
+    row?.campaign_name,
+    row?.adset_id,
+    row?.adset_name,
+    row?.status,
+    row?.effective_status
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function resourceTooltip(row, kind) {
+  return [
+    resourcePrimaryLabel(row, kind),
+    resourceSecondaryLabel(row, kind),
+    `最近一天展示：${Number(row?.latest_impressions || 0).toLocaleString("en-US")}`,
+    `最近一天点击：${Number(row?.latest_clicks || 0).toLocaleString("en-US")}`,
+    `采集明细行数：${Number(row?.insight_row_count || 0).toLocaleString("en-US")}`,
+    row?.synced_at ? `资源同步：${formatInstantInDisplayTimeZone(row.synced_at)}` : ""
+  ].filter(Boolean).join("\n");
+}
+
+function selectedIdsForKind(kind) {
+  const config = resourceKindConfig(kind);
+  return state.samplingSettings[config.monitorKey][config.idsKey] || [];
+}
+
+function setSelectedIdsForKind(kind, ids) {
+  const config = resourceKindConfig(kind);
+  const normalized = [...new Set(ids.map((id) => String(id || "").trim()).filter((id) => /^\d{3,32}$/.test(id)))];
+  state.samplingSettings[config.monitorKey][config.idsKey] = normalized.slice(0, config.limit);
+  if (kind === "ads") {
+    state.samplingSettings.targeted.ids = [...state.samplingSettings.adMonitor.adIds];
+  }
+  if (kind === "campaigns") {
+    state.samplingSettings.activeCampaigns.limit = state.samplingSettings.campaignMonitor.campaignIds.length;
+  }
+}
+
+function candidateRowsForKind(kind) {
+  const rows = kind === "campaigns" ? state.resourceCatalog.campaigns : state.resourceCatalog.ads;
+  return Array.isArray(rows) ? rows : [];
+}
+
+function candidateMapForKind(kind) {
+  return new Map(candidateRowsForKind(kind).map((row) => [resourceId(row, kind), row]).filter(([id]) => id));
+}
+
+function filteredCandidateRows(kind) {
+  const query = state.resourceUi[kind].query.trim().toLowerCase();
+  const rows = candidateRowsForKind(kind);
+  if (!query) return rows;
+  return rows.filter((row) => resourceSearchText(row, kind).includes(query));
+}
+
+function selectedResourceRows(kind) {
+  const candidates = candidateMapForKind(kind);
+  return selectedIdsForKind(kind).map((id) => {
+    const row = candidates.get(String(id));
+    return row || { id, name: "", stale: true };
+  });
+}
+
+function selectedResourcePageState(kind, rows) {
+  const total = rows.length;
+  const pageCount = Math.max(1, Math.ceil(total / RESOURCE_SELECTED_PAGE_SIZE));
+  const requestedPage = Number.parseInt(state.resourceUi[kind].selectedPage, 10) || 1;
+  const page = Math.min(pageCount, Math.max(1, requestedPage));
+  const start = (page - 1) * RESOURCE_SELECTED_PAGE_SIZE;
+  const end = Math.min(total, start + RESOURCE_SELECTED_PAGE_SIZE);
+  state.resourceUi[kind].selectedPage = page;
+  return {
+    page,
+    pageCount,
+    total,
+    start,
+    end,
+    rows: rows.slice(start, end)
+  };
+}
+
+function settingsSnapshotFromCurrentForm() {
+  return JSON.stringify({
+    accounts: parseAccountInput(els.monitorAccountsInput.value),
+    settings: collectSamplingSettings()
+  });
+}
+
+function captureSavedSettingsSnapshot() {
+  state.savedSettingsSnapshot = settingsSnapshotFromCurrentForm();
+  updateDirtyState("");
+}
+
+function settingsStatusTone(message) {
+  if (!message) return "";
+  if (/失败|错误|无效/.test(message)) return "error";
+  if (/未保存|保存中|刷新中|读取中/.test(message)) return "pending";
+  return "success";
+}
+
+function setSettingsStatus(message = "", tone = "") {
+  state.settingsMessage = message;
+  els.settingsStatus.textContent = message;
+  const nextTone = tone || settingsStatusTone(message);
+  if (nextTone) {
+    els.settingsStatus.dataset.tone = nextTone;
+  } else {
+    delete els.settingsStatus.dataset.tone;
+  }
+}
+
+function updateDirtyState(message = "") {
+  const hasSnapshot = Boolean(state.savedSettingsSnapshot);
+  const dirty = hasSnapshot && settingsSnapshotFromCurrentForm() !== state.savedSettingsSnapshot;
+  els.resetSettingsButton.disabled = !dirty;
+  if (message) {
+    setSettingsStatus(message);
+    return;
+  }
+  setSettingsStatus(dirty ? "有未保存变更" : "", dirty ? "pending" : "");
+}
+
+function syncHiddenResourceInputs() {
+  els.campaignIdsInput.value = selectedIdsForKind("campaigns").join("\n");
+  els.adIdsInput.value = selectedIdsForKind("ads").join("\n");
+}
+
+function renderResourceOption(row, kind, selectedIds) {
+  const id = resourceId(row, kind);
+  const label = resourcePrimaryLabel(row, kind);
+  const secondary = resourceSecondaryLabel(row, kind);
+  return `
+    <label class="resource-option" title="${escapeHtml(resourceTooltip(row, kind))}">
+      <input type="checkbox" data-resource-kind="${kind}" data-resource-id="${escapeHtml(id)}" ${selectedIds.has(id) ? "checked" : ""}>
+      <span class="resource-option-main">
+        <strong>${escapeHtml(label)}</strong>
+        <small>${escapeHtml(secondary)}</small>
+      </span>
+      <span class="resource-status">ACTIVE</span>
+    </label>
+  `;
+}
+
+function renderSelectedResourceRow(row, kind) {
+  const id = resourceId(row, kind);
+  const isStale = row?.stale === true;
+  const label = isStale ? id : resourcePrimaryLabel(row, kind);
+  const secondary = isStale ? "不在 ACTIVE 候选中，可保留或删除" : resourceSecondaryLabel(row, kind);
+  const editing = state.resourceUi[kind].editingId === id;
+  if (editing) {
+    return `
+      <article class="selected-resource-row editing">
+        <div class="selected-resource-edit">
+          <input value="${escapeHtml(id)}" data-resource-edit-input="${kind}" aria-label="编辑 ${kind} ID">
+          <button type="button" title="保存编辑" aria-label="保存编辑" data-resource-action="edit-save" data-resource-kind="${kind}" data-resource-id="${escapeHtml(id)}">
+            <i data-lucide="check"></i>
+          </button>
+          <button type="button" title="取消编辑" aria-label="取消编辑" data-resource-action="edit-cancel" data-resource-kind="${kind}">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+      </article>
+    `;
+  }
+  return `
+    <article class="selected-resource-row ${isStale ? "stale" : ""}" title="${escapeHtml(isStale ? secondary : resourceTooltip(row, kind))}">
+      <span class="selected-resource-main">
+        <strong>${escapeHtml(label)}</strong>
+        <small>${escapeHtml(secondary)}</small>
+      </span>
+      <span class="selected-resource-actions">
+        <button type="button" title="编辑" aria-label="编辑" data-resource-action="edit" data-resource-kind="${kind}" data-resource-id="${escapeHtml(id)}">
+          <i data-lucide="pencil"></i>
+        </button>
+        <button type="button" title="删除" aria-label="删除" data-resource-action="delete" data-resource-kind="${kind}" data-resource-id="${escapeHtml(id)}">
+          <i data-lucide="trash-2"></i>
+        </button>
+      </span>
+    </article>
+  `;
+}
+
+function renderResourcePagination(kind, pageState) {
+  if (pageState.total <= RESOURCE_SELECTED_PAGE_SIZE) {
+    return "";
+  }
+  const previousDisabled = pageState.page <= 1 ? "disabled" : "";
+  const nextDisabled = pageState.page >= pageState.pageCount ? "disabled" : "";
+  return `
+    <nav class="resource-pagination" aria-label="${kind} 已选列表分页">
+      <span class="resource-page-info">第 ${pageState.page} / ${pageState.pageCount} 页 · ${pageState.start + 1}-${pageState.end} / ${pageState.total}</span>
+      <span class="resource-page-controls">
+        <button type="button" title="第一页" aria-label="第一页" data-resource-action="page-first" data-resource-kind="${kind}" ${previousDisabled}>
+          <i data-lucide="chevrons-left"></i>
+        </button>
+        <button type="button" title="上一页" aria-label="上一页" data-resource-action="page-prev" data-resource-kind="${kind}" ${previousDisabled}>
+          <i data-lucide="chevron-left"></i>
+        </button>
+        <button type="button" title="下一页" aria-label="下一页" data-resource-action="page-next" data-resource-kind="${kind}" ${nextDisabled}>
+          <i data-lucide="chevron-right"></i>
+        </button>
+        <button type="button" title="最后一页" aria-label="最后一页" data-resource-action="page-last" data-resource-kind="${kind}" ${nextDisabled}>
+          <i data-lucide="chevrons-right"></i>
+        </button>
+      </span>
+    </nav>
+  `;
+}
+
+function renderResourcePicker(kind) {
+  const config = resourceKindConfig(kind);
+  const selectedIds = new Set(selectedIdsForKind(kind));
+  const candidates = candidateRowsForKind(kind);
+  const filtered = filteredCandidateRows(kind);
+  const selectedRows = selectedResourceRows(kind);
+  const pageState = selectedResourcePageState(kind, selectedRows);
+  const staleCount = selectedRows.filter((row) => row.stale).length;
+  const candidateText = kind === "ads"
+    ? `${candidates.length} 个全链路 ACTIVE ad`
+    : `${candidates.length} 个 ACTIVE 广告系列`;
+  const staleText = staleCount ? ` · ${staleCount} 个不在候选` : "";
+  const staleCatalogText = state.resourceCatalog.stale ? " · 资源需刷新" : "";
+
+  config.label.textContent = selectedIds.size
+    ? `已选 ${selectedIds.size} 个 ${config.itemName}`
+    : `选择 ${config.itemName}`;
+  config.meta.textContent = `${candidateText}${staleText}${staleCatalogText}`;
+  config.toggle.setAttribute("aria-expanded", String(state.resourceUi[kind].open));
+  config.dropdown.hidden = !state.resourceUi[kind].open;
+  config.search.value = state.resourceUi[kind].query;
+
+  if (state.resourceUi[kind].open) {
+    if (!candidates.length) {
+      config.optionList.innerHTML = `<div class="empty-inline">还没有 ACTIVE 候选资源，请刷新 ACTIVE 资源。</div>`;
+    } else if (!filtered.length) {
+      config.optionList.innerHTML = `<div class="empty-inline">没有匹配的候选项。</div>`;
+    } else {
+      config.optionList.innerHTML = filtered.map((row) => renderResourceOption(row, kind, selectedIds)).join("");
+    }
+  } else {
+    config.optionList.innerHTML = "";
+  }
+
+  config.selectedList.innerHTML = selectedRows.length
+    ? `${pageState.rows.map((row) => renderSelectedResourceRow(row, kind)).join("")}${renderResourcePagination(kind, pageState)}`
+    : `<div class="empty-inline">当前未选择 ${config.itemName}。</div>`;
+  scheduleIconRefresh();
+}
+
+function renderResourcePickers() {
+  syncHiddenResourceInputs();
+  renderResourcePicker("campaigns");
+  renderResourcePicker("ads");
+  scheduleIconRefresh();
+}
+
+function toggleResourceDropdown(kind, open = !state.resourceUi[kind].open) {
+  state.resourceUi.campaigns.open = false;
+  state.resourceUi.ads.open = false;
+  state.resourceUi[kind].open = open;
+  renderResourcePickers();
+  if (open) {
+    resourceKindConfig(kind).search.focus();
+  }
+}
+
+function addSelectedResource(kind, id) {
+  const config = resourceKindConfig(kind);
+  const selected = selectedIdsForKind(kind);
+  if (selected.includes(id)) {
+    updateDirtyState(`${id} 已在列表中`);
+    return;
+  }
+  if (selected.length >= config.limit) {
+    updateDirtyState(`${config.itemName} 最多选择 ${config.limit} 个`);
+    return;
+  }
+  setSelectedIdsForKind(kind, [...selected, id]);
+  state.resourceUi[kind].selectedPage = Number.MAX_SAFE_INTEGER;
+  state.samplingSettings = collectSamplingSettings();
+  renderSamplingSettings();
+  updateDirtyState();
+}
+
+function removeSelectedResource(kind, id) {
+  setSelectedIdsForKind(kind, selectedIdsForKind(kind).filter((item) => item !== id));
+  state.resourceUi[kind].editingId = "";
+  state.samplingSettings = collectSamplingSettings();
+  renderSamplingSettings();
+  updateDirtyState();
+}
+
+function selectFilteredResources(kind) {
+  const config = resourceKindConfig(kind);
+  const current = selectedIdsForKind(kind);
+  const additions = filteredCandidateRows(kind).map((row) => resourceId(row, kind)).filter(Boolean);
+  setSelectedIdsForKind(kind, [...current, ...additions].slice(0, config.limit));
+  state.resourceUi[kind].selectedPage = 1;
+  state.samplingSettings = collectSamplingSettings();
+  renderSamplingSettings();
+  updateDirtyState();
+}
+
+function clearSelectedResources(kind) {
+  setSelectedIdsForKind(kind, []);
+  state.resourceUi[kind].editingId = "";
+  state.resourceUi[kind].selectedPage = 1;
+  state.samplingSettings = collectSamplingSettings();
+  renderSamplingSettings();
+  updateDirtyState();
+}
+
+function setSelectedResourcePage(kind, action) {
+  const selectedCount = selectedIdsForKind(kind).length;
+  const pageCount = Math.max(1, Math.ceil(selectedCount / RESOURCE_SELECTED_PAGE_SIZE));
+  const currentPage = Number.parseInt(state.resourceUi[kind].selectedPage, 10) || 1;
+  if (action === "page-first") state.resourceUi[kind].selectedPage = 1;
+  if (action === "page-prev") state.resourceUi[kind].selectedPage = Math.max(1, currentPage - 1);
+  if (action === "page-next") state.resourceUi[kind].selectedPage = Math.min(pageCount, currentPage + 1);
+  if (action === "page-last") state.resourceUi[kind].selectedPage = pageCount;
+  state.resourceUi[kind].editingId = "";
+  renderResourcePickers();
+}
+
+function saveResourceEdit(kind, oldId) {
+  const input = document.querySelector(`[data-resource-edit-input="${kind}"]`);
+  const nextId = String(input?.value || "").trim();
+  if (!/^\d{3,32}$/.test(nextId)) {
+    updateDirtyState("请输入有效数字 ID");
+    return;
+  }
+  const ids = selectedIdsForKind(kind).map((id) => (id === oldId ? nextId : id));
+  setSelectedIdsForKind(kind, ids);
+  state.resourceUi[kind].editingId = "";
+  state.samplingSettings = collectSamplingSettings();
+  renderSamplingSettings();
+  updateDirtyState();
+}
+
+function addManualResource(kind) {
+  const input = resourceKindConfig(kind).manualInput;
+  const ids = parseIdInput(input.value);
+  if (!ids.length) {
+    updateDirtyState("请输入有效数字 ID");
+    return;
+  }
+  ids.forEach((id) => addSelectedResource(kind, id));
+  input.value = "";
+  updateDirtyState();
+}
+
 function stateForList(listType) {
   return (state.monitorStatus?.state || []).find((item) => item.list_type === listType) || null;
 }
@@ -724,55 +1297,69 @@ function historyLabel(run) {
   return "等待运行";
 }
 
+function updatedAtLabel(value) {
+  return value ? `更新 ${formatInstantInDisplayTimeZone(value)}` : "更新 -";
+}
+
+function latestMonitorUpdateTime(run, monitorState) {
+  return run?.completed_at || run?.started_at || monitorState?.last_run_at || monitorState?.updated_at || "";
+}
+
 function renderMonitorStatus() {
   const overview = state.monitorStatus;
   const campaignState = stateForList("campaigns");
   const adState = stateForList("ads");
-  const resourceCounts = overview?.resourceCounts || {};
+  const resourceCounts = state.resourceCatalog?.counts || overview?.resourceCounts || {};
   const latestCampaignRun = (overview?.recentRuns || []).find((run) => run.list_type === "campaigns");
   const latestAdRun = (overview?.recentRuns || []).find((run) => run.list_type === "ads");
+  const resourceAccountId = state.resourceCatalog?.account_id || ACTIVE_RESOURCE_ACCOUNT_ID;
+  const resourceUpdateTime = state.resourceCatalog?.last_synced_at || state.resourceRefresh?.last_completed_at || "";
 
   els.monitorStatusGrid.innerHTML = [
     {
       title: "List 1 广告系列",
       value: statusLabel(campaignState?.last_status),
       meta: `${state.samplingSettings.campaignMonitor.intervalMinutes} 分钟 · ${historyLabel(latestCampaignRun)}`,
+      updated: updatedAtLabel(latestMonitorUpdateTime(latestCampaignRun, campaignState)),
       status: campaignState?.last_status || "idle"
     },
     {
       title: "List 2 广告",
       value: statusLabel(adState?.last_status),
       meta: `${state.samplingSettings.adMonitor.intervalMinutes} 分钟 · ${historyLabel(latestAdRun)}`,
+      updated: updatedAtLabel(latestMonitorUpdateTime(latestAdRun, adState)),
       status: adState?.last_status || "idle"
     },
     {
-      title: "ACTIVE 资源",
-      value: `${Number(resourceCounts.ads?.active || 0).toLocaleString("en-US")} ads`,
-      meta: `${Number(resourceCounts.campaigns?.active || 0)} campaigns · ${Number(resourceCounts.adsets?.active || 0)} adsets`,
-      status: "success"
+      title: "当前监控账户 ACTIVE 资源",
+      value: `${Number(resourceCounts.ads?.chain_active || resourceCounts.ads?.active || 0).toLocaleString("en-US")} 个广告`,
+      meta: `账户 ${resourceAccountId} · ${Number(resourceCounts.campaigns?.active || 0)} 个广告系列 · ${Number(resourceCounts.adsets?.active || 0)} 个广告组`,
+      updated: updatedAtLabel(resourceUpdateTime),
+      status: state.resourceCatalog?.stale ? "partial" : "success"
     }
   ].map((item) => `
     <article class="status-tile ${item.status}">
       <span>${escapeHtml(item.title)}</span>
       <strong>${escapeHtml(item.value)}</strong>
       <small>${escapeHtml(item.meta)}</small>
+      <small class="status-updated">${escapeHtml(item.updated)}</small>
     </article>
   `).join("");
 
-  const activeCampaigns = overview?.activeCampaigns || [];
+  const activeCampaigns = state.resourceCatalog?.campaigns?.length ? state.resourceCatalog.campaigns : (overview?.activeCampaigns || []);
   els.campaignResolvedList.innerHTML = activeCampaigns.length
     ? `
       <div class="resolved-head">
-        <strong>解析出的 ACTIVE campaigns</strong>
-        <span>${activeCampaigns.length} / 维表最多显示 50</span>
+        <strong>解析出的 ACTIVE 广告系列</strong>
+        <span>${activeCampaigns.length} / 候选列表</span>
       </div>
       <div class="resolved-items">
         ${activeCampaigns.slice(0, 12).map((campaign) => `
-          <span title="${escapeHtml(campaign.campaign_id)}">${escapeHtml(campaign.name || campaign.campaign_id)}</span>
+          <span title="${escapeHtml(campaign.campaign_id || campaign.id)}">${escapeHtml(nameIdLabel(campaign.name, campaign.campaign_id || campaign.id))}</span>
         `).join("")}
       </div>
     `
-    : `<div class="empty-inline">资源维表还没有 ACTIVE campaigns，运行 Tool 2 或 monitor-bootstrap 后显示</div>`;
+    : `<div class="empty-inline">资源维表还没有 ACTIVE 广告系列，运行 Tool 2 或 monitor-bootstrap 后显示</div>`;
 
   const runs = overview?.recentRuns || [];
   els.recentRunsBody.innerHTML = runs.length
@@ -797,7 +1384,9 @@ function renderAccountSettings(message = "") {
     : state.monitoredAccounts.map((account) => account.id);
   renderSettingsCaption();
   els.monitorAccountsInput.value = accounts.join("\n");
-  els.settingsStatus.textContent = message;
+  if (message) {
+    setSettingsStatus(message);
+  }
 }
 
 function renderSettingsCaption() {
@@ -805,7 +1394,7 @@ function renderSettingsCaption() {
   const ad = state.samplingSettings.adMonitor;
   els.settingsCaption.textContent = [
     `账户 ${campaign.accountIds.length || state.monitoredAccounts.length} 个`,
-    `campaign ${campaign.campaignIds.length} 个`,
+    `广告系列 ${campaign.campaignIds.length} 个`,
     `ad ${ad.adIds.length} 个`
   ].join(" · ");
 }
@@ -814,17 +1403,19 @@ function renderSamplingSettings() {
   const settings = state.samplingSettings;
   const campaign = settings.campaignMonitor;
   const ad = settings.adMonitor;
+  const campaignStale = selectedResourceRows("campaigns").filter((row) => row.stale).length;
+  const adStale = selectedResourceRows("ads").filter((row) => row.stale).length;
 
   els.campaignMonitorEnabled.checked = campaign.enabled;
   els.campaignIntervalInput.value = campaign.intervalMinutes;
   els.campaignResultActionInput.value = campaign.resultAction;
   els.campaignAutoActiveInput.checked = campaign.autoActiveCampaigns;
-  els.campaignIdsInput.value = campaign.campaignIds.join("\n");
   els.campaignMonitorSummary.innerHTML = summaryChips([
     campaign.enabled ? "启用" : "停用",
     `${campaign.intervalMinutes} 分钟`,
-    campaign.autoActiveCampaigns ? "自动解析 ACTIVE" : "手动列表",
-    `${campaign.campaignIds.length} 个 campaign`
+    "勾选列表",
+    `${campaign.campaignIds.length} 个广告系列`,
+    campaignStale ? `${campaignStale} 个不在 ACTIVE 候选` : ""
   ]);
 
   els.adMonitorEnabled.checked = ad.enabled;
@@ -834,22 +1425,23 @@ function renderSamplingSettings() {
   els.adQpsInput.value = ad.qps;
   els.adTimeoutInput.value = ad.requestTimeoutMs;
   els.adMaxAttemptsInput.value = ad.maxAttempts;
-  els.adIdsInput.value = ad.adIds.join("\n");
   els.adMonitorSummary.innerHTML = summaryChips([
     ad.enabled ? "启用" : "停用",
     `${ad.intervalMinutes} 分钟`,
     `${ad.adIds.length} 个 ad`,
+    adStale ? `${adStale} 个不在 ACTIVE 候选` : "",
     `${ad.concurrency} 并发`,
     `${ad.qps}/s`
   ]);
   renderSettingsCaption();
+  renderResourcePickers();
   renderMonitorStatus();
 }
 
 function collectSamplingSettings() {
   const accountIds = parseIdInput(els.monitorAccountsInput.value);
-  const campaignIds = parseIdInput(els.campaignIdsInput.value);
-  const adIds = parseIdInput(els.adIdsInput.value);
+  const campaignIds = selectedIdsForKind("campaigns");
+  const adIds = selectedIdsForKind("ads");
   return normalizeSamplingSettings({
     campaignMonitor: {
       enabled: els.campaignMonitorEnabled.checked,
@@ -911,11 +1503,11 @@ async function loadSamplingSettings(message = "") {
     state.samplingSettings = normalizeSamplingSettings(payload.ok ? payload.settings : {});
     renderSamplingSettings();
     if (message) {
-      els.settingsStatus.textContent = message;
+      setSettingsStatus(message);
     }
   } catch {
     renderSamplingSettings();
-    els.settingsStatus.textContent = "取样设置读取失败";
+    setSettingsStatus("取样设置读取失败", "error");
   }
 }
 
@@ -930,13 +1522,102 @@ async function loadMonitorStatus() {
   renderMonitorStatus();
 }
 
+async function loadResourceCatalog(message = "") {
+  try {
+    const response = await fetch(`/api/settings/resources?account_id=${encodeURIComponent(ACTIVE_RESOURCE_ACCOUNT_ID)}`, { cache: "no-store" });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || "ACTIVE 候选读取失败");
+    }
+    state.resourceCatalog = {
+      ...state.resourceCatalog,
+      ...payload.catalog,
+      campaigns: Array.isArray(payload.catalog?.campaigns) ? payload.catalog.campaigns : [],
+      ads: Array.isArray(payload.catalog?.ads) ? payload.catalog.ads : []
+    };
+    state.resourceRefresh = payload.refresh || null;
+    renderResourcePickers();
+    renderMonitorStatus();
+    if (message) {
+      updateDirtyState(message);
+    }
+  } catch (error) {
+    renderResourcePickers();
+    updateDirtyState(error.message || "ACTIVE 候选读取失败");
+  }
+}
+
 async function loadSettings(message = "") {
-  await loadAccountSettings();
-  await loadSamplingSettings();
-  renderAccountSettings();
-  await loadMonitorStatus();
-  if (message) {
-    els.settingsStatus.textContent = message;
+  if (state.settingsLoading && state.settingsLoadPromise) {
+    return state.settingsLoadPromise;
+  }
+
+  state.settingsLoading = true;
+  setSettingsStatus(message || "设置读取中");
+  state.settingsLoadPromise = (async () => {
+    try {
+      await Promise.all([
+        loadAccountSettings(),
+        loadSamplingSettings()
+      ]);
+      renderAccountSettings();
+      renderSamplingSettings();
+      captureSavedSettingsSnapshot();
+      state.settingsLoaded = true;
+      await Promise.all([
+        loadResourceCatalog(),
+        loadMonitorStatus()
+      ]);
+      if (message) {
+        updateDirtyState(message);
+      }
+    } finally {
+      state.settingsLoading = false;
+      state.settingsLoadPromise = null;
+    }
+  })();
+  return state.settingsLoadPromise;
+}
+
+function ensureSettingsLoaded(message = "") {
+  if (state.settingsLoaded && !message) {
+    return Promise.resolve();
+  }
+  return loadSettings(message);
+}
+
+async function refreshActiveResources() {
+  els.refreshResourcesButton.disabled = true;
+  updateDirtyState("ACTIVE 资源刷新中");
+  try {
+    const response = await fetch("/api/settings/resources/refresh", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        account_id: ACTIVE_RESOURCE_ACCOUNT_ID,
+        force: true
+      })
+    });
+    const payload = await response.json();
+    state.resourceCatalog = {
+      ...state.resourceCatalog,
+      ...payload.candidates,
+      campaigns: Array.isArray(payload.candidates?.campaigns) ? payload.candidates.campaigns : [],
+      ads: Array.isArray(payload.candidates?.ads) ? payload.candidates.ads : []
+    };
+    state.resourceRefresh = payload.refresh || null;
+    renderSamplingSettings();
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || "ACTIVE 资源刷新失败");
+    }
+    updateDirtyState("ACTIVE 资源已刷新");
+  } catch (error) {
+    renderSamplingSettings();
+    updateDirtyState(error.message || "ACTIVE 资源刷新失败");
+  } finally {
+    els.refreshResourcesButton.disabled = false;
   }
 }
 
@@ -944,7 +1625,7 @@ async function saveSettings() {
   const accounts = parseAccountInput(els.monitorAccountsInput.value);
   const samplingSettings = collectSamplingSettings();
   els.saveSettingsButton.disabled = true;
-  els.settingsStatus.textContent = "保存中";
+  updateDirtyState("保存中");
   try {
     const accountResponse = await fetch("/api/settings/accounts", {
       method: "POST",
@@ -970,11 +1651,13 @@ async function saveSettings() {
     }
     state.monitoredAccounts = accountPayload.accounts;
     state.samplingSettings = normalizeSamplingSettings(samplingPayload.settings);
-    renderAccountSettings("已保存");
+    renderAccountSettings();
     renderSamplingSettings();
     await loadMonitorStatus();
+    captureSavedSettingsSnapshot();
+    updateDirtyState("已保存");
   } catch (error) {
-    els.settingsStatus.textContent = error.message || "保存失败";
+    updateDirtyState(error.message || "保存失败");
   } finally {
     els.saveSettingsButton.disabled = false;
   }
@@ -982,15 +1665,19 @@ async function saveSettings() {
 
 async function loadCollectedRows() {
   try {
-    const response = await fetch("/api/fb-ads/latest", { cache: "no-store" });
+    const response = await fetch("/api/fb-ads/latest?shape=dashboard", { cache: "no-store" });
     if (!response.ok) return null;
     const payload = await response.json();
     if (!payload.ok || !Array.isArray(payload.rows) || payload.rows.length === 0) return null;
 
-    const rows = payload.rows.map(mapCollectedRow).filter((row) => Number.isFinite(row.timestamp));
+    const rows = payload.shape === "dashboard_columns"
+      ? mapDashboardColumnRows(payload.rows, payload.columns)
+      : payload.shape === "dashboard"
+        ? payload.rows.filter((row) => Number.isFinite(row.timestamp))
+      : payload.rows.map(mapCollectedRow).filter((row) => Number.isFinite(row.timestamp));
     if (rows.length === 0) return null;
 
-    if (payload.rows.some((row) => row.hour_start)) {
+    if (payload.metadata?.granularity === "hour" || payload.rows.some((row) => row.hour_start)) {
       state.granularity = "hour";
     }
     applyCampaignsFromRows(rows);
@@ -1059,6 +1746,9 @@ function getFilteredRows() {
     if (state.delivery !== "all" && row.delivery !== state.delivery) {
       return false;
     }
+    if (state.selectedAdId && String(row.adId || "") !== state.selectedAdId) {
+      return false;
+    }
     return true;
   });
 }
@@ -1104,7 +1794,7 @@ function aggregateByTime(rows) {
 }
 
 function campaignCompareEnabled() {
-  return state.selectedCampaigns.size > 1;
+  return !state.selectedAdId && state.selectedCampaigns.size > 1;
 }
 
 function selectedCampaignsInDisplayOrder() {
@@ -1158,18 +1848,111 @@ function aggregateByCampaign(rows) {
     if (!buckets.has(row.campaignId)) {
       buckets.set(row.campaignId, {
         id: row.campaignId,
-        campaign: row.campaign,
+        campaign: row.campaignName || row.campaign,
+        campaignId: row.campaignId,
+        account: row.account,
+        accountId: row.accountId,
         delivery: row.delivery,
         objective: row.objective,
+        latestTimestamp: 0,
+        latestUpdateAt: "",
+        latestDayKey: "",
+        latestDaySpend: 0,
+        rowCount: 0,
         ...createAccumulator()
       });
     }
-    addToAccumulator(buckets.get(row.campaignId), row);
+    const bucket = buckets.get(row.campaignId);
+    addToAccumulator(bucket, row);
+    addRowFreshness(bucket, row);
   });
 
   return [...buckets.values()]
     .map(deriveMetrics)
     .sort((a, b) => b.spend - a.spend);
+}
+
+function aggregateByAd(rows) {
+  const buckets = new Map();
+
+  rows.filter((row) => row.adId).forEach((row) => {
+    if (!buckets.has(row.adId)) {
+      buckets.set(row.adId, {
+        id: row.adId,
+        adId: row.adId,
+        adName: row.adName || row.adId,
+        campaign: row.campaignName || row.campaign,
+        campaignId: row.campaignId,
+        adsetName: row.adsetName,
+        adsetId: row.adsetId,
+        account: row.account,
+        accountId: row.accountId,
+        delivery: row.delivery,
+        objective: row.objective,
+        latestTimestamp: 0,
+        latestUpdateAt: "",
+        latestDayKey: "",
+        latestDaySpend: 0,
+        rowCount: 0,
+        ...createAccumulator()
+      });
+    }
+    const bucket = buckets.get(row.adId);
+    addToAccumulator(bucket, row);
+    addRowFreshness(bucket, row);
+  });
+
+  return [...buckets.values()]
+    .map(deriveMetrics)
+    .sort((a, b) => b.latestDaySpend - a.latestDaySpend || b.spend - a.spend);
+}
+
+function addRowFreshness(bucket, row) {
+  bucket.rowCount += 1;
+  const timestamp = Number(row.timestamp || 0);
+  const dayKey = toDateValue(new Date(timestamp));
+  if (timestamp > bucket.latestTimestamp) {
+    if (dayKey !== bucket.latestDayKey) {
+      bucket.latestDaySpend = 0;
+    }
+    bucket.latestTimestamp = timestamp;
+    bucket.latestDayKey = dayKey;
+    bucket.latestUpdateAt = row.dataUpdatedAt || "";
+    bucket.delivery = row.delivery || bucket.delivery;
+  }
+  if (dayKey === bucket.latestDayKey) {
+    bucket.latestDaySpend += Number(row.spend || 0);
+  }
+}
+
+function latestUpdateLabel(row) {
+  return row.latestUpdateAt ? formatInstantInDisplayTimeZone(row.latestUpdateAt) : "-";
+}
+
+function latestSpendLabel(row) {
+  return formatValue("spend", row.latestDaySpend || 0);
+}
+
+function objectTooltip(row, mode) {
+  const name = mode === "ads" ? (row.adName || row.adId) : (row.campaign || row.campaignId);
+  const parent = mode === "ads"
+    ? [`广告系列：${row.campaign || "-"}`, `广告组：${row.adsetName || row.adsetId || "-"}`]
+    : [`账户：${row.account || row.accountId || "-"}`];
+  return [
+    name,
+    ...parent,
+    `最近一天消耗：${latestSpendLabel(row)}`,
+    `数据更新时间：${latestUpdateLabel(row)}`,
+    `窗口消耗：${formatValue("spend", row.spend)}`,
+    `ROAS：${formatValue("roas", row.roas)}`,
+    `明细行数：${row.rowCount || 0}`
+  ].join("\n");
+}
+
+function selectedAdLabel() {
+  if (!state.selectedAdId) return "";
+  const row = rawRows.find((item) => String(item.adId || "") === state.selectedAdId);
+  return row?.adName || state.selectedAdId;
 }
 
 function selectedMetricIds() {
@@ -1258,6 +2041,44 @@ function selectedControlValues(select, instance) {
   return Array.isArray(value) ? value : String(value || "").split(",").filter(Boolean);
 }
 
+function loadStyleOnce(href) {
+  if ([...document.styleSheets].some((sheet) => sheet.href && sheet.href.includes(href))) {
+    return Promise.resolve();
+  }
+  if (document.querySelector(`link[href="${href}"]`)) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    link.onload = resolve;
+    link.onerror = () => reject(new Error(`${href} 加载失败`));
+    document.head.appendChild(link);
+  });
+}
+
+function loadScriptOnce(src, globalName) {
+  if (globalName && window[globalName]) {
+    return Promise.resolve();
+  }
+  const existing = document.querySelector(`script[src="${src}"]`);
+  if (existing) {
+    return new Promise((resolve, reject) => {
+      existing.addEventListener("load", resolve, { once: true });
+      existing.addEventListener("error", () => reject(new Error(`${src} 加载失败`)), { once: true });
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.defer = true;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error(`${src} 加载失败`));
+    document.head.appendChild(script);
+  });
+}
+
 function pruneSelectedCampaigns() {
   const campaignIds = new Set(CAMPAIGNS.map((campaign) => campaign.id));
   state.selectedCampaigns.forEach((id) => {
@@ -1318,8 +2139,9 @@ function renderActiveChips() {
     getGranularityLabel(),
     selectedCampaignLabel(),
     selectedDeliveryLabel(),
+    state.selectedAdId ? `AD：${selectedAdLabel()}` : "",
     `图表指标：${metricCount} 项`
-  ];
+  ].filter(Boolean);
 
   els.activeChips.innerHTML = chips.map((chip) => `<span class="filter-chip"><strong>${chip}</strong></span>`).join("");
 }
@@ -1341,7 +2163,22 @@ function syncFieldChoiceSelection() {
   syncFieldSummary();
 }
 
+function syncCampaignChoiceSelection() {
+  isSyncingSelects = true;
+  const selectedIds = [...state.selectedCampaigns];
+  [...els.campaignFilter.options].forEach((option) => {
+    option.selected = state.selectedCampaigns.has(option.value);
+  });
+  if (campaignSelect) {
+    campaignSelect.setValue(selectedIds, true);
+  }
+  isSyncingSelects = false;
+}
+
 function initChoicePickers() {
+  if (campaignSelect || fieldSelect) {
+    return;
+  }
   if (!window.TomSelect) {
     syncFieldSummary();
     return;
@@ -1373,6 +2210,27 @@ function initChoicePickers() {
   });
 
   syncFieldSummary();
+}
+
+function ensureChoicePickers() {
+  if (campaignSelect && fieldSelect) {
+    return Promise.resolve();
+  }
+  if (!choicePickerPromise) {
+    choicePickerPromise = Promise.all([
+      loadStyleOnce(TOM_SELECT_STYLE_URL),
+      loadScriptOnce(TOM_SELECT_SCRIPT_URL, "TomSelect")
+    ])
+      .then(() => {
+        initChoicePickers();
+      })
+      .catch((error) => {
+        choicePickerPromise = null;
+        console.warn(error.message);
+        syncFieldSummary();
+      });
+  }
+  return choicePickerPromise;
 }
 
 function renderKpis(total) {
@@ -1416,15 +2274,17 @@ function renderView() {
   const copy = viewCopy[state.activeView];
   els.pageTitle.textContent = copy.title;
   els.pageSubtitle.textContent = copy.subtitle;
-  els.viewToolbar.hidden = state.activeView === "settings";
-  els.resetWindowButton.hidden = state.activeView === "settings";
+  const usesDashboardToolbar = !["settings", "alerts", "analysis"].includes(state.activeView);
+  els.viewToolbar.hidden = !usesDashboardToolbar;
+  els.resetWindowButton.hidden = !usesDashboardToolbar;
+  const activePanelView = ["alerts", "analysis"].includes(state.activeView) ? "alert-ai" : state.activeView;
 
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === state.activeView);
   });
 
   document.querySelectorAll("[data-view-panel]").forEach((panel) => {
-    const active = panel.dataset.viewPanel === state.activeView;
+    const active = panel.dataset.viewPanel === activePanelView;
     panel.hidden = !active;
     panel.classList.toggle("active", active);
   });
@@ -1432,9 +2292,21 @@ function renderView() {
   if (state.activeView === "chart" && chart) {
     requestAnimationFrame(() => chart.resize());
   }
+  if (state.activeView === "list" && listChart) {
+    requestAnimationFrame(() => listChart.resize());
+  }
   if (state.activeView === "settings") {
     renderAccountSettings();
     renderSamplingSettings();
+    ensureSettingsLoaded().catch((error) => {
+      updateDirtyState(error.message || "设置读取失败");
+    });
+  }
+  if (state.activeView === "alerts") {
+    window.AlertAiModule?.activate?.("templates");
+  }
+  if (state.activeView === "analysis") {
+    window.AlertAiModule?.activate?.("report");
   }
 }
 
@@ -1455,7 +2327,8 @@ function renderChart(points, rows = lastChartRows) {
   const compareMode = campaignCompareEnabled();
   const compareGroups = compareMode ? aggregateByCampaignTime(rows, points) : [];
   const compareSuffix = compareMode ? ` · ${compareGroups.length} 个广告系列对比` : "";
-  els.chartCaption.textContent = `${getGranularityLabel()} · ${formatRangeText()}${compareSuffix}`;
+  const adSuffix = state.selectedAdId ? ` · AD：${selectedAdLabel()}` : "";
+  els.chartCaption.textContent = `${getGranularityLabel()} · ${formatRangeText()}${compareSuffix}${adSuffix}`;
   els.chartEmpty.textContent = metrics.length === 0 ? "请选择至少一个数值指标" : "当前时间窗口没有可展示数据";
   els.chartEmpty.hidden = metrics.length > 0 && points.length > 0;
 
@@ -1613,6 +2486,98 @@ function renderChart(points, rows = lastChartRows) {
   }, true);
 }
 
+function renderListAdChart() {
+  if (!state.selectedAdId) {
+    els.listAdChartPanel.hidden = true;
+    if (listChart) listChart.clear();
+    return;
+  }
+
+  els.listAdChartPanel.hidden = false;
+  const points = lastChartData;
+  const metrics = selectedMetricIds();
+  const label = selectedAdLabel();
+  els.listAdChartTitle.textContent = "单广告趋势";
+  els.listAdChartCaption.textContent = `${label} · ${getGranularityLabel()} · ${formatRangeText()}`;
+  els.listAdChartEmpty.textContent = metrics.length === 0 ? "请选择至少一个数值指标" : "当前广告没有可展示趋势";
+  els.listAdChartEmpty.hidden = metrics.length > 0 && points.length > 0;
+
+  if (!window.echarts || metrics.length === 0 || points.length === 0) {
+    if (listChart) listChart.clear();
+    return;
+  }
+
+  if (!listChart) {
+    listChart = echarts.init(els.listAdChart, null, { renderer: "canvas" });
+  }
+
+  const labels = points.map((point) => point.label);
+  const series = metrics.map((id, index) => {
+    const field = fieldById.get(id);
+    const values = points.map((point) => Number(point[id] || 0));
+    return {
+      name: field.label,
+      type: "line",
+      smooth: true,
+      showSymbol: points.length <= 1,
+      symbolSize: 6,
+      data: state.normalize && metrics.length > 1 ? normalizeValues(values) : values,
+      rawValues: values,
+      color: field.color || chartPalette[index % chartPalette.length],
+      areaStyle: { opacity: 0.12 },
+      lineStyle: { width: 2 },
+      emphasis: { focus: "series" }
+    };
+  });
+
+  listChart.setOption({
+    animationDuration: 360,
+    color: series.map((item) => item.color),
+    tooltip: {
+      trigger: "axis",
+      confine: true,
+      formatter(params) {
+        const index = params[0]?.dataIndex || 0;
+        const rows = params.map((item) => {
+          const metricId = metrics[item.seriesIndex];
+          return `${item.marker}${item.seriesName}: <strong>${formatValue(metricId, series[item.seriesIndex].rawValues[index])}</strong>`;
+        });
+        return `<strong>${labels[index]}</strong><br>${rows.join("<br>")}`;
+      }
+    },
+    legend: {
+      top: 12,
+      right: 18,
+      type: "scroll",
+      itemWidth: 10,
+      itemHeight: 10,
+      textStyle: { color: "#526071" }
+    },
+    grid: {
+      top: 58,
+      left: 56,
+      right: 24,
+      bottom: 52,
+      containLabel: true
+    },
+    xAxis: {
+      type: "category",
+      boundaryGap: false,
+      data: labels,
+      axisLabel: { color: "#64748b", hideOverlap: true },
+      axisLine: { lineStyle: { color: "#cbd5e1" } }
+    },
+    yAxis: {
+      type: "value",
+      name: state.normalize && metrics.length > 1 ? "统一比例" : "数值",
+      nameTextStyle: { color: "#64748b" },
+      axisLabel: { color: "#64748b" },
+      splitLine: { lineStyle: { color: "#edf1f7" } }
+    },
+    series
+  }, true);
+}
+
 function statusClass(delivery) {
   if (delivery === "暂停") {
     return "paused";
@@ -1624,27 +2589,50 @@ function statusClass(delivery) {
 }
 
 function renderTable(rows) {
-  const columns = selectedTableFields().filter((id) => fieldById.has(id));
-
+  const mode = state.listMode;
+  const metricColumns = selectedMetricIds().filter((id) => fieldById.has(id));
+  const objectHeader = mode === "ads" ? "广告" : "广告系列";
+  els.tableTitle.textContent = mode === "ads" ? "广告汇总" : "广告系列汇总";
   els.tableHead.innerHTML = `
     <tr>
-      ${columns.map((id) => `<th>${fieldById.get(id).label}</th>`).join("")}
+      <th>${objectHeader}</th>
+      <th>最近一天消耗</th>
+      <th>数据更新时间(北京时间)</th>
+      <th>投放</th>
+      ${metricColumns.map((id) => `<th>${fieldById.get(id).label}</th>`).join("")}
+      <th>操作</th>
     </tr>
   `;
 
-  els.tableBody.innerHTML = rows.map((row) => `
-    <tr>
-      ${columns.map((id) => {
-        if (id === "delivery") {
-          return `<td><span class="status-pill ${statusClass(row[id])}">${row[id]}</span></td>`;
-        }
-        return `<td>${formatValue(id, row[id])}</td>`;
-      }).join("")}
-    </tr>
-  `).join("");
+  els.tableBody.innerHTML = rows.map((row) => {
+    const tooltip = escapeHtml(objectTooltip(row, mode));
+    const name = mode === "ads" ? (row.adName || row.adId) : (row.campaign || row.campaignId);
+    const id = mode === "ads" ? row.adId : row.campaignId;
+    const secondary = mode === "ads"
+      ? [`广告系列：${row.campaign || "-"}`, `广告组：${row.adsetName || row.adsetId || "-"}`].join(" · ")
+      : `账户：${row.account || row.accountId || "-"}`;
+    const trendButton = mode === "ads"
+      ? `<button class="row-action-button" type="button" data-ad-drilldown="${escapeHtml(row.adId)}"><i data-lucide="area-chart"></i><span>趋势</span></button>`
+      : "";
+    return `
+      <tr title="${tooltip}">
+        <td class="object-cell">
+          <strong>${escapeHtml(name || "-")}</strong>
+          <small>${escapeHtml(id || "-")}</small>
+          <small>${escapeHtml(secondary)}</small>
+        </td>
+        <td>${latestSpendLabel(row)}</td>
+        <td>${escapeHtml(latestUpdateLabel(row))}</td>
+        <td><span class="status-pill ${statusClass(row.delivery)}">${escapeHtml(row.delivery || "未知")}</span></td>
+        ${metricColumns.map((metricId) => `<td>${formatValue(metricId, row[metricId])}</td>`).join("")}
+        <td><div class="row-actions table-row-actions">${trendButton}</div></td>
+      </tr>
+    `;
+  }).join("");
 
   els.tableCount.textContent = `${rows.length} 行`;
   els.tableCaption.textContent = formatRangeText();
+  scheduleIconRefresh();
 }
 
 function calculateTotals(rows) {
@@ -1653,12 +2641,45 @@ function calculateTotals(rows) {
   return deriveMetrics(total);
 }
 
+function setAdDrilldown(adId, targetView = state.activeView) {
+  state.selectedAdId = String(adId || "");
+  if (state.selectedAdId) {
+    const row = rawRows.find((item) => String(item.adId || "") === state.selectedAdId);
+    if (row?.campaignId) {
+      state.selectedCampaigns = new Set([row.campaignId]);
+      syncCampaignChoiceSelection();
+    }
+    state.listMode = "ads";
+  }
+  if (targetView && targetView !== state.activeView) {
+    state.activeView = targetView;
+    renderView();
+  }
+  renderDashboard();
+}
+
+function clearAdDrilldown() {
+  state.selectedAdId = "";
+  renderDashboard();
+}
+
 function renderDashboard() {
   coerceGranularity();
   syncGranularityButtons();
   const rows = getFilteredRows();
   const timePoints = aggregateByTime(rows);
-  const campaignRows = aggregateByCampaign(rows);
+  const baseRows = state.selectedAdId
+    ? rawRows.filter((row) => {
+      const bounds = selectedRangeBounds();
+      return bounds
+        && row.timestamp >= bounds.from.getTime()
+        && row.timestamp <= bounds.to.getTime()
+        && (state.selectedCampaigns.size === 0 || state.selectedCampaigns.has(row.campaignId))
+        && (state.delivery === "all" || row.delivery === state.delivery);
+    })
+    : rows;
+  const campaignRows = aggregateByCampaign(baseRows);
+  const adRows = aggregateByAd(baseRows);
   const total = calculateTotals(rows);
 
   lastChartData = timePoints;
@@ -1668,7 +2689,8 @@ function renderDashboard() {
   renderKpis(total);
   renderMetricGrid(total);
   renderChart(timePoints, rows);
-  renderTable(campaignRows);
+  renderTable(state.listMode === "ads" ? adRows : campaignRows);
+  renderListAdChart();
   syncFieldSummary();
   renderActiveChips();
 }
@@ -1696,11 +2718,6 @@ function currentHour() {
 function updateTimeControls() {
   els.fromDate.value = state.from;
   els.toDate.value = state.to;
-  const bounds = selectedRangeBounds();
-  if (bounds) {
-    els.fromMonth.value = toMonthInputValue(bounds.from);
-    els.toMonth.value = toMonthInputValue(bounds.to);
-  }
 }
 
 function syncQuickWindowButtons() {
@@ -1749,19 +2766,6 @@ function setWindowPreset(preset) {
     const from = startOfDay(addDays(now, -2));
     setWindowRange(from, now, "last3", "hour");
   }
-}
-
-function applyMonthWindow() {
-  if (!els.fromMonth.value || !els.toMonth.value) {
-    return;
-  }
-
-  let from = monthStart(els.fromMonth.value);
-  let to = monthEnd(els.toMonth.value);
-  if (from > to) {
-    [from, to] = [monthStart(els.toMonth.value), monthEnd(els.fromMonth.value)];
-  }
-  setWindowRange(from, to, "", "month");
 }
 
 function normalizeDateInputs() {
@@ -1820,6 +2824,9 @@ function bindEvents() {
     els.moreOptionsToggle.setAttribute("aria-expanded", String(nextOpen));
     if (nextOpen) {
       els.campaignFilter.focus();
+      ensureChoicePickers().then(() => {
+        campaignSelect?.focus?.();
+      });
     }
   });
 
@@ -1830,16 +2837,6 @@ function bindEvents() {
 
   els.toDate.addEventListener("change", () => {
     normalizeDateInputs();
-    renderDashboard();
-  });
-
-  els.fromMonth.addEventListener("change", () => {
-    applyMonthWindow();
-    renderDashboard();
-  });
-
-  els.toMonth.addEventListener("change", () => {
-    applyMonthWindow();
     renderDashboard();
   });
 
@@ -1855,11 +2852,22 @@ function bindEvents() {
     });
   });
 
+  document.querySelectorAll("[data-list-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.listMode = button.dataset.listMode;
+      document.querySelectorAll("[data-list-mode]").forEach((item) => {
+        item.classList.toggle("active", item.dataset.listMode === state.listMode);
+      });
+      renderDashboard();
+    });
+  });
+
   els.campaignFilter.addEventListener("change", () => {
     if (isSyncingSelects) {
       return;
     }
     state.selectedCampaigns = new Set(selectedControlValues(els.campaignFilter, campaignSelect));
+    state.selectedAdId = "";
     renderDashboard();
   });
 
@@ -1871,6 +2879,7 @@ function bindEvents() {
   els.normalizeToggle.addEventListener("change", () => {
     state.normalize = els.normalizeToggle.checked;
     renderChart(lastChartData, lastChartRows);
+    renderListAdChart();
   });
 
   els.fieldFilter.addEventListener("change", () => {
@@ -1914,18 +2923,103 @@ function bindEvents() {
 
   els.resetWindowButton.addEventListener("click", () => {
     setDefaultWindow();
+    clearAdDrilldown();
     if (chart) {
       chart.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
     }
     renderDashboard();
   });
 
+  els.clearAdDrilldownButton.addEventListener("click", clearAdDrilldown);
+
   els.reloadSettingsButton.addEventListener("click", () => {
     loadSettings("已刷新");
   });
 
+  els.refreshResourcesButton.addEventListener("click", () => {
+    refreshActiveResources();
+  });
+
+  els.resetSettingsButton.addEventListener("click", () => {
+    loadSettings("已取消未保存改动");
+  });
+
   els.saveSettingsButton.addEventListener("click", () => {
     saveSettings();
+  });
+
+  els.campaignPickerToggle.addEventListener("click", () => {
+    toggleResourceDropdown("campaigns");
+  });
+
+  els.adPickerToggle.addEventListener("click", () => {
+    toggleResourceDropdown("ads");
+  });
+
+  els.campaignSearchInput.addEventListener("input", () => {
+    state.resourceUi.campaigns.query = els.campaignSearchInput.value;
+    state.resourceUi.campaigns.open = true;
+    renderResourcePicker("campaigns");
+  });
+
+  els.adSearchInput.addEventListener("input", () => {
+    state.resourceUi.ads.query = els.adSearchInput.value;
+    state.resourceUi.ads.open = true;
+    renderResourcePicker("ads");
+  });
+
+  document.addEventListener("change", (event) => {
+    const checkbox = event.target.closest(".resource-option input[type='checkbox']");
+    if (!checkbox) {
+      return;
+    }
+    const kind = checkbox.dataset.resourceKind;
+    const id = checkbox.dataset.resourceId;
+    if (checkbox.checked) {
+      addSelectedResource(kind, id);
+    } else {
+      removeSelectedResource(kind, id);
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    const adDrilldownButton = event.target.closest("[data-ad-drilldown]");
+    if (adDrilldownButton) {
+      setAdDrilldown(adDrilldownButton.dataset.adDrilldown, state.activeView === "chart" ? "chart" : "list");
+      return;
+    }
+
+    const actionButton = event.target.closest("[data-resource-action]");
+    if (actionButton) {
+      const kind = actionButton.dataset.resourceKind;
+      const action = actionButton.dataset.resourceAction;
+      const id = actionButton.dataset.resourceId;
+      if (action.startsWith("page-")) {
+        setSelectedResourcePage(kind, action);
+        return;
+      }
+      if (action === "select-filtered") selectFilteredResources(kind);
+      if (action === "clear") clearSelectedResources(kind);
+      if (action === "reload") loadResourceCatalog("候选已重读");
+      if (action === "manual-add") addManualResource(kind);
+      if (action === "edit") {
+        state.resourceUi[kind].editingId = id;
+        renderResourcePickers();
+      }
+      if (action === "delete") removeSelectedResource(kind, id);
+      if (action === "edit-save") saveResourceEdit(kind, id);
+      if (action === "edit-cancel") {
+        state.resourceUi[kind].editingId = "";
+        renderResourcePickers();
+      }
+      return;
+    }
+
+    if (!event.target.closest("[data-resource-picker]")) {
+      state.resourceUi.campaigns.open = false;
+      state.resourceUi.ads.open = false;
+      renderResourcePickers();
+    }
   });
 
   [
@@ -1934,19 +3028,18 @@ function bindEvents() {
     els.campaignResultActionInput,
     els.campaignAutoActiveInput,
     els.monitorAccountsInput,
-    els.campaignIdsInput,
     els.adMonitorEnabled,
     els.adIntervalInput,
     els.adResultActionInput,
     els.adConcurrencyInput,
     els.adQpsInput,
     els.adTimeoutInput,
-    els.adMaxAttemptsInput,
-    els.adIdsInput
+    els.adMaxAttemptsInput
   ].forEach((input) => {
     input.addEventListener("change", () => {
       state.samplingSettings = collectSamplingSettings();
       renderSamplingSettings();
+      updateDirtyState();
     });
   });
 
@@ -1954,20 +3047,58 @@ function bindEvents() {
     if (chart) {
       chart.resize();
     }
+    if (listChart) {
+      listChart.resize();
+    }
   });
 }
 
 function initIcons() {
   if (window.lucide) {
     window.lucide.createIcons();
+    return;
   }
+  document.querySelectorAll("i[data-lucide]").forEach((icon) => {
+    const name = icon.dataset.lucide;
+    const paths = iconPaths[name];
+    if (!paths || icon.dataset.iconReady === name) {
+      return;
+    }
+
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    paths.forEach((definition) => {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", definition);
+      svg.appendChild(path);
+    });
+    icon.replaceChildren(svg);
+    icon.dataset.iconReady = name;
+  });
 }
+
+function scheduleIconRefresh() {
+  if (iconRefreshPending) {
+    return;
+  }
+  iconRefreshPending = true;
+  requestAnimationFrame(() => {
+    iconRefreshPending = false;
+    initIcons();
+  });
+}
+
+window.fbRefreshIcons = scheduleIconRefresh;
 
 async function init() {
   rawRows = await loadCollectedRows() || buildRawRows();
-  await loadSettings();
   renderFilters();
-  initChoicePickers();
   setDefaultWindow();
   els.normalizeToggle.checked = state.normalize;
   bindEvents();

@@ -101,6 +101,31 @@ function samplingModeEnabled(mode, target) {
   return mode === 'all' || mode === target;
 }
 
+function activeResourceStatus(row) {
+  return String(row?.effective_status || row?.status || row?.configured_status || '').toUpperCase() === 'ACTIVE';
+}
+
+function rowId(row, idField) {
+  return String(row?.id || row?.[idField] || '').trim();
+}
+
+function filterActiveAdChain(resources = {}) {
+  const activeCampaignIds = new Set((resources.campaigns || [])
+    .filter(activeResourceStatus)
+    .map((row) => rowId(row, 'campaign_id'))
+    .filter(Boolean));
+  const activeAdsetIds = new Set((resources.adsets || [])
+    .filter((row) => activeResourceStatus(row) && activeCampaignIds.has(String(row.campaign_id || '')))
+    .map((row) => rowId(row, 'adset_id'))
+    .filter(Boolean));
+
+  return (resources.ads || []).filter((row) => (
+    activeResourceStatus(row)
+      && activeCampaignIds.has(String(row.campaign_id || ''))
+      && activeAdsetIds.has(String(row.adset_id || ''))
+  ));
+}
+
 async function runConfiguredTargeted({ service, settings, options = {} }) {
   const targeted = settings.targeted;
   const explicitIds = parseTargetIds(options.ids);
@@ -207,15 +232,15 @@ async function runAdMonitorCycle({ service, settings, options = {} }) {
 
     const accountIds = await resolveAccountIds(options);
     if (accountIds.length) {
-      resources = await service.syncResourceType({
+      const resourceCatalog = await service.syncResources({
         accountIds,
-        getType: 'ads',
         activeOnly: true
       });
+      resources = filterActiveAdChain(resourceCatalog);
       const activeIds = new Set(resources.map((row) => String(row.id || row.ad_id)));
       ids = ids.filter((id) => activeIds.has(String(id)));
       if (!ids.length) {
-        throw new Error('List 2 中没有仍为 ACTIVE 的广告');
+        throw new Error('List 2 中没有仍为三层链路 ACTIVE 的广告');
       }
     }
 
@@ -408,7 +433,7 @@ async function bootstrapMonitorSettings(options = {}) {
     getType: 'all',
     activeOnly: true
   });
-  const activeAds = resourceResult.resources.ads || [];
+  const activeAds = filterActiveAdChain(resourceResult.resources);
   const activeCampaigns = resourceResult.resources.campaigns || [];
   let selectedAds = activeAds.slice(0, 50).map((row) => String(row.id || row.ad_id));
   let selectedCampaigns = activeCampaigns.slice(0, 5).map((row) => String(row.id || row.campaign_id));

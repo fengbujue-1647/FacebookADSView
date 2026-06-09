@@ -2,6 +2,8 @@ const API_FALLBACK_TIME_ZONE = "UTC";
 const DISPLAY_TIME_ZONE = "Asia/Shanghai";
 
 const formatterCache = new Map();
+const dateStartCache = new Map();
+const hourStartCache = new Map();
 
 function normalizeTimeZone(timeZone, fallback = API_FALLBACK_TIME_ZONE) {
   const candidate = String(timeZone || "").trim();
@@ -127,18 +129,32 @@ function hourFromHourStart(hourStart) {
 }
 
 function dateStartInDisplayTimeZone(dateStart, sourceTimeZone = API_FALLBACK_TIME_ZONE) {
+  const cacheKey = `${sourceTimeZone}|${dateStart}`;
+  if (dateStartCache.has(cacheKey)) {
+    return dateStartCache.get(cacheKey);
+  }
+
   const parts = parseDateOnly(dateStart);
   if (!parts) return "";
   const instant = zonedDateTimeToUtc(parts, sourceTimeZone);
-  return formatDateTimeInTimeZone(instant, DISPLAY_TIME_ZONE, { withOffset: true });
+  const value = formatDateTimeInTimeZone(instant, DISPLAY_TIME_ZONE, { withOffset: true });
+  dateStartCache.set(cacheKey, value);
+  return value;
 }
 
 function hourStartInDisplayTimeZone({ dateStart, hourlyRange, hourStart, sourceTimeZone = API_FALLBACK_TIME_ZONE } = {}) {
+  const cacheKey = `${sourceTimeZone}|${dateStart}|${hourlyRange}|${hourStart}`;
+  if (hourStartCache.has(cacheKey)) {
+    return hourStartCache.get(cacheKey);
+  }
+
   const parts = parseDateOnly(dateStart);
   const hour = hourFromRange(hourlyRange) ?? hourFromHourStart(hourStart);
   if (!parts || hour === null) return "";
   const instant = zonedDateTimeToUtc({ ...parts, hour }, sourceTimeZone);
-  return formatDateTimeInTimeZone(instant, DISPLAY_TIME_ZONE, { withOffset: true });
+  const value = formatDateTimeInTimeZone(instant, DISPLAY_TIME_ZONE, { withOffset: true });
+  hourStartCache.set(cacheKey, value);
+  return value;
 }
 
 function enrichInsightRowsWithTimeZone(rows = [], accountTimeZones = new Map()) {
