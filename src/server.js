@@ -95,6 +95,7 @@ let collectionRunStatus = {
   running: false,
   status: "idle",
   mode: "",
+  run_id: "",
   last_started_at: "",
   last_completed_at: "",
   exit_code: null,
@@ -1239,6 +1240,7 @@ function startCollectionRun({ mode = "all", concurrency = 0, qps = 0 } = {}) {
     running: true,
     status: "running",
     mode: normalizedMode,
+    run_id: "",
     last_started_at: new Date().toISOString(),
     last_completed_at: "",
     exit_code: null,
@@ -1276,6 +1278,127 @@ function startCollectionRun({ mode = "all", concurrency = 0, qps = 0 } = {}) {
     statusCode: 202,
     run: collectionRunStatus
   };
+}
+
+function collectionResumeSettings(run = {}) {
+  const settings = readSamplingSettings();
+  const objectTypes = Array.isArray(run.objectTypes) ? run.objectTypes : [];
+  const usesCampaigns = objectTypes.includes("campaigns");
+  const usesAds = objectTypes.includes("ads") || objectTypes.includes("adsets");
+  const candidates = [
+    usesCampaigns ? settings.campaignMonitor : null,
+    usesAds ? settings.adMonitor : null
+  ].filter(Boolean);
+  const fallback = [settings.campaignMonitor, settings.adMonitor];
+  const pool = candidates.length ? candidates : fallback;
+  return {
+    concurrency: Math.max(...pool.map((item) => Number(item?.concurrency || 1))),
+    qps: Math.max(...pool.map((item) => Number(item?.qps || 1))),
+    timeoutMs: Math.max(...pool.map((item) => Number(item?.requestTimeoutMs || 7000)))
+  };
+}
+
+function startCollectionQueueResume({ runId, reason = "auto", concurrency = 0, qps = 0, timeoutMs = 0 } = {}) {
+  if (!runId) {
+    return { ok: false, skipped: true, reason: "missing_run_id" };
+  }
+  if (collectionRunProcess) {
+    return { ok: false, skipped: true, reason: "runner_busy", run: collectionRunStatus };
+  }
+
+  const args = [
+    "--disable-warning=ExperimentalWarning",
+    path.join(repoRoot, "cli", "src", "cli.js"),
+    "queue-run",
+    "--run-id",
+    runId,
+    "--recover-stale-ms",
+    "0"
+  ];
+  if (concurrency > 0) args.push("--concurrency", String(concurrency));
+  if (qps > 0) args.push("--qps", String(qps));
+  if (timeoutMs > 0) args.push("--timeout-ms", String(timeoutMs));
+
+  collectionRunStatus = {
+    running: true,
+    status: "running",
+    mode: reason === "startup" ? "恢复当前采集批次" : "续跑当前采集批次",
+    run_id: runId,
+    last_started_at: new Date().toISOString(),
+    last_completed_at: "",
+    exit_code: null,
+    error: ""
+  };
+  collectionRunProcess = spawn(process.execPath, args, {
+    cwd: path.join(repoRoot, "cli"),
+    env: process.env,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  collectionRunProcess.on("error", (error) => {
+    collectionRunStatus = {
+      ...collectionRunStatus,
+      running: false,
+      status: "failed",
+      last_completed_at: new Date().toISOString(),
+      error: error.message
+    };
+    collectionRunProcess = null;
+  });
+  collectionRunProcess.on("exit", (code) => {
+    collectionRunStatus = {
+      ...collectionRunStatus,
+      running: false,
+      status: code === 0 ? "success" : "failed",
+      last_completed_at: new Date().toISOString(),
+      exit_code: code
+    };
+    collectionRunProcess = null;
+  });
+
+  return { ok: true, run: collectionRunStatus };
+}
+
+function ensureCollectionQueueResume({ runId = "", reason = "auto" } = {}) {
+  if (collectionRunProcess) {
+    return { ok: false, skipped: true, reason: "runner_busy", run: collectionRunStatus };
+  }
+  const overview = readCollectionQueueOverview({
+    databaseFile,
+    runId,
+    limit: 1,
+    pageSize: 1
+  });
+  const currentRun = overview.currentRun;
+  if (!currentRun?.runId) {
+    return { ok: false, skipped: true, reason: "no_current_run" };
+  }
+  const shouldResume = Number(currentRun.dueJobs || 0) > 0 || Number(currentRun.running || 0) > 0;
+  if (!shouldResume) {
+    return { ok: false, skipped: true, reason: "no_due_jobs", currentRun };
+  }
+  const settings = collectionResumeSettings(currentRun);
+  return startCollectionQueueResume({
+    runId: currentRun.runId,
+    reason,
+    concurrency: settings.concurrency,
+    qps: settings.qps,
+    timeoutMs: settings.timeoutMs
+  });
+}
+
+function scheduleCollectionQueueResume() {
+  const resume = (reason) => {
+    try {
+      ensureCollectionQueueResume({ reason });
+    } catch (error) {
+      console.warn(`Collection queue resume failed: ${error.message}`);
+    }
+  };
+  const bootTimer = setTimeout(() => resume("startup"), 1000);
+  bootTimer.unref?.();
+  const timer = setInterval(() => resume("interval"), 2000);
+  timer.unref?.();
 }
 
 function scheduleActiveResourceRefresh() {
@@ -2762,16 +2885,20 @@ const server = http.createServer((req, res) => {
     try {
       const pageSize = clampInteger(url.searchParams.get("page_size"), 50, 1, 100);
       const page = clampInteger(url.searchParams.get("page"), 1, 1, 100000);
+      const runId = String(url.searchParams.get("run_id") || "").trim();
+      const resume = ensureCollectionQueueResume({ runId, reason: "status" });
       writeJson(res, 200, {
         ok: true,
         queue: readCollectionQueueOverview({
           databaseFile,
+          runId,
           limit: pageSize,
           offset: (page - 1) * pageSize,
           page,
           pageSize
         }),
         runner: collectionRunStatus,
+        resume,
         display_time_zone: displayTimeZone
       });
     } catch (error) {
@@ -2982,3 +3109,4 @@ server.listen(port, host, () => {
 });
 
 scheduleActiveResourceRefresh();
+scheduleCollectionQueueResume();

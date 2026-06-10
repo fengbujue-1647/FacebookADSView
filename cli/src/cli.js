@@ -802,6 +802,34 @@ program
   });
 
 program
+  .command('queue-run')
+  .description('继续执行 SQLite 中已有的持久化采集批次，不重新规划新任务')
+  .option('--run-id <id>', '只执行指定采集批次 run_id')
+  .option('--queue-name <name>', '队列名称', 'insights')
+  .option('--concurrency <number>', '队列并发，默认 20')
+  .option('--qps <number>', '请求启动速率，默认 5/s')
+  .option('--timeout-ms <number>', '单请求 Abort 超时，默认 7000')
+  .option('--recover-stale-ms <number>', '恢复 running 锁的等待时间，默认 0 表示立即恢复')
+  .action(async (options) => {
+    assertCredentials();
+    const service = new SyncService();
+    const result = await service.runPersistentCollectionQueue({
+      queueName: options.queueName || 'insights',
+      runId: options.runId || '',
+      concurrency: parseInteger(options.concurrency) || 20,
+      qps: parseInteger(options.qps) || 5,
+      timeoutMs: parseInteger(options.timeoutMs) || 7000,
+      recoverStaleAfterMs: Number.isFinite(Number.parseInt(options.recoverStaleMs, 10))
+        ? Number.parseInt(options.recoverStaleMs, 10)
+        : 0
+    });
+    info(`续跑采集批次：${options.runId || '全部可执行批次'}`);
+    info(`队列任务：${result.stats.total} 个`);
+    info(`成功/失败：${result.stats.success}/${result.stats.failed}`);
+    info(`重试次数：${result.stats.retries}`);
+  });
+
+program
   .command('monitor-loop')
   .description('按 List 1/List 2 的 180/60 分钟频率循环运行')
   .option('--mode <mode>', 'all/campaigns/ads', 'all')

@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FB 广告数据看板</title>
-  <link rel="stylesheet" href="/styles.css?v=20260610-4">
-  <link rel="stylesheet" href="/alert-ai.css?v=20260610-4">
-  <script defer src="/vendor/echarts.min.js?v=20260610-4"></script>
+  <link rel="stylesheet" href="/styles.css?v=20260610-7">
+  <link rel="stylesheet" href="/alert-ai.css?v=20260610-7">
+  <script defer src="/vendor/echarts.min.js?v=20260610-7"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -283,8 +283,8 @@
         <section class="panel task-progress-panel" aria-labelledby="collectionConsoleTitle">
           <div class="panel-head task-progress-head">
             <div>
-              <span class="monitor-kicker">SQLite Job Queue</span>
-              <h2 id="collectionConsoleTitle">任务进度</h2>
+              <span class="monitor-kicker">SQLite 采集队列</span>
+              <h2 id="collectionConsoleTitle">采集任务进度</h2>
               <span id="collectionQueueCaption">读取中</span>
             </div>
             <div class="collection-console-actions">
@@ -303,33 +303,52 @@
               </button>
             </div>
           </div>
-          <div class="collection-console-grid" id="collectionConsoleGrid"></div>
-          <div class="overall-task-progress">
-            <div>
-              <strong id="collectionProgressLabel">0 / 0</strong>
-              <span>整体完成进度</span>
-            </div>
-            <div class="task-progress-track" aria-hidden="true">
-              <span id="collectionProgressFill"></span>
-            </div>
-          </div>
-          <div class="task-progress-list" id="collectionJobsList"></div>
-          <div class="task-progress-pagination">
-            <span id="collectionPageInfo">第 1 / 1 页</span>
-            <div class="resource-page-controls">
-              <button type="button" title="第一页" aria-label="第一页" data-collection-page="first">
-                <i data-lucide="chevrons-left"></i>
-              </button>
-              <button type="button" title="上一页" aria-label="上一页" data-collection-page="prev">
-                <i data-lucide="chevron-left"></i>
-              </button>
-              <button type="button" title="下一页" aria-label="下一页" data-collection-page="next">
-                <i data-lucide="chevron-right"></i>
-              </button>
-              <button type="button" title="最后一页" aria-label="最后一页" data-collection-page="last">
-                <i data-lucide="chevrons-right"></i>
-              </button>
-            </div>
+          <div class="task-run-layout">
+            <section class="task-current-run" aria-labelledby="collectionCurrentTitle">
+              <div class="task-section-head">
+                <div>
+                  <h3 id="collectionCurrentTitle">当前采集批次</h3>
+                  <span id="collectionCurrentCaption">按最近未完成批次展示</span>
+                </div>
+              </div>
+              <div class="collection-console-grid" id="collectionConsoleGrid"></div>
+              <div class="overall-task-progress">
+                <div>
+                  <strong id="collectionProgressLabel">0 / 0</strong>
+                  <span>当前批次完成进度</span>
+                </div>
+                <div class="task-progress-track" aria-hidden="true">
+                  <span id="collectionProgressFill"></span>
+                </div>
+              </div>
+              <div class="task-progress-list" id="collectionJobsList"></div>
+              <div class="task-progress-pagination">
+                <span id="collectionPageInfo">第 1 / 1 页</span>
+                <div class="resource-page-controls">
+                  <button type="button" title="第一页" aria-label="第一页" data-collection-page="first">
+                    <i data-lucide="chevrons-left"></i>
+                  </button>
+                  <button type="button" title="上一页" aria-label="上一页" data-collection-page="prev">
+                    <i data-lucide="chevron-left"></i>
+                  </button>
+                  <button type="button" title="下一页" aria-label="下一页" data-collection-page="next">
+                    <i data-lucide="chevron-right"></i>
+                  </button>
+                  <button type="button" title="最后一页" aria-label="最后一页" data-collection-page="last">
+                    <i data-lucide="chevrons-right"></i>
+                  </button>
+                </div>
+              </div>
+            </section>
+            <aside class="task-run-history" aria-labelledby="collectionHistoryTitle">
+              <div class="task-section-head compact">
+                <div>
+                  <h3 id="collectionHistoryTitle">历史采集批次</h3>
+                  <span>选择任一批次查看明细</span>
+                </div>
+              </div>
+              <div class="collection-run-list" id="collectionRunList"></div>
+            </aside>
           </div>
         </section>
       </section>
@@ -560,7 +579,7 @@
     </main>
   </div>
 
-  <script defer src="/app.js?v=20260610-4"></script>
-  <script defer src="/alert-ai.js?v=20260610-4"></script>
+  <script defer src="/app.js?v=20260610-7"></script>
+  <script defer src="/alert-ai.js?v=20260610-7"></script>
 </body>
 </html>

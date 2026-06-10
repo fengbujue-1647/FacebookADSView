@@ -1083,12 +1083,18 @@ export function enqueueCollectionJobs({
 
 export function recoverStaleCollectionJobs({
   queueName = 'insights',
+  runId = '',
   staleAfterMs = 30 * 60 * 1000,
   databaseFile = config.databaseFile
 } = {}) {
   const threshold = new Date(Date.now() - staleAfterMs).toISOString();
   const now = new Date().toISOString();
   return withDatabase((db) => {
+    const params = [now, now, queueName, threshold];
+    const runClause = runId ? 'AND run_id = ?' : '';
+    if (runId) {
+      params.push(runId);
+    }
     const result = db.prepare(`
       UPDATE collection_jobs
       SET status = 'retry',
@@ -1101,27 +1107,35 @@ export function recoverStaleCollectionJobs({
         AND status = 'running'
         AND locked_at <> ''
         AND locked_at < ?
-    `).run(now, now, queueName, threshold);
+        ${runClause}
+    `).run(...params);
     return { recovered: Number(result.changes || 0), databaseFile };
   }, databaseFile);
 }
 
 export function claimCollectionJob({
   queueName = 'insights',
+  runId = '',
   workerId = '',
   databaseFile = config.databaseFile
 } = {}) {
   const now = new Date().toISOString();
   return withDatabase((db) => runInTransaction(db, () => {
+    const params = [queueName, now];
+    const runClause = runId ? 'AND run_id = ?' : '';
+    if (runId) {
+      params.push(runId);
+    }
     const row = db.prepare(`
       SELECT *
       FROM collection_jobs
       WHERE queue_name = ?
         AND status IN ('waiting', 'retry')
         AND (next_attempt_at = '' OR next_attempt_at <= ?)
+        ${runClause}
       ORDER BY priority DESC, bucket_start_utc, created_at
       LIMIT 1
-    `).get(queueName, now);
+    `).get(...params);
 
     if (!row) return null;
 

@@ -273,6 +273,8 @@ function emptyCollectionQueueOverview(queueName = "insights") {
   return {
     queueName,
     generatedAt: new Date().toISOString(),
+    currentRun: null,
+    runSummaries: [],
     statusCounts: {
       waiting: 0,
       running: 0,
@@ -303,11 +305,62 @@ function emptyCollectionQueueOverview(queueName = "insights") {
   };
 }
 
+function compactObjectTypes(value) {
+  return [...new Set(String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean))];
+}
+
+function parseCollectionRunSummary(row) {
+  if (!row) return null;
+  const total = Number(row.total || 0);
+  const completed = Number(row.completed || 0);
+  const failed = Number(row.failed || 0);
+  const retry = Number(row.retry || 0);
+  const running = Number(row.running || 0);
+  const waiting = Number(row.waiting || 0);
+  const pendingJobs = waiting + retry + running;
+  const dueJobs = Number(row.due_jobs || 0);
+  const percent = total ? Math.round((completed / total) * 1000) / 10 : 0;
+  const status = running > 0
+    ? "running"
+    : pendingJobs > 0
+      ? "pending"
+      : failed > 0
+        ? "partial"
+        : "completed";
+  return {
+    runId: row.run_id || "",
+    objectTypes: compactObjectTypes(row.object_types),
+    status,
+    total,
+    completed,
+    failed,
+    retry,
+    running,
+    waiting,
+    pendingJobs,
+    dueJobs,
+    percent,
+    rows: Number(row.rows || 0),
+    rawRows: Number(row.raw_rows || 0),
+    rateLimited: Number(row.rate_limited || 0),
+    quotaLimited: Number(row.quota_limited || 0),
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || "",
+    startedAt: row.started_at || "",
+    completedAt: row.completed_at || "",
+    nextAttemptAt: row.next_attempt_at || ""
+  };
+}
+
 function parseCollectionJob(row) {
   const objectIds = parseJson(row.object_ids_json, []);
   const metadata = parseJson(row.metadata_json, {});
   return {
     id: row.id,
+    run_id: row.run_id,
     queue_name: row.queue_name,
     status: row.status,
     object_type: row.object_type,
@@ -326,7 +379,7 @@ function parseCollectionJob(row) {
     updated_at: row.updated_at,
     started_at: row.started_at,
     completed_at: row.completed_at,
-    next_run_at: row.next_run_at,
+    next_attempt_at: row.next_attempt_at,
     error: row.error,
     objectIds: objectIds.slice(0, 4),
     objectIdTotal: objectIds.length,
@@ -376,7 +429,7 @@ function parseCollectionBatch(row) {
   };
 }
 
-function readCollectionQueueOverview({ databaseFile, queueName = "insights", limit = 50, offset = 0, page = 1, pageSize = 50 } = {}) {
+function readCollectionQueueOverview({ databaseFile, queueName = "insights", runId = "", limit = 50, offset = 0, page = 1, pageSize = 50 } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return emptyCollectionQueueOverview(queueName);
   }
@@ -387,12 +440,65 @@ function readCollectionQueueOverview({ databaseFile, queueName = "insights", lim
       return emptyCollectionQueueOverview(queueName);
     }
 
+    const now = new Date().toISOString();
+    const runSummarySql = `
+      SELECT
+        run_id,
+        GROUP_CONCAT(DISTINCT object_type) AS object_types,
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN status = 'retry' THEN 1 ELSE 0 END) AS retry,
+        SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+        SUM(CASE WHEN status = 'waiting' THEN 1 ELSE 0 END) AS waiting,
+        SUM(CASE WHEN status IN ('waiting', 'retry') AND (next_attempt_at = '' OR next_attempt_at <= ?) THEN 1 ELSE 0 END) AS due_jobs,
+        SUM(row_count) AS rows,
+        SUM(raw_row_count) AS raw_rows,
+        SUM(CASE WHEN rate_limited = 1 THEN 1 ELSE 0 END) AS rate_limited,
+        SUM(CASE WHEN quota_limited = 1 THEN 1 ELSE 0 END) AS quota_limited,
+        MIN(created_at) AS created_at,
+        MAX(updated_at) AS updated_at,
+        MIN(NULLIF(started_at, '')) AS started_at,
+        MAX(NULLIF(completed_at, '')) AS completed_at,
+        MIN(CASE WHEN status IN ('waiting', 'retry') AND next_attempt_at <> '' THEN next_attempt_at ELSE NULL END) AS next_attempt_at
+      FROM collection_jobs
+      WHERE queue_name = ?
+        AND run_id <> ''
+    `;
+    const runSummaryOrder = `
+      GROUP BY run_id
+      ORDER BY
+        CASE WHEN SUM(CASE WHEN status IN ('waiting', 'running', 'retry') THEN 1 ELSE 0 END) > 0 THEN 0 ELSE 1 END,
+        MAX(updated_at) DESC,
+        MIN(created_at) DESC
+    `;
+    const runSummaries = db.prepare(`${runSummarySql} ${runSummaryOrder} LIMIT 30`)
+      .all(now, queueName)
+      .map(parseCollectionRunSummary)
+      .filter(Boolean);
+    const requestedRunId = String(runId || "").trim();
+    let currentRun = requestedRunId
+      ? runSummaries.find((summary) => summary.runId === requestedRunId) || null
+      : null;
+    if (requestedRunId && !currentRun) {
+      currentRun = parseCollectionRunSummary(db.prepare(`${runSummarySql} AND run_id = ? GROUP BY run_id LIMIT 1`)
+        .get(now, queueName, requestedRunId));
+      if (currentRun && !runSummaries.some((summary) => summary.runId === currentRun.runId)) {
+        runSummaries.unshift(currentRun);
+      }
+    }
+    if (!currentRun) {
+      currentRun = runSummaries.find((summary) => summary.pendingJobs > 0) || runSummaries[0] || null;
+    }
+    const currentRunId = currentRun?.runId || "";
+
     const statusRows = db.prepare(`
       SELECT status, COUNT(*) AS count
       FROM collection_jobs
       WHERE queue_name = ?
+        AND run_id = ?
       GROUP BY status
-    `).all(queueName);
+    `).all(queueName, currentRunId);
     const statusCounts = emptyCollectionQueueOverview(queueName).statusCounts;
     statusRows.forEach((row) => {
       statusCounts[row.status] = Number(row.count || 0);
@@ -407,14 +513,16 @@ function readCollectionQueueOverview({ databaseFile, queueName = "insights", lim
         SUM(CASE WHEN quota_limited = 1 THEN 1 ELSE 0 END) AS quota_limited
       FROM collection_jobs
       WHERE queue_name = ?
-    `).get(queueName);
+        AND run_id = ?
+    `).get(queueName, currentRunId);
     const activeWorkers = db.prepare(`
       SELECT COUNT(DISTINCT locked_by) AS count
       FROM collection_jobs
       WHERE queue_name = ?
+        AND run_id = ?
         AND status = 'running'
         AND locked_by <> ''
-    `).get(queueName);
+    `).get(queueName, currentRunId);
     const canReadBatches = tableExists(db, "collection_job_batches");
     const recentWindow = canReadBatches
       ? db.prepare(`
@@ -427,11 +535,12 @@ function readCollectionQueueOverview({ databaseFile, queueName = "insights", lim
           SELECT duration_ms, rate_limited, quota_limited
           FROM collection_job_batches
           WHERE kind = 'insights'
+            AND run_id = ?
             AND completed_at <> ''
           ORDER BY completed_at DESC
           LIMIT 50
         )
-      `).get()
+      `).get(currentRunId)
       : {};
     const normalizedLimit = Math.min(100, Math.max(1, Number.parseInt(limit || pageSize, 10) || 50));
     const normalizedOffset = Math.max(0, Number.parseInt(offset, 10) || 0);
@@ -439,16 +548,18 @@ function readCollectionQueueOverview({ databaseFile, queueName = "insights", lim
       SELECT *
       FROM collection_jobs
       WHERE queue_name = ?
+        AND run_id = ?
       ORDER BY updated_at DESC, created_at DESC
       LIMIT ? OFFSET ?
-    `).all(queueName, normalizedLimit, normalizedOffset).map(parseCollectionJob);
+    `).all(queueName, currentRunId, normalizedLimit, normalizedOffset).map(parseCollectionJob);
     const recentBatches = canReadBatches
       ? db.prepare(`
         SELECT *
         FROM collection_job_batches
+        WHERE run_id = ?
         ORDER BY completed_at DESC, started_at DESC
         LIMIT ?
-      `).all(normalizedLimit).map(parseCollectionBatch)
+      `).all(currentRunId, normalizedLimit).map(parseCollectionBatch)
       : [];
     const total = Number(totals?.total || 0);
     const completed = Number(totals?.completed || 0);
@@ -456,6 +567,8 @@ function readCollectionQueueOverview({ databaseFile, queueName = "insights", lim
     return {
       queueName,
       generatedAt: new Date().toISOString(),
+      currentRun,
+      runSummaries,
       statusCounts,
       activeWorkers: Number(activeWorkers?.count || 0),
       progress: {

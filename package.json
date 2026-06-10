@@ -15,6 +15,7 @@
     "cli:campaign-insights": "npm --prefix cli run campaign-insights --",
     "cli:monitor-bootstrap": "npm --prefix cli run monitor-bootstrap --",
     "cli:monitor-run": "npm --prefix cli run monitor-run --",
+    "cli:queue-run": "npm --prefix cli run queue-run --",
     "cli:monitor-loop": "npm --prefix cli run monitor-loop --",
     "cli:pull": "npm --prefix cli run pull --",
     "cli:active-ads": "npm --prefix cli run active-ads --",

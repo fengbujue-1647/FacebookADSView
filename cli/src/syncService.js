@@ -723,9 +723,10 @@ export class SyncService {
     runId = '',
     concurrency = 20,
     qps = 5,
-    timeoutMs = 7000
+    timeoutMs = 7000,
+    recoverStaleAfterMs = 30 * 60 * 1000
   } = {}) {
-    recoverStaleCollectionJobs({ queueName });
+    recoverStaleCollectionJobs({ queueName, runId, staleAfterMs: recoverStaleAfterMs });
     const workerCount = Math.max(1, Number.parseInt(concurrency, 10) || 1);
     const waitForStartSlot = createRequestStartLimiter(qps);
     const records = [];
@@ -735,7 +736,7 @@ export class SyncService {
     const workerLoop = async (index) => {
       const workerId = `${workerPrefix}-${index + 1}`;
       while (true) {
-        const job = claimCollectionJob({ queueName, workerId });
+        const job = claimCollectionJob({ queueName, runId, workerId });
         if (!job) break;
         const startedAt = new Date().toISOString();
         const startedMs = Date.now();

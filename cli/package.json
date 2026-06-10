@@ -28,6 +28,7 @@
     "campaign-insights": "node --disable-warning=ExperimentalWarning src/cli.js campaign-insights",
     "monitor-bootstrap": "node --disable-warning=ExperimentalWarning src/cli.js monitor-bootstrap",
     "monitor-run": "node --disable-warning=ExperimentalWarning src/cli.js monitor-run",
+    "queue-run": "node --disable-warning=ExperimentalWarning src/cli.js queue-run",
     "monitor-loop": "node --disable-warning=ExperimentalWarning src/cli.js monitor-loop",
     "token": "node --disable-warning=ExperimentalWarning src/cli.js token",
     "doctor": "node --disable-warning=ExperimentalWarning src/cli.js doctor"

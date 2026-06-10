@@ -68,6 +68,7 @@ const RESOURCE_LIMITS = {
 };
 const RESOURCE_SELECTED_PAGE_SIZE = 8;
 const COLLECTION_PAGE_SIZE = 50;
+const COLLECTION_REFRESH_INTERVAL_MS = 2000;
 
 const state = {
   activeView: "chart",
@@ -88,6 +89,9 @@ const state = {
   collectionQueue: null,
   collectionRunner: null,
   collectionPage: 1,
+  collectionRunId: "",
+  collectionLoading: false,
+  collectionRefreshTimer: null,
   environmentSettings: null,
   environmentError: "",
   resourceCatalog: {
@@ -198,7 +202,7 @@ const viewCopy = {
   },
   tasks: {
     title: "任务进度",
-    subtitle: "查看采集队列的 Job 进度、批处理状态和运行耗时。"
+    subtitle: "按采集批次查看当前进度、历史批次和队列运行状态。"
   }
 };
 
@@ -317,7 +321,9 @@ const els = {
   monitorStatusGrid: document.getElementById("monitorStatusGrid"),
   collectionConsoleGrid: document.getElementById("collectionConsoleGrid"),
   collectionJobsList: document.getElementById("collectionJobsList"),
+  collectionRunList: document.getElementById("collectionRunList"),
   collectionQueueCaption: document.getElementById("collectionQueueCaption"),
+  collectionCurrentCaption: document.getElementById("collectionCurrentCaption"),
   collectionProgressFill: document.getElementById("collectionProgressFill"),
   collectionProgressLabel: document.getElementById("collectionProgressLabel"),
   collectionPageInfo: document.getElementById("collectionPageInfo"),
@@ -889,6 +895,16 @@ function escapeHtml(value) {
 
 function formatIso(value) {
   return formatInstantInDisplayTimeZone(value);
+}
+
+function formatIsoWithSeconds(value) {
+  if (!value) return "-";
+  const date = value instanceof Date ? value : new Date(value);
+  const clockDate = clockDateFromInstant(date);
+  if (!Number.isFinite(clockDate.getTime())) {
+    return String(value).slice(0, 19).replace("T", " ");
+  }
+  return `${toDateTimeInputValue(clockDate).replace("T", " ")}:${String(clockDate.getUTCSeconds()).padStart(2, "0")} ${DISPLAY_TIME_ZONE_OFFSET_LABEL}`;
 }
 
 function formatDuration(ms) {
@@ -1558,6 +1574,64 @@ function collectionStatusText(status) {
   }[status] || status || "-";
 }
 
+function collectionRunStatusText(status) {
+  return {
+    running: "运行中",
+    pending: "待继续",
+    partial: "部分完成",
+    completed: "已完成"
+  }[status] || status || "-";
+}
+
+function collectionObjectTypeText(value) {
+  return {
+    campaigns: "广告系列",
+    adsets: "广告组",
+    ads: "广告"
+  }[value] || value || "-";
+}
+
+function collectionRunObjectText(run) {
+  const types = Array.isArray(run?.objectTypes) ? run.objectTypes : [];
+  return types.length ? types.map(collectionObjectTypeText).join("、") : "未知层级";
+}
+
+function collectionRunTitle(run) {
+  return `${collectionRunObjectText(run)} · ${Number(run?.total || 0)} 个任务`;
+}
+
+function collectionRunMeta(run) {
+  const pending = Number(run?.pendingJobs || 0);
+  const retry = Number(run?.retry || 0);
+  const failed = Number(run?.failed || 0);
+  return [
+    `${Number(run?.completed || 0)} / ${Number(run?.total || 0)} · ${Number(run?.percent || 0).toFixed(1)}%`,
+    pending ? `${pending} 个待处理` : "",
+    retry ? `${retry} 个重试` : "",
+    failed ? `${failed} 个失败` : "",
+    run?.nextAttemptAt ? `下次 ${formatIso(run.nextAttemptAt)}` : ""
+  ].filter(Boolean).join(" · ");
+}
+
+function renderCollectionRunHistory() {
+  if (!els.collectionRunList) return;
+  const runs = state.collectionQueue?.runSummaries || [];
+  const currentRunId = state.collectionQueue?.currentRun?.runId || state.collectionRunId || "";
+  els.collectionRunList.innerHTML = runs.length
+    ? runs.map((run) => {
+      const active = run.runId === currentRunId;
+      return `
+        <button class="collection-run-item ${active ? "active" : ""}" type="button" data-collection-run-id="${escapeHtml(run.runId)}">
+          <span class="run-badge ${escapeHtml(run.status)}">${escapeHtml(collectionRunStatusText(run.status))}</span>
+          <strong>${escapeHtml(collectionRunTitle(run))}</strong>
+          <small>${escapeHtml(collectionRunMeta(run))}</small>
+          <em>${escapeHtml(formatIso(run.updatedAt || run.createdAt))}</em>
+        </button>
+      `;
+    }).join("")
+    : `<div class="empty-inline">还没有历史采集批次。</div>`;
+}
+
 function collectionJobProgress(job) {
   const status = job?.status || "";
   if (status === "completed") return 100;
@@ -1580,7 +1654,7 @@ function collectionJobTone(job) {
 }
 
 function collectionJobTitle(job) {
-  const level = job?.object_type || "-";
+  const level = collectionObjectTypeText(job?.object_type);
   const idCount = Number(job?.id_count || 0);
   const bucket = job?.bucket_key || job?.date_start || "-";
   return `${level} · ${idCount} ID · ${bucket}`;
@@ -1640,35 +1714,42 @@ function renderCollectionConsole() {
   if (!els.collectionConsoleGrid || !els.collectionJobsList) {
     return;
   }
+  renderCollectionRunHistory();
+  const currentRun = queue?.currentRun || null;
   const counts = queue?.statusCounts || {};
   const progress = queue?.progress || {};
   const page = queue?.jobPage || { page: state.collectionPage, pageSize: COLLECTION_PAGE_SIZE, total: 0, pageCount: 1, offset: 0 };
   const recentWindow = queue?.recentWindow || {};
   const totals = queue?.totals || {};
   const runnerLabel = runner?.running
-    ? `运行中 · ${runner.mode || "all"}`
+    ? `运行中 · ${runner.mode || "采集"}`
     : runner?.last_completed_at
       ? `${runner.status === "success" ? "上次完成" : "上次失败"} · ${formatIso(runner.last_completed_at)}`
       : "空闲";
 
   els.collectionQueueCaption.textContent = queue?.generatedAt
-    ? `${runnerLabel} · ${formatIso(queue.generatedAt)}`
+    ? `${runnerLabel} · 自动刷新 ${COLLECTION_REFRESH_INTERVAL_MS / 1000}s · ${formatIsoWithSeconds(queue.generatedAt)}`
     : runnerLabel;
+  if (els.collectionCurrentCaption) {
+    els.collectionCurrentCaption.textContent = currentRun
+      ? `${collectionRunStatusText(currentRun.status)} · ${collectionRunTitle(currentRun)} · ${formatIso(currentRun.createdAt)}`
+      : "暂无当前采集批次";
+  }
   els.collectionProgressLabel.textContent = `${Number(progress.completed || 0)} / ${Number(progress.total || 0)} · ${Number(progress.percent || 0).toFixed(1)}%`;
   els.collectionProgressFill.style.width = `${Math.max(0, Math.min(100, Number(progress.percent || 0)))}%`;
   els.collectionConsoleGrid.innerHTML = [
     {
       title: "当前 worker",
       value: `${Number(queue?.activeWorkers || 0)} / ${Math.max(state.samplingSettings.campaignMonitor.concurrency, state.samplingSettings.adMonitor.concurrency)}`,
-      meta: "运行中 / 配置并发"
+      meta: "当前批次运行中 / 配置并发"
     },
     {
-      title: "等待 / 重试",
+      title: "待处理 / 重试",
       value: `${Number(counts.waiting || 0)} / ${Number(counts.retry || 0)}`,
-      meta: "持久化 Job"
+      meta: currentRun?.nextAttemptAt ? `下次 ${formatIso(currentRun.nextAttemptAt)}` : "当前批次任务"
     },
     {
-      title: "完成进度",
+      title: "当前批次进度",
       value: `${Number(progress.percent || 0).toFixed(1)}%`,
       meta: `${Number(progress.completed || 0)} / ${Number(progress.total || 0)}`
     },
@@ -1698,7 +1779,7 @@ function renderCollectionConsole() {
   const jobs = queue?.recentJobs || [];
   els.collectionJobsList.innerHTML = jobs.length
     ? jobs.map(renderCollectionJobCard).join("")
-    : `<div class="empty-inline">还没有采集 Job。点击“投递并运行”后，这里会显示持久化队列状态。</div>`;
+    : `<div class="empty-inline">当前采集批次还没有可展示的任务。点击“投递并运行”后，这里会显示批次内任务。</div>`;
 
   const total = Number(page.total || progress.total || 0);
   const pageSize = Number(page.pageSize || COLLECTION_PAGE_SIZE);
@@ -1869,17 +1950,28 @@ async function loadMonitorStatus() {
   renderMonitorStatus();
 }
 
-async function loadCollectionQueueStatus(page = state.collectionPage) {
+async function loadCollectionQueueStatus(page = state.collectionPage, runId = state.collectionRunId) {
+  if (state.collectionLoading) {
+    return;
+  }
+  state.collectionLoading = true;
   state.collectionPage = Math.max(1, Number.parseInt(page, 10) || 1);
   try {
     const params = new URLSearchParams({
       page: String(state.collectionPage),
       page_size: String(COLLECTION_PAGE_SIZE)
     });
+    const selectedRunId = String(runId || "").trim();
+    if (selectedRunId) {
+      params.set("run_id", selectedRunId);
+    }
     const response = await fetch(`/api/collection/queue/status?${params}`, { cache: "no-store" });
     const payload = await response.json();
     state.collectionQueue = payload.ok ? payload.queue : null;
     state.collectionRunner = payload.ok ? payload.runner : null;
+    if (!selectedRunId && state.collectionQueue?.currentRun?.runId) {
+      state.collectionRunId = state.collectionQueue.currentRun.runId;
+    }
     const pageInfo = state.collectionQueue?.jobPage;
     if (pageInfo?.page) {
       state.collectionPage = pageInfo.page;
@@ -1887,6 +1979,8 @@ async function loadCollectionQueueStatus(page = state.collectionPage) {
   } catch {
     state.collectionQueue = null;
     state.collectionRunner = null;
+  } finally {
+    state.collectionLoading = false;
   }
   renderCollectionConsole();
 }
@@ -1914,6 +2008,7 @@ async function runCollectionQueue() {
     if (!response.ok || !payload.ok) {
       throw new Error(payload.message || "采集任务启动失败");
     }
+    state.collectionRunId = "";
     await loadCollectionQueueStatus(1);
   } catch (error) {
     els.collectionQueueCaption.textContent = error.message || "采集任务启动失败";
@@ -1933,7 +2028,37 @@ function setCollectionPage(action) {
     last: pageCount
   }[action] || currentPage;
   if (nextPage !== currentPage) {
-    loadCollectionQueueStatus(nextPage);
+    loadCollectionQueueStatus(nextPage, state.collectionRunId);
+  }
+}
+
+function selectCollectionRun(runId) {
+  state.collectionRunId = String(runId || "").trim();
+  state.collectionPage = 1;
+  loadCollectionQueueStatus(1, state.collectionRunId);
+}
+
+function stopCollectionAutoRefresh() {
+  if (state.collectionRefreshTimer) {
+    clearInterval(state.collectionRefreshTimer);
+    state.collectionRefreshTimer = null;
+  }
+}
+
+function startCollectionAutoRefresh() {
+  if (state.collectionRefreshTimer) return;
+  state.collectionRefreshTimer = setInterval(() => {
+    if (state.activeView === "tasks") {
+      loadCollectionQueueStatus(state.collectionPage, state.collectionRunId);
+    }
+  }, COLLECTION_REFRESH_INTERVAL_MS);
+}
+
+function syncCollectionAutoRefresh() {
+  if (state.activeView === "tasks") {
+    startCollectionAutoRefresh();
+  } else {
+    stopCollectionAutoRefresh();
   }
 }
 
@@ -2956,6 +3081,7 @@ function renderView() {
     panel.hidden = !active;
     panel.classList.toggle("active", active);
   });
+  syncCollectionAutoRefresh();
 
   if (state.activeView === "chart" && chart) {
     requestAnimationFrame(() => chart.resize());
@@ -2973,7 +3099,7 @@ function renderView() {
   }
   if (state.activeView === "tasks") {
     renderCollectionConsole();
-    loadCollectionQueueStatus(state.collectionPage).catch(() => {
+    loadCollectionQueueStatus(state.collectionPage, state.collectionRunId).catch(() => {
       renderCollectionConsole();
     });
   }
@@ -3720,7 +3846,7 @@ function bindEvents() {
   });
 
   els.refreshCollectionQueueButton.addEventListener("click", () => {
-    loadCollectionQueueStatus(state.collectionPage);
+    loadCollectionQueueStatus(state.collectionPage, state.collectionRunId);
   });
 
   els.runCollectionQueueButton.addEventListener("click", () => {
@@ -3731,6 +3857,12 @@ function bindEvents() {
     button.addEventListener("click", () => {
       setCollectionPage(button.dataset.collectionPage);
     });
+  });
+
+  els.collectionRunList?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-collection-run-id]");
+    if (!button) return;
+    selectCollectionRun(button.dataset.collectionRunId);
   });
 
   els.resetSettingsButton.addEventListener("click", () => {
