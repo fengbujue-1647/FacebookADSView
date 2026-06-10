@@ -436,7 +436,7 @@ Query 参数：
 
 | 参数 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| id | 是 | string | 广告系列 ID、广告组 ID 或广告 ID |
+| id | 是 | string | 广告系列 ID、广告组 ID 或广告 ID；多个 ID 用英文逗号分隔，单次最多 50 个 |
 | fields | 否 | string | 需要返回字段，逗号分隔 |
 
 curl 示例：
@@ -574,7 +574,7 @@ Query 参数：
 
 | 参数 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| id | 是 | string | 广告系列 ID、广告组 ID 或广告 ID |
+| id | 是 | string | 广告系列 ID、广告组 ID 或广告 ID；多个 ID 用英文逗号分隔，单次最多 50 个 |
 | fields | 是 | string | 需要返回字段，逗号分隔 |
 | breakdowns | 否 | string | 按维度拆分，如 age,gender |
 | level | 否 | string | Meta 原生支持 campaign/adset/ad 等层级；YinoLink 当前透传效果需实测确认 |

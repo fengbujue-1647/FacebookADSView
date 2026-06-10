@@ -42,7 +42,15 @@
       mode: "create",
       id: "",
       recipients: [],
-      conditions: []
+      conditions: [],
+      targetPicker: {
+        open: false,
+        query: "",
+        loading: false,
+        options: [],
+        selectedIds: new Set(),
+        selectedMap: new Map()
+      }
     },
     monitor: {
       evaluating: false,
@@ -69,6 +77,7 @@
       error: null
     }
   };
+  const selectPickerState = new WeakMap();
 
   const $ = (selector) => root.querySelector(selector);
   const $$ = (selector) => [...root.querySelectorAll(selector)];
@@ -194,6 +203,7 @@
                   <th>预警规则</th>
                   <th>通知渠道</th>
                   <th>更新时间</th>
+                  <th>下次检查</th>
                   <th>状态</th>
                   <th>操作</th>
                 </tr>
@@ -401,16 +411,26 @@
               <select id="templateTargetLevel" name="targetLevel"></select>
               <span class="field-error" data-error-for="targetLevel"></span>
             </div>
-            <div class="control-group alert-field" data-field="logic">
-              <label for="templateLogic">条件组合</label>
-              <select id="templateLogic" name="logic">
-                <option value="and">全部满足 AND</option>
-                <option value="or">任一满足 OR</option>
-              </select>
-            </div>
             <div class="control-group alert-field wide" data-field="targetIds">
-              <label for="templateTargetIds">监控目标 ID</label>
-              <textarea id="templateTargetIds" name="targetIds" rows="3" placeholder="留空表示监控该层级全部对象；多个 ID 可换行或逗号分隔。"></textarea>
+              <label for="templateTargetPickerToggle">监控目标</label>
+              <div class="entity-picker template-target-picker">
+                <button class="select-button entity-toggle" id="templateTargetPickerToggle" type="button" aria-expanded="false">
+                  <span id="templateTargetPickerLabel">选择监控目标</span>
+                  <i data-lucide="chevron-down"></i>
+                </button>
+                <div class="entity-dropdown" id="templateTargetPickerDropdown" hidden>
+                  <div class="resource-search">
+                    <i data-lucide="search"></i>
+                    <input id="templateTargetPickerSearch" type="search" placeholder="搜索名称或 ID">
+                  </div>
+                  <div class="resource-toolbar">
+                    <button type="button" data-template-target-action="select-all">全选当前</button>
+                    <button type="button" data-template-target-action="clear">清空已选</button>
+                  </div>
+                  <div class="entity-option-list" id="templateTargetOptionList"></div>
+                </div>
+              </div>
+              <div class="entity-selected-list" id="templateTargetSelectedList"></div>
               <span class="field-error" data-error-for="targetIds"></span>
             </div>
             <div class="control-group alert-field wide" data-field="conditions">
@@ -427,12 +447,19 @@
             <div class="control-group alert-field" data-field="windowType">
               <label for="templateWindowType">时间窗口</label>
               <select id="templateWindowType" name="windowType"></select>
+              <small class="window-hint" id="templateWindowHint"></small>
               <span class="field-error" data-error-for="windowType"></span>
             </div>
             <div class="control-group alert-field" data-field="windowMinutes" id="customWindowGroup" hidden>
               <label for="templateWindowMinutes">自定义分钟数</label>
-              <input id="templateWindowMinutes" name="windowMinutes" type="number" min="5" max="1440" step="1">
+              <input id="templateWindowMinutes" name="windowMinutes" type="number" min="5" max="4320" step="1">
               <span class="field-error" data-error-for="windowMinutes"></span>
+            </div>
+            <div class="control-group alert-field" data-field="checkIntervalMinutes">
+              <label for="templateCheckIntervalMinutes">检查间隔(分钟)</label>
+              <input id="templateCheckIntervalMinutes" name="checkIntervalMinutes" type="number" min="5" max="10080" step="1">
+              <small class="window-hint" id="templateCheckIntervalHint"></small>
+              <span class="field-error" data-error-for="checkIntervalMinutes"></span>
             </div>
             <div class="control-group alert-field">
               <label for="templateSeverity">异常等级</label>
@@ -543,7 +570,7 @@
 
     if (state.templates.loading) {
       empty.hidden = true;
-      body.innerHTML = `<tr><td colspan="7" class="alert-loading-row">正在读取预警模板</td></tr>`;
+      body.innerHTML = `<tr><td colspan="8" class="alert-loading-row">正在读取预警模板</td></tr>`;
       pagination.innerHTML = "";
       refreshIcons();
       return;
@@ -570,6 +597,10 @@
         <td class="rule-cell">${escapeHtml(item.ruleDescription)}</td>
         <td>${escapeHtml(item.channelDescription)}</td>
         <td>${formatDateTime(item.updated_at)}</td>
+        <td>
+          <strong class="next-check-label">${escapeHtml(formatRemaining(item.next_check_at))}</strong>
+          <small>${formatDateTime(item.next_check_at)}</small>
+        </td>
         <td>
           <label class="alert-switch">
             <input type="checkbox" data-template-status="${item.id}" ${item.enabled ? "checked" : ""}>
@@ -618,6 +649,22 @@
       hour: "2-digit",
       minute: "2-digit"
     });
+  }
+
+  function formatRemaining(value) {
+    if (!value) return "待检查";
+    const target = new Date(value).getTime();
+    if (!Number.isFinite(target)) return "-";
+    const diff = target - Date.now();
+    if (diff <= 0) return "待检查";
+    const minutes = Math.ceil(diff / 60_000);
+    if (minutes < 60) return `${minutes} 分钟`;
+    const hours = Math.floor(minutes / 60);
+    const restMinutes = minutes % 60;
+    if (hours < 24) return restMinutes ? `${hours} 小时 ${restMinutes} 分钟` : `${hours} 小时`;
+    const days = Math.floor(hours / 24);
+    const restHours = hours % 24;
+    return restHours ? `${days} 天 ${restHours} 小时` : `${days} 天`;
   }
 
   async function loadTemplates() {
@@ -737,6 +784,133 @@
     first?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
+  function selectPickerOptionRows(select) {
+    return [...select.options].map((option) => ({
+      value: option.value,
+      label: option.textContent.trim(),
+      disabled: option.disabled,
+      selected: option.selected,
+      search: `${option.textContent} ${option.value}`.toLowerCase()
+    }));
+  }
+
+  function searchableSelectLabel(select) {
+    const option = select.selectedOptions?.[0] || select.options[select.selectedIndex];
+    return option?.textContent?.trim() || "请选择";
+  }
+
+  function renderSearchableSelect(select) {
+    const picker = select.nextElementSibling?.matches?.(".searchable-select-picker")
+      ? select.nextElementSibling
+      : null;
+    if (!picker) return;
+
+    const pickerState = selectPickerState.get(select) || { open: false, query: "" };
+    const query = pickerState.query.trim().toLowerCase();
+    const options = selectPickerOptionRows(select);
+    const filtered = query ? options.filter((option) => option.search.includes(query)) : options;
+    const toggle = picker.querySelector("[data-searchable-select-toggle]");
+    const label = picker.querySelector("[data-searchable-select-label]");
+    const dropdown = picker.querySelector("[data-searchable-select-dropdown]");
+    const search = picker.querySelector("[data-searchable-select-search]");
+    const optionList = picker.querySelector("[data-searchable-select-options]");
+
+    toggle.disabled = select.disabled;
+    toggle.setAttribute("aria-expanded", String(pickerState.open && !select.disabled));
+    label.textContent = searchableSelectLabel(select);
+    dropdown.hidden = !pickerState.open || select.disabled;
+    if (search.value !== pickerState.query) search.value = pickerState.query;
+    optionList.innerHTML = filtered.length
+      ? filtered.map((option) => `
+        <label class="entity-option searchable-select-option ${option.disabled ? "is-disabled" : ""}" title="${escapeHtml(option.value)}">
+          <input type="checkbox" data-searchable-select-option value="${escapeHtml(option.value)}" ${option.selected ? "checked" : ""} ${option.disabled ? "disabled" : ""}>
+          <span>
+            <strong>${escapeHtml(option.label)}</strong>
+            <small>${escapeHtml(option.value)}</small>
+          </span>
+        </label>
+      `).join("")
+      : '<div class="entity-empty-row">当前筛选没有可选项</div>';
+  }
+
+  function closeSearchableSelects(except = null) {
+    [...root.querySelectorAll("select[data-searchable-select-ready]")].forEach((select) => {
+      if (select === except) return;
+      const pickerState = selectPickerState.get(select);
+      if (pickerState?.open) {
+        pickerState.open = false;
+        renderSearchableSelect(select);
+      }
+    });
+  }
+
+  function enhanceSearchableSelect(select) {
+    if (!select || select.dataset.searchableSelectReady === "true") {
+      if (select) renderSearchableSelect(select);
+      return;
+    }
+
+    const pickerId = `${select.id || `select-${crypto.randomUUID()}`}-picker`;
+    select.classList.add("searchable-native-select");
+    select.dataset.searchableSelectReady = "true";
+    selectPickerState.set(select, { open: false, query: "" });
+
+    const picker = document.createElement("div");
+    picker.className = "entity-picker searchable-select-picker";
+    picker.innerHTML = `
+      <button class="select-button entity-toggle" type="button" data-searchable-select-toggle aria-expanded="false" aria-controls="${escapeHtml(pickerId)}">
+        <span data-searchable-select-label>${escapeHtml(searchableSelectLabel(select))}</span>
+        <i data-lucide="chevron-down"></i>
+      </button>
+      <div class="entity-dropdown" id="${escapeHtml(pickerId)}" data-searchable-select-dropdown hidden>
+        <div class="resource-search">
+          <i data-lucide="search"></i>
+          <input type="search" data-searchable-select-search placeholder="搜索选项">
+        </div>
+        <div class="entity-option-list" data-searchable-select-options></div>
+      </div>
+    `;
+    select.insertAdjacentElement("afterend", picker);
+
+    picker.querySelector("[data-searchable-select-toggle]").addEventListener("click", () => {
+      const pickerState = selectPickerState.get(select);
+      pickerState.open = !pickerState.open;
+      closeSearchableSelects(select);
+      renderSearchableSelect(select);
+      if (pickerState.open) {
+        requestAnimationFrame(() => picker.querySelector("[data-searchable-select-search]")?.focus());
+      }
+    });
+    picker.querySelector("[data-searchable-select-search]").addEventListener("input", (event) => {
+      const pickerState = selectPickerState.get(select);
+      pickerState.query = event.target.value;
+      pickerState.open = true;
+      renderSearchableSelect(select);
+    });
+    picker.addEventListener("change", (event) => {
+      const optionInput = event.target.closest("[data-searchable-select-option]");
+      if (!optionInput) return;
+      select.value = optionInput.value;
+      const pickerState = selectPickerState.get(select);
+      pickerState.open = false;
+      pickerState.query = "";
+      select.dispatchEvent(new Event("input", { bubbles: true }));
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      renderSearchableSelect(select);
+    });
+    select.addEventListener("change", () => renderSearchableSelect(select));
+    renderSearchableSelect(select);
+    refreshIcons();
+  }
+
+  function enhanceSearchableSelects(scope = root) {
+    [...scope.querySelectorAll("select")].forEach(enhanceSearchableSelect);
+  }
+
+  function renderSearchableSelects(scope = root) {
+    [...scope.querySelectorAll("select[data-searchable-select-ready]")].forEach(renderSearchableSelect);
+  }
+
   function openTemplateDrawer(template = null) {
     state.drawer.open = true;
     state.drawer.mode = template ? "edit" : "create";
@@ -747,6 +921,7 @@
     fillTemplateForm(template || defaultTemplate());
     clearFieldErrors($("#templateForm"));
     updateTemplateDynamic();
+    loadTemplateTargetEntities();
     requestAnimationFrame(() => $("#templateName").focus());
   }
 
@@ -760,12 +935,12 @@
       name: "",
       targetLevel: "campaign",
       targetIds: [],
-      logic: "and",
       conditions: [
-        { id: crypto.randomUUID(), metric: "spend", comparison: "gt", threshold: 100, thresholdMax: 500 }
+        { id: crypto.randomUUID(), logic: "and", metric: "spend", comparison: "gt", threshold: 100, thresholdMax: 500 }
       ],
       windowType: "rolling_60",
       windowMinutes: 60,
+      checkIntervalMinutes: state.metadata?.monitorWindows?.campaign?.minMinutes || 180,
       severity: "medium",
       channels: state.metadata?.defaults?.feishuWebhookConfigured ? ["dashboard", "feishu"] : ["dashboard"],
       recipients: [],
@@ -778,15 +953,23 @@
   function fillTemplateForm(template) {
     $("#templateName").value = template.name || "";
     $("#templateTargetLevel").value = template.targetLevel || "campaign";
-    $("#templateTargetIds").value = (template.targetIds || []).join("\n");
-    $("#templateLogic").value = template.logic || "and";
+    const targetIds = (template.targetIds || []).map(String);
+    state.drawer.targetPicker.open = false;
+    state.drawer.targetPicker.query = "";
+    state.drawer.targetPicker.loading = false;
+    state.drawer.targetPicker.options = [];
+    state.drawer.targetPicker.selectedIds = new Set(targetIds);
+    state.drawer.targetPicker.selectedMap = new Map(targetIds.map((id) => [id, { id, name: id }]));
+    $("#templateTargetPickerSearch").value = "";
     state.drawer.conditions = (template.conditions && template.conditions.length ? template.conditions : [{
+      logic: template.logic || "and",
       metric: template.metric || "spend",
       comparison: template.comparison || "gt",
       threshold: template.threshold ?? 100,
       thresholdMax: template.thresholdMax ?? 500
     }]).map((condition) => ({
       id: condition.id || crypto.randomUUID(),
+      logic: condition.logic || template.logic || "and",
       metric: condition.metric || "spend",
       comparison: condition.comparison || "gt",
       threshold: condition.threshold ?? "",
@@ -794,6 +977,7 @@
     }));
     $("#templateWindowType").value = template.windowType || "rolling_60";
     $("#templateWindowMinutes").value = template.windowMinutes || 60;
+    $("#templateCheckIntervalMinutes").value = template.checkIntervalMinutes || state.metadata?.monitorWindows?.[$("#templateTargetLevel").value || "campaign"]?.minMinutes || 60;
     $("#templateSeverity").value = template.severity || "medium";
     $("#templateFeishuWebhookUrl").value = template.feishuWebhookUrl || "";
     $("#templateWebhookUrl").value = template.webhookUrl || "";
@@ -801,7 +985,9 @@
       input.checked = (template.channels || ["dashboard"]).includes(input.value);
     });
     renderConditions();
+    renderTemplateTargetPicker();
     renderRecipients();
+    renderSearchableSelects($("#templateForm"));
   }
 
   function metricById(id) {
@@ -817,6 +1003,16 @@
     return source.map((item) => `<option value="${item.id}" ${item.id === selected ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("");
   }
 
+  function conditionLogicOptions(selected, index) {
+    if (index === 0) {
+      return `<option value="and" selected>首个条件</option>`;
+    }
+    return [
+      `<option value="and" ${selected !== "or" ? "selected" : ""}>且 AND</option>`,
+      `<option value="or" ${selected === "or" ? "selected" : ""}>或 OR</option>`
+    ].join("");
+  }
+
   function renderConditions() {
     const list = $("#templateConditionList");
     list.innerHTML = state.drawer.conditions.map((condition, index) => {
@@ -826,6 +1022,10 @@
       const needsRange = comparison.valueCount === 2;
       return `
         <div class="condition-row" data-condition-id="${escapeHtml(condition.id)}">
+          <label>
+            <span>条件组合</span>
+            <select data-condition-field="logic" ${index === 0 ? "disabled" : ""}>${conditionLogicOptions(condition.logic, index)}</select>
+          </label>
           <select data-condition-field="metric">${conditionOptions("metric", condition.metric)}</select>
           <select data-condition-field="comparison">${conditionOptions("comparison", condition.comparison)}</select>
           <label>
@@ -842,6 +1042,7 @@
         </div>
       `;
     }).join("");
+    enhanceSearchableSelects(list);
     refreshIcons();
   }
 
@@ -859,6 +1060,24 @@
 
   function updateTemplateDynamic() {
     $("#customWindowGroup").hidden = $("#templateWindowType").value !== "custom";
+    const level = $("#templateTargetLevel").value || "campaign";
+    const monitorWindow = state.metadata?.monitorWindows?.[level] || {};
+    const minMinutes = Number(monitorWindow.minMinutes || 5);
+    $("#templateWindowHint").textContent = monitorWindow.label
+      ? `当前层级更新配置：${monitorWindow.label}；监控窗口至少 ${minMinutes} 分钟`
+      : `监控窗口至少 ${minMinutes} 分钟`;
+    $("#templateWindowMinutes").min = String(minMinutes);
+    $("#templateCheckIntervalMinutes").min = String(minMinutes);
+    $("#templateCheckIntervalHint").textContent = `两次检查是否触发预警的间隔至少 ${minMinutes} 分钟`;
+
+    const selectedWindow = state.metadata.windows.find((item) => item.id === $("#templateWindowType").value);
+    if (selectedWindow && selectedWindow.minutes > 0 && selectedWindow.minutes < minMinutes) {
+      $("#templateWindowType").value = state.metadata.windows.find((item) => Number(item.minutes || 0) >= minMinutes)?.id || "custom";
+    }
+    const checkInterval = Number.parseInt($("#templateCheckIntervalMinutes").value, 10);
+    if (!Number.isInteger(checkInterval) || checkInterval < minMinutes) {
+      $("#templateCheckIntervalMinutes").value = String(minMinutes);
+    }
 
     const channels = selectedChannels();
     $("#recipientGroup").hidden = !channels.includes("email");
@@ -876,16 +1095,16 @@
     const windowMinutes = windowType === "custom"
       ? $("#templateWindowMinutes").value || "-"
       : (state.metadata.windows.find((item) => item.id === windowType)?.minutes || "-");
-    const connector = $("#templateLogic").value === "or" ? " OR " : " AND ";
-    const conditions = state.drawer.conditions.map((condition) => {
+    const conditions = state.drawer.conditions.map((condition, index) => {
       const metric = metricById(condition.metric);
       const comparison = comparisonById(condition.comparison);
       const unit = comparison.id.startsWith("change_") ? "%" : metric.unit;
       const threshold = condition.threshold || "-";
       const thresholdMax = condition.thresholdMax || "-";
       const valueText = comparison.valueCount === 2 ? `${threshold} 到 ${thresholdMax} ${unit}` : `${threshold} ${unit}`;
-      return `${metric.label}${comparison.label} ${valueText}`;
-    }).join(connector);
+      const prefix = index === 0 ? "" : condition.logic === "or" ? " OR " : " AND ";
+      return `${prefix}${metric.label}${comparison.label} ${valueText}`;
+    }).join("");
     return `${conditions}，窗口 ${windowMinutes} 分钟`;
   }
 
@@ -921,9 +1140,9 @@
     return {
       name: $("#templateName").value.trim(),
       targetLevel: $("#templateTargetLevel").value,
-      targetIds: $("#templateTargetIds").value.split(/[\s,;，；]+/).map((item) => item.trim()).filter(Boolean),
-      logic: $("#templateLogic").value,
-      conditions: state.drawer.conditions.map((condition) => ({
+      targetIds: [...state.drawer.targetPicker.selectedIds],
+      conditions: state.drawer.conditions.map((condition, index) => ({
+        logic: index === 0 ? "and" : condition.logic || "and",
         metric: condition.metric,
         comparison: condition.comparison,
         threshold: condition.threshold,
@@ -931,6 +1150,7 @@
       })),
       windowType: $("#templateWindowType").value,
       windowMinutes: $("#templateWindowMinutes").value,
+      checkIntervalMinutes: $("#templateCheckIntervalMinutes").value,
       severity: $("#templateSeverity").value,
       channels: selectedChannels(),
       recipients: state.drawer.recipients,
@@ -968,9 +1188,15 @@
     });
     if (payload.windowType === "custom") {
       const minutes = Number.parseInt(payload.windowMinutes, 10);
-      if (!Number.isInteger(minutes) || minutes < 5 || minutes > 1440) {
-        fields.windowMinutes = "自定义时间窗口必须在 5 到 1440 分钟之间";
+      const minMinutes = Number(state.metadata?.monitorWindows?.[payload.targetLevel]?.minMinutes || 5);
+      if (!Number.isInteger(minutes) || minutes < minMinutes || minutes > 4320) {
+        fields.windowMinutes = `自定义时间窗口必须在 ${minMinutes} 到 4320 分钟之间`;
       }
+    }
+    const checkIntervalMinutes = Number.parseInt(payload.checkIntervalMinutes, 10);
+    const minCheckInterval = Number(state.metadata?.monitorWindows?.[payload.targetLevel]?.minMinutes || 5);
+    if (!Number.isInteger(checkIntervalMinutes) || checkIntervalMinutes < minCheckInterval || checkIntervalMinutes > 10080) {
+      fields.checkIntervalMinutes = `检查间隔必须在 ${minCheckInterval} 到 10080 分钟之间`;
     }
     if (payload.channels.includes("email") && payload.recipients.length === 0) {
       fields.recipients = "邮件通知至少需要一个接收人";
@@ -1176,6 +1402,99 @@
     }
     clearFieldErrors(root);
     renderEntityPicker();
+  }
+
+  function entityMetaText(entity) {
+    return [entity.campaign_name, entity.adset_name, entity.account_id].filter(Boolean).join(" · ");
+  }
+
+  function renderTemplateTargetPicker() {
+    const picker = state.drawer.targetPicker;
+    const selectedCount = picker.selectedIds.size;
+    $("#templateTargetPickerLabel").textContent = selectedCount ? `已选 ${selectedCount} 个目标` : "全部目标";
+    $("#templateTargetPickerToggle").setAttribute("aria-expanded", String(picker.open));
+    $("#templateTargetPickerDropdown").hidden = !picker.open;
+    const optionList = $("#templateTargetOptionList");
+    if (picker.loading) {
+      optionList.innerHTML = `<div class="entity-empty-row">正在读取目标</div>`;
+    } else if (!picker.options.length) {
+      optionList.innerHTML = `<div class="entity-empty-row">当前层级没有可选目标</div>`;
+    } else {
+      optionList.innerHTML = picker.options.map((entity) => {
+        const id = String(entity.id);
+        const checked = picker.selectedIds.has(id);
+        return `
+          <label class="entity-option">
+            <input type="checkbox" data-template-target-id="${escapeHtml(id)}" ${checked ? "checked" : ""}>
+            <span>
+              <strong>${escapeHtml(entity.name || id)}</strong>
+              <small>${escapeHtml(entityMetaText(entity) || id)}</small>
+            </span>
+          </label>
+        `;
+      }).join("");
+    }
+    $("#templateTargetSelectedList").innerHTML = [...picker.selectedIds].map((id) => {
+      const entity = picker.selectedMap.get(id);
+      return `
+        <span class="selected-entity">
+          ${escapeHtml(entity?.name || id)}
+          <button type="button" data-remove-template-target="${escapeHtml(id)}" aria-label="删除 ${escapeHtml(id)}">
+            <i data-lucide="x"></i>
+          </button>
+        </span>
+      `;
+    }).join("");
+    refreshIcons();
+  }
+
+  async function loadTemplateTargetEntities() {
+    const picker = state.drawer.targetPicker;
+    picker.loading = true;
+    renderTemplateTargetPicker();
+    const params = new URLSearchParams({
+      level: $("#templateTargetLevel").value || "campaign",
+      search: picker.query,
+      limit: "160"
+    });
+    try {
+      const payload = await apiJson(`/api/alert-ai/entities?${params}`);
+      picker.options = payload.entities || [];
+      picker.options.forEach((entity) => {
+        const id = String(entity.id);
+        if (picker.selectedIds.has(id)) {
+          picker.selectedMap.set(id, entity);
+        }
+      });
+    } catch (error) {
+      toast(error.message, "error");
+      picker.options = [];
+    } finally {
+      picker.loading = false;
+      renderTemplateTargetPicker();
+    }
+  }
+
+  const debouncedTemplateTargetSearch = debounce(loadTemplateTargetEntities, 280);
+
+  function selectTemplateTarget(entity) {
+    const id = String(entity.id);
+    state.drawer.targetPicker.selectedIds.add(id);
+    state.drawer.targetPicker.selectedMap.set(id, entity);
+  }
+
+  function toggleTemplateTarget(id, checked) {
+    const picker = state.drawer.targetPicker;
+    const entity = picker.options.find((item) => String(item.id) === String(id)) || picker.selectedMap.get(String(id)) || { id, name: id };
+    if (checked) {
+      selectTemplateTarget(entity);
+    } else {
+      picker.selectedIds.delete(String(id));
+      picker.selectedMap.delete(String(id));
+    }
+    clearFieldErrors($("#templateForm"));
+    renderTemplateTargetPicker();
+    updateTemplateDynamic();
   }
 
   function setReportDefaults() {
@@ -1575,12 +1894,28 @@
 
     $("#templateForm").addEventListener("submit", saveTemplate);
     $$("[data-drawer-close]").forEach((button) => button.addEventListener("click", closeTemplateDrawer));
-    ["templateTargetLevel", "templateLogic", "templateTargetIds", "templateWindowType", "templateWindowMinutes"].forEach((id) => {
+    ["templateTargetLevel", "templateWindowType", "templateWindowMinutes", "templateCheckIntervalMinutes"].forEach((id) => {
       $(`#${id}`).addEventListener("input", updateTemplateDynamic);
       $(`#${id}`).addEventListener("change", updateTemplateDynamic);
     });
+    $("#templateTargetLevel").addEventListener("change", () => {
+      state.drawer.targetPicker.query = "";
+      state.drawer.targetPicker.options = [];
+      state.drawer.targetPicker.selectedIds.clear();
+      state.drawer.targetPicker.selectedMap.clear();
+      $("#templateTargetPickerSearch").value = "";
+      loadTemplateTargetEntities();
+    });
+    $("#templateTargetPickerToggle").addEventListener("click", () => {
+      state.drawer.targetPicker.open = !state.drawer.targetPicker.open;
+      renderTemplateTargetPicker();
+    });
+    $("#templateTargetPickerSearch").addEventListener("input", (event) => {
+      state.drawer.targetPicker.query = event.target.value;
+      debouncedTemplateTargetSearch();
+    });
     $("#addConditionButton").addEventListener("click", () => {
-      state.drawer.conditions.push({ id: crypto.randomUUID(), metric: "spend", comparison: "gt", threshold: 100, thresholdMax: 500 });
+      state.drawer.conditions.push({ id: crypto.randomUUID(), logic: "and", metric: "spend", comparison: "gt", threshold: 100, thresholdMax: 500 });
       renderConditions();
       updateTemplateDynamic();
     });
@@ -1620,6 +1955,9 @@
     $("#exportReportButton").addEventListener("click", exportReport);
 
     root.addEventListener("click", (event) => {
+      if (!event.target.closest(".searchable-select-picker")) {
+        closeSearchableSelects();
+      }
       const pageButton = event.target.closest("[data-template-page]");
       if (pageButton) {
         state.templates.page += pageButton.dataset.templatePage === "next" ? 1 : -1;
@@ -1644,8 +1982,30 @@
       const removeCondition = event.target.closest("[data-condition-remove]");
       if (removeCondition) {
         state.drawer.conditions = state.drawer.conditions.filter((condition) => condition.id !== removeCondition.dataset.conditionRemove);
+        if (state.drawer.conditions[0]) {
+          state.drawer.conditions[0].logic = "and";
+        }
         renderConditions();
         updateTemplateDynamic();
+        return;
+      }
+      const templateTargetAction = event.target.closest("[data-template-target-action]");
+      if (templateTargetAction) {
+        if (templateTargetAction.dataset.templateTargetAction === "select-all") {
+          state.drawer.targetPicker.options.forEach(selectTemplateTarget);
+        }
+        if (templateTargetAction.dataset.templateTargetAction === "clear") {
+          state.drawer.targetPicker.selectedIds.clear();
+          state.drawer.targetPicker.selectedMap.clear();
+        }
+        clearFieldErrors($("#templateForm"));
+        renderTemplateTargetPicker();
+        updateTemplateDynamic();
+        return;
+      }
+      const removeTemplateTarget = event.target.closest("[data-remove-template-target]");
+      if (removeTemplateTarget) {
+        toggleTemplateTarget(removeTemplateTarget.dataset.removeTemplateTarget, false);
         return;
       }
       const rangeButton = event.target.closest("[data-report-range]");
@@ -1692,7 +2052,10 @@
         return;
       }
       if (!event.target.closest(".entity-picker")) {
+        closeSearchableSelects();
         state.entities.open = false;
+        state.drawer.targetPicker.open = false;
+        renderTemplateTargetPicker();
         renderEntityPicker();
       }
     });
@@ -1706,6 +2069,11 @@
       const entityInput = event.target.closest("[data-entity-id]");
       if (entityInput) {
         toggleEntity(entityInput.dataset.entityId, entityInput.checked);
+        return;
+      }
+      const templateTargetInput = event.target.closest("[data-template-target-id]");
+      if (templateTargetInput) {
+        toggleTemplateTarget(templateTargetInput.dataset.templateTargetId, templateTargetInput.checked);
         return;
       }
       const levelInput = event.target.closest('input[name="reportLevel"]');
@@ -1730,6 +2098,7 @@
       const metadataPayload = await apiJson("/api/alert-ai/metadata");
       state.metadata = metadataPayload.metadata;
       renderMetadataControls();
+      enhanceSearchableSelects(root);
       setReportDefaults();
       bindEvents();
       renderAlertHistory();

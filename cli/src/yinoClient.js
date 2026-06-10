@@ -184,16 +184,20 @@ export class YinoClient {
     return limit ? rows.slice(0, limit) : rows;
   }
 
+  formatIdParam(id) {
+    return Array.isArray(id) ? id.join(',') : id;
+  }
+
   async getInfo(id, fields) {
     return this.request('/api/v1/meta_api/info', {
-      id,
+      id: this.formatIdParam(id),
       fields: fields.join(',')
     });
   }
 
   async getInsightsPage({ id, fields, datePreset, since, until, breakdowns, actionBreakdowns = 'action_type', actionAttributionWindows, after, before }) {
     const query = {
-      id,
+      id: this.formatIdParam(id),
       fields: fields.join(','),
       breakdowns,
       action_breakdowns: actionBreakdowns,
@@ -213,7 +217,7 @@ export class YinoClient {
 
   async getInsightsPageDetailed({ id, fields, datePreset, since, until, breakdowns, actionBreakdowns = 'action_type', actionAttributionWindows, after, before, timeoutMs }) {
     const query = {
-      id,
+      id: this.formatIdParam(id),
       fields: fields.join(','),
       breakdowns,
       action_breakdowns: actionBreakdowns,

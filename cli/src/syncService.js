@@ -2,7 +2,7 @@ import pLimit from 'p-limit';
 import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 import { YinoClient } from './yinoClient.js';
-import { info } from './logger.js';
+import { info, warn } from './logger.js';
 import { normalizeInsight, insightColumns } from './normalizer.js';
 import { outputFile, outputJsonFile, rawFile, writeCsv, writeJson } from './storage.js';
 import { getInsightCoverage, writeApiTaskRuns, writeInsightBatch, writeResources } from './database.js';
@@ -47,12 +47,27 @@ const INSIGHT_FIELDS = [
   'date_stop'
 ];
 
+const INFO_FIELDS = [
+  'id',
+  'name',
+  'account_id',
+  'campaign_id',
+  'adset_id',
+  'effective_status',
+  'status'
+];
+
 const HOURLY_BREAKDOWN = 'hourly_stats_aggregated_by_advertiser_time_zone';
+const META_BATCH_ID_LIMIT = 50;
 
 function chunks(items, size) {
   const result = [];
   for (let i = 0; i < items.length; i += size) result.push(items.slice(i, i + size));
   return result;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function mapById(rows, idField) {
@@ -116,9 +131,12 @@ function rankProbeRows(rowsById) {
     .sort((a, b) => (b.impressions - a.impressions) || (b.spend - a.spend));
 }
 
-function normalizeObjectIds(ids = [], { min = 1, max = 50, label = 'ID' } = {}) {
+function normalizeObjectIds(ids = [], { min = 1, max = Number.POSITIVE_INFINITY, label = 'ID' } = {}) {
   const normalized = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
-  if (normalized.length < min || normalized.length > max) {
+  if (normalized.length < min) {
+    throw new Error(`${label} 数量必须至少 ${min} 个，当前 ${normalized.length} 个`);
+  }
+  if (Number.isFinite(max) && normalized.length > max) {
     throw new Error(`${label} 数量必须在 ${min}-${max} 个之间，当前 ${normalized.length} 个`);
   }
   return normalized;
@@ -151,6 +169,52 @@ function tagSlicesWithTimeZone(slices, sourceTimeZone) {
     ...slice,
     sourceTimeZone: normalized
   }));
+}
+
+function insightTaskSliceKey(task) {
+  return [
+    task.objectType,
+    task.datePreset || '',
+    task.since || '',
+    task.until || '',
+    task.sourceTimeZone || ''
+  ].join('|');
+}
+
+function batchInsightTasks(tasks, batchSize = META_BATCH_ID_LIMIT) {
+  const groups = new Map();
+  tasks.forEach((task) => {
+    const key = insightTaskSliceKey(task);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(task);
+  });
+
+  return [...groups.values()].flatMap((group) => chunks(group, batchSize).map((batch, batchIndex) => {
+    const first = batch[0];
+    const objectIds = batch.map((task) => String(task.objectId));
+    return {
+      ...first,
+      taskId: `${first.objectType}:batch:${first.datePreset || `${first.since}_${first.until}`}:${batchIndex + 1}:${objectIds.join(',')}`,
+      objectId: objectIds.join(','),
+      objectIds,
+      label: batch.length === 1 ? first.label : `${batch.length} 个${first.objectType}`,
+      batchSize: batch.length,
+      sourceTasks: batch
+    };
+  }));
+}
+
+function extractInfoRows(payload) {
+  const data = payload?.data;
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.data)) return data.data;
+  if (data && typeof data === 'object') {
+    return Object.values(data).flatMap((value) => {
+      if (Array.isArray(value)) return value;
+      return value && typeof value === 'object' ? [value] : [];
+    });
+  }
+  return [];
 }
 
 export class SyncService {
@@ -322,6 +386,33 @@ export class SyncService {
     return tagSlicesWithTimeZone([{ since: today, until: today }], resolvedTimeZone);
   }
 
+  async enrichSourceRowsWithInfo(sourceRows, resourceType) {
+    const missing = sourceRows.filter((row) => !row.account_id || !row.name);
+    if (!missing.length) return sourceRows;
+
+    try {
+      const infoRows = [];
+      const batches = chunks(missing.map((row) => row.id), META_BATCH_ID_LIMIT);
+      for (const [index, batch] of batches.entries()) {
+        if (index > 0) await sleep(220);
+        const payload = await this.client.getInfo(batch, INFO_FIELDS);
+        infoRows.push(...extractInfoRows(payload));
+      }
+      const infoMap = new Map(infoRows
+        .map((row) => resourceIdentity(row, resourceType))
+        .filter((row) => row.id)
+        .map((row) => [String(row.id), row]));
+      return sourceRows.map((row) => ({
+        ...infoMap.get(String(row.id)),
+        ...row,
+        name: row.name && row.name !== row.id ? row.name : infoMap.get(String(row.id))?.name || row.name
+      }));
+    } catch (error) {
+      warn(`批量补充 ${resourceType} info 失败，继续按已有 ID 采集：${error.message}`);
+      return sourceRows;
+    }
+  }
+
   async pullQueuedInsights({
     ids = [],
     resources = {},
@@ -344,7 +435,7 @@ export class SyncService {
     const resourceType = resourceTypeForLevel(level);
     const objectLimit = Number.isFinite(maxObjects)
       ? maxObjects
-      : (resourceType === 'ads' ? 50 : 100);
+      : Number.POSITIVE_INFINITY;
     const normalizedIds = normalizeObjectIds(ids, {
       min: 1,
       max: objectLimit,
@@ -354,7 +445,8 @@ export class SyncService {
       .map((row) => resourceIdentity(row, resourceType))
       .filter((row) => row.id);
     const resourceMap = new Map(resourceRows.map((row) => [String(row.id), row]));
-    const sourceRows = normalizedIds.map((id) => resourceMap.get(String(id)) || resourceIdentity({ id, name: id }, resourceType));
+    let sourceRows = normalizedIds.map((id) => resourceMap.get(String(id)) || resourceIdentity({ id, name: id }, resourceType));
+    sourceRows = await this.enrichSourceRowsWithInfo(sourceRows, resourceType);
     const accountMap = mapById(accounts, 'account_id');
     const runId = randomUUID();
     const resolvedSlices = [];
@@ -383,16 +475,19 @@ export class SyncService {
       }));
     });
 
-    info(`Insights 队列：${resourceType} ${sourceRows.length} 个对象，${tasks.length} 个任务，并发 ${concurrency}，QPS ${qps}`);
+    const batchTasks = batchInsightTasks(tasks, META_BATCH_ID_LIMIT);
+
+    info(`Insights 队列：${resourceType} ${sourceRows.length} 个对象，${tasks.length} 个对象窗口，${batchTasks.length} 个批任务，并发 ${concurrency}，QPS ${qps}`);
 
     const queue = await runTaskQueue({
-      tasks,
+      tasks: batchTasks,
       concurrency,
       qps,
       maxAttempts,
       worker: async (task) => {
+        const objectIds = task.objectIds || [task.objectId];
         const stats = await this.client.getAllInsightsWithStats({
-          id: task.objectId,
+          id: objectIds,
           fields: INSIGHT_FIELDS,
           datePreset: task.datePreset,
           since: task.since,
@@ -404,7 +499,7 @@ export class SyncService {
           code: stats.code,
           bodySize: stats.bodySize,
           rows: stats.rows.length,
-          rawRows: stats.rows.map((row) => ({ ...row, id: task.objectId }))
+          rawRows: stats.rows.map((row) => (objectIds.length === 1 ? { ...row, id: objectIds[0] } : row))
         };
       }
     });
@@ -444,7 +539,9 @@ export class SyncService {
         resultAction,
         hourly,
         requestedObjectCount: sourceRows.length,
-        taskCount: tasks.length,
+        objectWindowCount: tasks.length,
+        taskCount: batchTasks.length,
+        batchMaxSize: META_BATCH_ID_LIMIT,
         queue: queue.stats,
         jsonPath,
         csvPath,
@@ -472,6 +569,7 @@ export class SyncService {
       rawRows,
       normalizedRows,
       tasks,
+      batchTasks,
       slices: resolvedSlices
     };
   }
@@ -490,7 +588,7 @@ export class SyncService {
     timeoutMs = 7000,
     maxAttempts = 8
   } = {}) {
-    const normalizedIds = normalizeObjectIds(ids, { min: 1, max: 50, label: 'ad_id' });
+    const normalizedIds = normalizeObjectIds(ids, { min: 1, max: Number.POSITIVE_INFINITY, label: 'ad_id' });
     const accountsResult = accountIds.length
       ? await this.syncAccounts({ accountIds })
       : { ids: [], accounts: [] };
@@ -534,7 +632,7 @@ export class SyncService {
     timeoutMs = 7000,
     maxAttempts = 8
   } = {}) {
-    const normalizedIds = normalizeObjectIds(ids, { min: 1, max: 100, label: 'campaign_id' });
+    const normalizedIds = normalizeObjectIds(ids, { min: 1, max: Number.POSITIVE_INFINITY, label: 'campaign_id' });
     const accountsResult = accountIds.length
       ? await this.syncAccounts({ accountIds })
       : { ids: [], accounts: [] };

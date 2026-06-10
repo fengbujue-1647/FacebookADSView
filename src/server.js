@@ -13,32 +13,54 @@ const {
 } = require("./database");
 const { DISPLAY_TIME_ZONE, enrichInsightRowsWithTimeZone } = require("./time");
 
-const port = Number(process.env.PORT || 3100);
-const host = process.env.HOST || "127.0.0.1";
 const publicDir = path.resolve(__dirname, "..", "public");
 const repoRoot = path.resolve(__dirname, "..");
+const envSources = new Map();
+const envFiles = [
+  { filePath: path.join(repoRoot, ".env"), label: ".env", loaded: true },
+  { filePath: path.join(repoRoot, "cli", ".env"), label: "cli/.env", loaded: true },
+  { filePath: path.join(repoRoot, "cli", ".env.example"), label: "cli/.env.example", loaded: false }
+];
 
-function loadEnvFile(filePath) {
-  if (!fs.existsSync(filePath)) return;
+function parseEnvFile(filePath) {
+  const entries = new Map();
+  if (!fs.existsSync(filePath)) return entries;
   const lines = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "").split(/\r?\n/);
   lines.forEach((line) => {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) return;
-    const index = trimmed.indexOf("=");
+    const normalized = trimmed.startsWith("export ") ? trimmed.slice(7).trim() : trimmed;
+    const index = normalized.indexOf("=");
     if (index <= 0) return;
-    const key = trimmed.slice(0, index).trim();
-    let value = trimmed.slice(index + 1).trim();
+    const key = normalized.slice(0, index).trim();
+    let value = normalized.slice(index + 1).trim();
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
+    if (key) {
+      entries.set(key, value);
+    }
+  });
+  return entries;
+}
+
+function loadEnvFile(filePath, sourceLabel) {
+  const entries = parseEnvFile(filePath);
+  entries.forEach((value, key) => {
     if (key && process.env[key] === undefined) {
       process.env[key] = value;
+      envSources.set(key, sourceLabel);
     }
   });
 }
 
-loadEnvFile(path.join(repoRoot, ".env"));
-loadEnvFile(path.join(repoRoot, "cli", ".env"));
+envFiles.filter((file) => file.loaded).forEach((file) => {
+  loadEnvFile(file.filePath, file.label);
+});
+
+const parsedPort = Number(process.env.PORT || 3100);
+const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3100;
+const host = process.env.HOST || "127.0.0.1";
 
 const databaseFile = path.join(repoRoot, "cli", "data", "fb-ads.sqlite");
 const cliRawDir = path.join(repoRoot, "cli", "data", "raw");
@@ -55,9 +77,6 @@ const activeResourceAccountId = process.env.ACTIVE_RESOURCE_ACCOUNT_ID || "84625
 const activeResourceRefreshIntervalMs = 120 * 60 * 1000;
 const alertReportMaxDays = 90;
 const alertReportPromptMaxLength = 1600;
-const defaultFeishuWebhookUrl = process.env.FEISHU_ALERT_WEBHOOK_URL || "";
-const deepSeekBaseUrl = process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
-const deepSeekModel = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
 let activeReportGeneration = false;
 let resourceRefreshPromise = null;
 let resourceRefreshStatus = {
@@ -69,6 +88,267 @@ let resourceRefreshStatus = {
   reason: "",
   error: ""
 };
+
+const environmentGroups = [
+  {
+    id: "runtime",
+    title: "服务启动",
+    items: [
+      {
+        key: "HOST",
+        label: "监听地址",
+        description: "Web 服务绑定地址；局域网访问时通常改成 0.0.0.0。",
+        defaultValue: "127.0.0.1",
+        displayValue: host,
+        usedBy: "npm start"
+      },
+      {
+        key: "PORT",
+        label: "监听端口",
+        description: "Web 服务端口，默认打开 http://127.0.0.1:3100/。",
+        defaultValue: "3100",
+        displayValue: String(port),
+        usedBy: "npm start"
+      },
+      {
+        key: "ACTIVE_RESOURCE_ACCOUNT_ID",
+        label: "ACTIVE 资源账户",
+        description: "设置页刷新 ACTIVE 广告系列、广告组和广告候选时使用的默认账户。",
+        defaultValue: "8462513793771963",
+        displayValue: activeResourceAccountId,
+        usedBy: "设置页资源刷新"
+      }
+    ]
+  },
+  {
+    id: "yinolink",
+    title: "YinoLink API",
+    items: [
+      {
+        key: "YINO_CLIENT_ID",
+        label: "应用 ID",
+        description: "YinoCloud 审核通过后的应用 ID，CLI 采集和资源刷新必填。",
+        required: true,
+        usedBy: "CLI / Tool 1-3"
+      },
+      {
+        key: "YINO_CLIENT_SECRET",
+        label: "API Key",
+        description: "YinoCloud 应用密钥，CLI 会用它换取 token；不在前端显示明文。",
+        required: true,
+        sensitive: true,
+        usedBy: "CLI / Tool 1-3"
+      },
+      {
+        key: "YINO_BASE_URL",
+        label: "接口 Base URL",
+        description: "YinoLink Open API 根地址。",
+        defaultValue: "https://yl-open-api-lfnsrvbmgm.ap-northeast-1.fcapp.run",
+        usedBy: "YinoClient"
+      },
+      {
+        key: "YINO_CONCURRENCY",
+        label: "默认并发",
+        description: "CLI 未单独指定并发时使用的 YinoLink 请求并发。",
+        defaultValue: "3",
+        usedBy: "CLI"
+      },
+      {
+        key: "YINO_REQUEST_TIMEOUT_MS",
+        label: "请求超时",
+        description: "CLI 未单独指定超时时使用的 YinoLink 请求超时毫秒数。",
+        defaultValue: "30000",
+        usedBy: "CLI"
+      }
+    ]
+  },
+  {
+    id: "alert-ai",
+    title: "预警与 AI",
+    items: [
+      {
+        key: "FEISHU_ALERT_WEBHOOK_URL",
+        label: "飞书机器人 Webhook",
+        description: "预警模板未单独填写飞书地址时使用的默认群机器人 Webhook。",
+        sensitive: true,
+        usedBy: "预警监控"
+      },
+      {
+        key: "DEEPSEEK_API_KEY",
+        label: "DeepSeek API Key",
+        description: "AI 分析报告调用 DeepSeek 时使用；未配置时返回本地规则分析。",
+        sensitive: true,
+        usedBy: "AI 分析"
+      },
+      {
+        key: "DEEPSEEK_BASE_URL",
+        label: "DeepSeek Base URL",
+        description: "DeepSeek 兼容 Chat Completions 接口地址。",
+        defaultValue: "https://api.deepseek.com",
+        usedBy: "AI 分析"
+      },
+      {
+        key: "DEEPSEEK_MODEL",
+        label: "DeepSeek 模型",
+        description: "AI 分析报告使用的模型名称。",
+        defaultValue: "deepseek-v4-flash",
+        usedBy: "AI 分析"
+      }
+    ]
+  }
+];
+
+function envSourceFor(key, configured) {
+  if (!configured) return "";
+  return envSources.get(key) || "启动进程环境";
+}
+
+function defaultFeishuWebhookUrl() {
+  return process.env.FEISHU_ALERT_WEBHOOK_URL || "";
+}
+
+function deepSeekBaseUrl() {
+  return process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
+}
+
+function deepSeekModelName() {
+  return process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
+}
+
+function allEnvironmentSpecs() {
+  return environmentGroups.flatMap((group) => group.items.map((item) => ({
+    ...item,
+    groupId: group.id,
+    groupTitle: group.title
+  })));
+}
+
+function buildEnvironmentItem(spec) {
+  const rawValue = process.env[spec.key];
+  const configured = rawValue !== undefined && String(rawValue).trim() !== "";
+  const hasDefault = spec.defaultValue !== undefined && String(spec.defaultValue) !== "";
+  const displayValue = configured
+    ? spec.sensitive ? "已配置（不显示明文）" : String(spec.displayValue ?? rawValue)
+    : hasDefault ? String(spec.defaultValue) : "未配置";
+  const status = configured ? "configured" : hasDefault ? "default" : spec.required ? "missing" : "optional";
+
+  return {
+    key: spec.key,
+    label: spec.label,
+    description: spec.description,
+    required: spec.required === true,
+    sensitive: spec.sensitive === true,
+    usedBy: spec.usedBy || "",
+    configured,
+    source: configured ? envSourceFor(spec.key, configured) : hasDefault ? "默认值" : "未配置",
+    displayValue,
+    editValue: spec.sensitive && configured ? "" : String(rawValue ?? spec.defaultValue ?? ""),
+    preserveOnEmpty: spec.sensitive === true && configured,
+    defaultValue: spec.defaultValue || "",
+    status
+  };
+}
+
+function buildEnvironmentSettings() {
+  const groups = environmentGroups.map((group) => ({
+    id: group.id,
+    title: group.title,
+    items: group.items.map(buildEnvironmentItem)
+  }));
+  const allItems = groups.flatMap((group) => group.items);
+  const requiredItems = allItems.filter((item) => item.required);
+  const envFileStatus = envFiles.map((file) => {
+    const entries = parseEnvFile(file.filePath);
+    return {
+      path: file.label,
+      exists: fs.existsSync(file.filePath),
+      loaded: file.loaded,
+      keys: entries.size
+    };
+  });
+
+  return {
+    files: envFileStatus,
+    groups,
+    summary: {
+      requiredTotal: requiredItems.length,
+      requiredConfigured: requiredItems.filter((item) => item.configured).length,
+      configuredTotal: allItems.filter((item) => item.configured).length,
+      total: allItems.length
+    }
+  };
+}
+
+function quoteEnvValue(value) {
+  const text = String(value ?? "");
+  if (!text || /^[A-Za-z0-9_./:@?&%+=,\-]+$/.test(text)) {
+    return text;
+  }
+  return JSON.stringify(text);
+}
+
+function normalizeEnvironmentPostEntries(input = {}) {
+  const source = Array.isArray(input.entries) ? input.entries : [];
+  const byKey = new Map(source.map((entry) => [String(entry.key || "").trim(), entry]));
+  const existingCliEntries = parseEnvFile(path.join(repoRoot, "cli", ".env"));
+  const allowed = new Set(allEnvironmentSpecs().map((item) => item.key));
+  const fields = {};
+
+  source.forEach((entry) => {
+    const key = String(entry.key || "").trim();
+    if (!allowed.has(key)) {
+      fields.environment = `不支持的环境变量：${key || "-"}`;
+    }
+  });
+  if (Object.keys(fields).length) {
+    throw makeValidationError("环境变量校验失败", fields);
+  }
+
+  return allEnvironmentSpecs().map((spec) => {
+    const entry = byKey.get(spec.key) || {};
+    const rawValue = entry.value === undefined ? "" : String(entry.value);
+    const preserve = entry.preserve === true;
+    const value = spec.sensitive && preserve && existingCliEntries.has(spec.key)
+      ? existingCliEntries.get(spec.key)
+      : rawValue;
+    return {
+      key: spec.key,
+      value,
+      groupTitle: spec.groupTitle
+    };
+  });
+}
+
+function writeCliEnv(entries) {
+  const cliEnvPath = path.join(repoRoot, "cli", ".env");
+  const existing = parseEnvFile(cliEnvPath);
+  const managedKeys = new Set(entries.map((entry) => entry.key));
+  const lines = [
+    "# Managed by FB 广告数据看板设置页",
+    "# Empty values are kept intentionally, for example APPID=."
+  ];
+  let currentGroup = "";
+  entries.forEach((entry) => {
+    if (entry.groupTitle !== currentGroup) {
+      currentGroup = entry.groupTitle;
+      lines.push("", `# ${currentGroup}`);
+    }
+    lines.push(`${entry.key}=${quoteEnvValue(entry.value)}`);
+    process.env[entry.key] = String(entry.value ?? "");
+    envSources.set(entry.key, "cli/.env");
+  });
+
+  const customEntries = [...existing.entries()].filter(([key]) => !managedKeys.has(key));
+  if (customEntries.length) {
+    lines.push("", "# Other existing entries");
+    customEntries.forEach(([key, value]) => {
+      lines.push(`${key}=${quoteEnvValue(value)}`);
+    });
+  }
+
+  fs.mkdirSync(path.dirname(cliEnvPath), { recursive: true });
+  fs.writeFileSync(cliEnvPath, `${lines.join("\n")}\n`, "utf8");
+}
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -359,7 +639,10 @@ const alertComparisons = {
 const alertWindowMinutes = {
   rolling_5: 5,
   rolling_15: 15,
-  rolling_60: 60
+  rolling_60: 60,
+  rolling_240: 240,
+  rolling_1440: 1440,
+  rolling_4320: 4320
 };
 
 const alertChannels = {
@@ -377,22 +660,33 @@ const alertTargetLevels = [
 ];
 
 function alertMetadata() {
+  const sampling = readSamplingSettings();
+  const campaignMinutes = Number(sampling.campaignMonitor?.intervalMinutes || 180);
+  const adMinutes = Number(sampling.adMonitor?.intervalMinutes || 60);
+  const targetedMinutes = Number(sampling.targeted?.intervalMinutes || adMinutes);
   return {
     metricCategories: alertMetricCategories,
     metrics: Object.entries(alertMetrics).map(([id, metric]) => ({ id, ...metric })),
     comparisons: Object.entries(alertComparisons).map(([id, comparison]) => ({ id, ...comparison })),
     windows: [
-      { id: "rolling_5", label: "近 5 分钟", minutes: 5 },
-      { id: "rolling_15", label: "近 15 分钟", minutes: 15 },
       { id: "rolling_60", label: "近 60 分钟", minutes: 60 },
+      { id: "rolling_240", label: "近 4 小时", minutes: 240 },
+      { id: "rolling_1440", label: "近 1 天", minutes: 1440 },
+      { id: "rolling_4320", label: "近 3 天", minutes: 4320 },
       { id: "custom", label: "自定义分钟", minutes: 0 }
     ],
     channels: Object.entries(alertChannels).map(([id, channel]) => ({ id, ...channel })),
     targetLevels: alertTargetLevels,
+    monitorWindows: {
+      account: { minMinutes: campaignMinutes, label: `账户/广告系列监控约 ${campaignMinutes} 分钟更新` },
+      campaign: { minMinutes: campaignMinutes, label: `广告系列监控约 ${campaignMinutes} 分钟更新` },
+      adset: { minMinutes: targetedMinutes, label: `广告组定向监控约 ${targetedMinutes} 分钟更新` },
+      ad: { minMinutes: adMinutes, label: `广告监控约 ${adMinutes} 分钟更新` }
+    },
     defaults: {
-      feishuWebhookConfigured: Boolean(defaultFeishuWebhookUrl),
+      feishuWebhookConfigured: Boolean(defaultFeishuWebhookUrl()),
       deepSeekConfigured: Boolean(process.env.DEEPSEEK_API_KEY),
-      deepSeekModel
+      deepSeekModel: deepSeekModelName()
     },
     report: {
       maxDays: alertReportMaxDays,
@@ -539,6 +833,7 @@ function normalizeAlertCondition(input = {}, fields = {}, index = 0) {
 
   return {
     id: String(input.id || randomUUID()),
+    logic: index === 0 ? "and" : input.logic === "or" ? "or" : "and",
     metric: metricId,
     metricCategory: metric.category,
     comparison,
@@ -546,6 +841,24 @@ function normalizeAlertCondition(input = {}, fields = {}, index = 0) {
     thresholdMax,
     unit: comparisonMetric.unit
   };
+}
+
+function minAlertWindowMinutesForLevel(targetLevel) {
+  const sampling = readSamplingSettings();
+  if (targetLevel === "ad") return Number(sampling.adMonitor?.intervalMinutes || 60);
+  if (targetLevel === "adset") return Number(sampling.targeted?.intervalMinutes || sampling.adMonitor?.intervalMinutes || 60);
+  return Number(sampling.campaignMonitor?.intervalMinutes || 180);
+}
+
+function alertCheckIntervalMinutes(template = {}) {
+  const minMinutes = minAlertWindowMinutesForLevel(template.targetLevel || "campaign");
+  return clampInteger(template.checkIntervalMinutes, minMinutes, minMinutes, 10_080);
+}
+
+function nextAlertCheckAt(template = {}) {
+  const base = new Date(template.last_checked_at || template.updated_at || template.created_at || Date.now());
+  const baseMs = Number.isFinite(base.getTime()) ? base.getTime() : Date.now();
+  return new Date(baseMs + alertCheckIntervalMinutes(template) * 60_000).toISOString();
 }
 
 function templateInputConditions(input = {}) {
@@ -594,10 +907,19 @@ function normalizeAlertTemplate(input = {}, existing = null) {
   let windowMinutes = alertWindowMinutes[windowType] || 0;
   if (windowType === "custom") {
     windowMinutes = Number.parseInt(input.windowMinutes, 10);
-    if (!Number.isInteger(windowMinutes) || windowMinutes < 5 || windowMinutes > 1440) {
-      fields.windowMinutes = "自定义时间窗口必须在 5 到 1440 分钟之间";
+    if (!Number.isInteger(windowMinutes) || windowMinutes < 5 || windowMinutes > 4320) {
+      fields.windowMinutes = "自定义时间窗口必须在 5 到 4320 分钟之间";
       windowMinutes = 5;
     }
+  }
+  const minWindowMinutes = minAlertWindowMinutesForLevel(targetLevel);
+  if (Number.isFinite(windowMinutes) && windowMinutes > 0 && windowMinutes < minWindowMinutes) {
+    fields.windowMinutes = `时间窗口不能小于当前层级数据更新间隔 ${minWindowMinutes} 分钟`;
+  }
+
+  const checkIntervalMinutes = Number.parseInt(input.checkIntervalMinutes ?? existing?.checkIntervalMinutes ?? minWindowMinutes, 10);
+  if (!Number.isInteger(checkIntervalMinutes) || checkIntervalMinutes < minWindowMinutes || checkIntervalMinutes > 10_080) {
+    fields.checkIntervalMinutes = `检查间隔必须在 ${minWindowMinutes} 到 10080 分钟之间`;
   }
 
   const channels = normalizeChannels(input.channels);
@@ -618,7 +940,7 @@ function normalizeAlertTemplate(input = {}, existing = null) {
     }
   }
 
-  const feishuWebhookUrl = String(input.feishuWebhookUrl || defaultFeishuWebhookUrl || "").trim();
+  const feishuWebhookUrl = String(input.feishuWebhookUrl || defaultFeishuWebhookUrl() || "").trim();
   if (channels.includes("feishu") && (!feishuWebhookUrl || !validateHttpUrl(feishuWebhookUrl))) {
     fields.feishuWebhookUrl = "飞书推送需要有效的机器人 Webhook";
   }
@@ -644,6 +966,7 @@ function normalizeAlertTemplate(input = {}, existing = null) {
     unit: primary.unit,
     windowType,
     windowMinutes,
+    checkIntervalMinutes,
     severity,
     channels,
     recipients,
@@ -651,6 +974,7 @@ function normalizeAlertTemplate(input = {}, existing = null) {
     webhookUrl: channels.includes("webhook") ? webhookUrl : "",
     enabled: input.enabled !== undefined ? input.enabled === true : existing?.enabled !== false,
     created_at: existing?.created_at || now,
+    last_checked_at: existing?.last_checked_at || "",
     updated_at: now
   };
 }
@@ -669,12 +993,12 @@ function templateRuleDescription(template) {
   const conditions = Array.isArray(template.conditions) && template.conditions.length
     ? template.conditions
     : templateInputConditions(template);
-  const connector = template.logic === "or" ? " 或 " : " 且 ";
-  const ruleText = conditions.map((condition) => {
+  const ruleText = conditions.map((condition, index) => {
     const metric = alertMetrics[condition.metric] || { label: condition.metric };
     const comparison = alertComparisons[condition.comparison] || { label: condition.comparison };
-    return `${metric.label}${comparison.label} ${formatThreshold(condition)}`;
-  }).join(connector);
+    const prefix = index === 0 ? "" : condition.logic === "or" ? "；或 " : "；且 ";
+    return `${prefix}${metric.label}${comparison.label} ${formatThreshold(condition)}`;
+  }).join("");
   const target = alertTargetLevels.find((item) => item.id === template.targetLevel)?.label || "广告系列";
   const targetText = template.targetIds?.length ? `${target} ${template.targetIds.length} 个对象` : `全部${target}`;
   return `${targetText}，${ruleText}，窗口 ${template.windowMinutes} 分钟`;
@@ -704,6 +1028,9 @@ function templateListItem(template) {
     channels: template.channels,
     channelDescription: templateChannelDescription(template),
     enabled: template.enabled !== false,
+    checkIntervalMinutes: alertCheckIntervalMinutes(template),
+    last_checked_at: template.last_checked_at || "",
+    next_check_at: nextAlertCheckAt(template),
     updated_at: template.updated_at,
     severity: template.severity
   };
@@ -1027,9 +1354,10 @@ function splitRowsByPeriod(rows, since, until) {
   const days = Math.max(1, daysBetweenInclusive(sinceDate, untilDate));
   const midpoint = new Date(sinceDate.getTime() + Math.floor(days / 2) * 24 * 60 * 60 * 1000);
   const midpointText = midpoint.toISOString().slice(0, 10);
+  const rowDate = (row) => row.__display_date || String(row.hour_start_beijing || row.date_start_beijing || row.date_start || "").slice(0, 10);
   return {
-    previousRows: rows.filter((row) => String(row.date_start || "") < midpointText),
-    currentRows: rows.filter((row) => String(row.date_start || "") >= midpointText),
+    previousRows: rows.filter((row) => rowDate(row) < midpointText),
+    currentRows: rows.filter((row) => rowDate(row) >= midpointText),
     midpoint: midpointText
   };
 }
@@ -1224,12 +1552,28 @@ function describeConditionResult(condition, value) {
   return `${metric.label}${comparison.label} ${formatThreshold(condition)}，当前 ${formatted}`;
 }
 
+function combinedConditionMatched(conditionResults) {
+  if (!conditionResults.length) return false;
+  return conditionResults.reduce((matched, item, index) => {
+    if (index === 0) return item.matched;
+    return item.condition.logic === "or" ? matched || item.matched : matched && item.matched;
+  }, false);
+}
+
+function combinedConditionDescription(conditionResults) {
+  return conditionResults.map((item, index) => {
+    const prefix = index === 0 ? "" : item.condition.logic === "or" ? "；或 " : "；且 ";
+    return `${prefix}${item.description}`;
+  }).join("");
+}
+
 function buildAlertMessagesForTemplate(template) {
   const allRows = readInsightRowsForAnalysis({
     databaseFile,
     level: template.targetLevel || "campaign",
     entityIds: template.targetIds || [],
-    limit: 250_000
+    limit: 250_000,
+    accountTimeZones: readRecentAccountTimeZonesCached()
   }).map((row) => ({
     ...row,
     __timestamp: insightRowTimestamp(row)
@@ -1263,9 +1607,7 @@ function buildAlertMessagesForTemplate(template) {
         description: describeConditionResult(condition, value)
       };
     });
-    const matched = template.logic === "or"
-      ? conditionResults.some((item) => item.matched)
-      : conditionResults.every((item) => item.matched);
+    const matched = combinedConditionMatched(conditionResults);
     if (!matched) return [];
     const levelLabel = alertTargetLevels.find((item) => item.id === template.targetLevel)?.label || "对象";
     return [{
@@ -1278,9 +1620,10 @@ function buildAlertMessagesForTemplate(template) {
       target_id: group.id,
       target_name: group.name,
       title: `${levelLabel} ${group.name} 触发预警`,
-      body: conditionResults.map((item) => item.description).join(template.logic === "or" ? "；或 " : "；且 "),
+      body: combinedConditionDescription(conditionResults),
       metrics: current,
       conditions: conditionResults.map((item) => ({
+        logic: item.condition.logic || "and",
         metric: item.condition.metric,
         comparison: item.condition.comparison,
         threshold: item.condition.threshold,
@@ -1305,13 +1648,81 @@ function alertTextForPush(message) {
   ].join("\n");
 }
 
-async function postJsonWithTimeout(url, payload, timeoutMs = 10_000, maxBodyLength = 1000) {
+function feishuCardTemplate(severity) {
+  if (severity === "high") return "red";
+  if (severity === "medium") return "orange";
+  return "blue";
+}
+
+function feishuMarkdown(value) {
+  return String(value ?? "")
+    .replaceAll("\\", "\\\\")
+    .replaceAll("*", "\\*")
+    .replaceAll("_", "\\_")
+    .replaceAll("`", "\\`");
+}
+
+function alertCardForFeishu(message) {
+  const metrics = message.metrics || {};
+  const createdAt = new Date(message.created_at).toLocaleString("zh-CN", { timeZone: displayTimeZone, hourCycle: "h23" });
+  const metricLine = [
+    `花费 ${formatMetricValue("spend", metrics.spend)}`,
+    `ROAS ${formatMetricValue("roas", metrics.roas)}`,
+    `购买 ${formatMetricValue("purchases", metrics.purchases)}`,
+    `CTR ${formatMetricValue("ctr_all", metrics.ctr_all)}`
+  ].join(" | ");
+
+  return {
+    schema: "2.0",
+    config: {
+      update_multi: true
+    },
+    header: {
+      title: {
+        tag: "plain_text",
+        content: "FB 广告预警"
+      },
+      subtitle: {
+        tag: "plain_text",
+        content: message.template_name || ""
+      },
+      template: feishuCardTemplate(message.severity),
+      padding: "12px 12px 12px 12px"
+    },
+    body: {
+      direction: "vertical",
+      padding: "12px 12px 12px 12px",
+      elements: [
+        {
+          tag: "markdown",
+          content: `**${feishuMarkdown(message.title)}**\n${feishuMarkdown(message.target_level_label)}：${feishuMarkdown(message.target_name)} (${feishuMarkdown(message.target_id)})\n等级：${feishuMarkdown(message.severity)}\n时间：${feishuMarkdown(createdAt)}`
+        },
+        {
+          tag: "hr"
+        },
+        {
+          tag: "markdown",
+          content: `**触发规则**\n${feishuMarkdown(message.body)}`
+        },
+        {
+          tag: "markdown",
+          content: `**当前指标**\n${feishuMarkdown(metricLine)}`
+        }
+      ]
+    }
+  };
+}
+
+async function postJsonWithTimeout(url, payload, timeoutMs = 10_000, maxBodyLength = 1000, headers = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...headers
+      },
       body: JSON.stringify(payload),
       signal: controller.signal
     });
@@ -1347,10 +1758,10 @@ async function pushAlertMessage(template, message, channel) {
       return { ...record, status: "skipped", error: "当前版本未配置邮件发送服务" };
     }
     if (channel === "feishu") {
-      const url = template.feishuWebhookUrl || defaultFeishuWebhookUrl;
+      const url = template.feishuWebhookUrl || defaultFeishuWebhookUrl();
       const result = await postJsonWithTimeout(url, {
-        msg_type: "text",
-        content: { text: alertTextForPush(message) }
+        msg_type: "interactive",
+        card: alertCardForFeishu(message)
       });
       return {
         ...record,
@@ -1383,11 +1794,13 @@ async function pushAlertMessage(template, message, channel) {
 
 async function evaluateAlertTemplates({ templateIds = [], push = true } = {}) {
   const selected = new Set(templateIds.map((id) => String(id)));
-  const templates = readAlertTemplates()
+  const allTemplates = readAlertTemplates();
+  const templates = allTemplates
     .filter((template) => template.enabled !== false)
     .filter((template) => !selected.size || selected.has(template.id));
   const generatedMessages = templates.flatMap(buildAlertMessagesForTemplate);
   const pushRecords = [];
+  const checkedAt = new Date().toISOString();
 
   if (push) {
     for (const template of templates) {
@@ -1405,6 +1818,14 @@ async function evaluateAlertTemplates({ templateIds = [], push = true } = {}) {
   }
   if (pushRecords.length) {
     writeAlertPushRecords([...pushRecords, ...readAlertPushRecords()]);
+  }
+  if (templates.length) {
+    const checkedIds = new Set(templates.map((template) => template.id));
+    writeAlertTemplates(allTemplates.map((template) => (
+      checkedIds.has(template.id)
+        ? { ...template, last_checked_at: checkedAt }
+        : template
+    )));
   }
 
   return {
@@ -1472,7 +1893,8 @@ function buildAnalysisReport(request) {
     since: request.since,
     until: request.until,
     level: request.level,
-    entityIds: request.entityIds
+    entityIds: request.entityIds,
+    accountTimeZones: readRecentAccountTimeZonesCached()
   });
   const { previousRows, currentRows } = splitRowsByPeriod(rows, request.since, request.until);
   const current = aggregateInsightRows(currentRows.length ? currentRows : rows);
@@ -1552,8 +1974,9 @@ async function callDeepSeekAnalysis(report) {
     };
   }
 
-  const result = await postJsonWithTimeout(`${deepSeekBaseUrl.replace(/\/+$/, "")}/chat/completions`, {
-    model: deepSeekModel,
+  const model = deepSeekModelName();
+  const result = await postJsonWithTimeout(`${deepSeekBaseUrl().replace(/\/+$/, "")}/chat/completions`, {
+    model,
     messages: [
       {
         role: "system",
@@ -1565,13 +1988,15 @@ async function callDeepSeekAnalysis(report) {
       }
     ],
     stream: false
-  }, 45_000, 0);
+  }, 45_000, 0, {
+    Authorization: `Bearer ${apiKey}`
+  });
 
   if (!result.ok) {
     return {
       ...report,
       provider: "local",
-      model: deepSeekModel,
+      model,
       ai_status: "failed",
       ai_message: `DeepSeek 调用失败：HTTP ${result.status}`,
       markdown: [
@@ -1590,7 +2015,7 @@ async function callDeepSeekAnalysis(report) {
     return {
       ...report,
       provider: "local",
-      model: deepSeekModel,
+      model,
       ai_status: "empty_response",
       ai_message: "DeepSeek 返回内容为空，已返回本地规则分析。"
     };
@@ -1599,7 +2024,7 @@ async function callDeepSeekAnalysis(report) {
   return {
     ...report,
     provider: "deepseek",
-    model: payload.model || deepSeekModel,
+    model: payload.model || model,
     ai_status: "success",
     ai_message: "DeepSeek 分析完成",
     localMarkdown: report.markdown,
@@ -2238,6 +2663,37 @@ const server = http.createServer((req, res) => {
         message: error.message
       });
     }
+    return;
+  }
+
+  if (url.pathname === "/api/settings/environment" && req.method === "GET") {
+    try {
+      writeJson(res, 200, {
+        ok: true,
+        environment: buildEnvironmentSettings()
+      });
+    } catch (error) {
+      writeJson(res, 500, {
+        ok: false,
+        error: "read_environment_settings_failed",
+        message: error.message
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/settings/environment" && req.method === "POST") {
+    readRequestBody(req)
+      .then((body) => {
+        const payload = body ? JSON.parse(body) : {};
+        const entries = normalizeEnvironmentPostEntries(payload);
+        writeCliEnv(entries);
+        writeJson(res, 200, {
+          ok: true,
+          environment: buildEnvironmentSettings()
+        });
+      })
+      .catch((error) => writeApiError(res, error, "update_environment_settings_failed"));
     return;
   }
 

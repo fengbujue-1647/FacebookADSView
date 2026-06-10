@@ -50,6 +50,54 @@ function selectableColumns(db, tableName, columns) {
   return columns.map((column) => (existing.has(column) ? column : `'' AS ${column}`));
 }
 
+function tableColumnSet(db, tableName) {
+  return new Set(db.prepare(`PRAGMA table_info(${tableName})`).all().map((row) => row.name));
+}
+
+function displayDateExpression(existingColumns) {
+  const candidates = [];
+  if (existingColumns.has("hour_start_beijing")) {
+    candidates.push("substr(NULLIF(hour_start_beijing, ''), 1, 10)");
+  }
+  if (existingColumns.has("date_start_beijing")) {
+    candidates.push("substr(NULLIF(date_start_beijing, ''), 1, 10)");
+  }
+  if (existingColumns.has("date_start")) {
+    candidates.push("date_start");
+  }
+  return candidates.length ? `COALESCE(${candidates.join(", ")})` : "''";
+}
+
+function displayTimeOrderExpression(existingColumns) {
+  const candidates = [];
+  if (existingColumns.has("hour_start_beijing")) {
+    candidates.push("NULLIF(hour_start_beijing, '')");
+  }
+  if (existingColumns.has("hour_start")) {
+    candidates.push("NULLIF(hour_start, '')");
+  }
+  if (existingColumns.has("date_start_beijing")) {
+    candidates.push("NULLIF(date_start_beijing, '')");
+  }
+  if (existingColumns.has("date_start")) {
+    candidates.push("date_start");
+  }
+  return candidates.length ? `COALESCE(${candidates.join(", ")})` : "''";
+}
+
+function addDaysToDateString(dateString, amount) {
+  const match = String(dateString || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return dateString;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  date.setUTCDate(date.getUTCDate() + amount);
+  return date.toISOString().slice(0, 10);
+}
+
+function analysisDisplayDate(row) {
+  return String(row.hour_start_beijing || row.date_start_beijing || row.date_start || "").slice(0, 10);
+}
+
+
 function readLatestInsightData({ databaseFile, limit = 50_000, accountTimeZones = new Map() } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return null;
@@ -654,7 +702,8 @@ function readInsightRowsForAnalysis({
   until = "",
   level = "campaign",
   entityIds = [],
-  limit = 120_000
+  limit = 120_000,
+  accountTimeZones = new Map()
 } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return [];
@@ -671,28 +720,43 @@ function readInsightRowsForAnalysis({
       return [];
     }
 
+    const existingColumns = tableColumnSet(db, "insight_rows");
+    const displayDate = displayDateExpression(existingColumns);
+    const displayTimeOrder = displayTimeOrderExpression(existingColumns);
+    const useDisplayTimeZoneFilter = since || until;
     const params = [];
-    const clauses = ["date_start <> ''"];
+    const clauses = [`${displayDate} <> ''`];
     if (since) {
       clauses.push("date_start >= ?");
-      params.push(since);
+      params.push(addDaysToDateString(since, -1));
     }
     if (until) {
       clauses.push("date_start <= ?");
-      params.push(until);
+      params.push(addDaysToDateString(until, 1));
     }
     if (ids.length) {
       clauses.push(`${idColumn} IN (${placeholders(ids)})`);
       params.push(...ids);
     }
 
-    return db.prepare(`
+    const rows = db.prepare(`
       SELECT ${selectableColumns(db, "insight_rows", insightDbColumns).join(", ")}
       FROM insight_rows
       WHERE ${clauses.join(" AND ")}
-      ORDER BY date_start, COALESCE(NULLIF(hour_start, ''), date_start), campaign_name, adset_name, ad_name
+      ORDER BY ${displayDate}, ${displayTimeOrder}, campaign_name, adset_name, ad_name
       LIMIT ?
     `).all(...params, Math.min(250_000, Math.max(1, Number.parseInt(limit, 10) || 120_000)));
+    const enriched = enrichInsightRowsWithTimeZone(rows, accountTimeZones).rows.map((row) => ({
+      ...row,
+      __display_date: analysisDisplayDate(row)
+    }));
+    if (!useDisplayTimeZoneFilter) {
+      return enriched;
+    }
+    return enriched.filter((row) => {
+      const date = row.__display_date;
+      return (!since || date >= since) && (!until || date <= until);
+    });
   } catch {
     return [];
   } finally {

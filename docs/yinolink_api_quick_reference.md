@@ -8,8 +8,8 @@
 | 用途 | YinoLink 接口 | Apifox 页面 | 当前用途 |
 | --- | --- | --- | --- |
 | 广告系列/广告组/广告列表 | `GET /api/v1/meta_api/resource` | `https://s.apifox.cn/c385a75f-e176-42f5-899f-bf2ea59ca700/398488189e0` | 维护 campaign/adset/ad 维表和 ACTIVE 列表 |
-| 广告系列/广告组/广告 Insights | `GET /api/v1/meta_api/insights` | `https://s.apifox.cn/c385a75f-e176-42f5-899f-bf2ea59ca700/392142609e0` | 拉 spend/clicks/impressions/actions/ROAS 等指标 |
-| 广告系列/广告组/广告 Info | `GET /api/v1/meta_api/info` | `https://s.apifox.cn/c385a75f-e176-42f5-899f-bf2ea59ca700/392646820e0` | 拉预算、状态、素材关联等静态字段 |
+| 广告系列/广告组/广告 Insights | `GET /api/v1/meta_api/insights` | `https://s.apifox.cn/c385a75f-e176-42f5-899f-bf2ea59ca700/392142609e0` | 拉 spend/clicks/impressions/actions/ROAS 等指标；`id` 支持英文逗号分隔，单次最多 50 个 |
+| 广告系列/广告组/广告 Info | `GET /api/v1/meta_api/info` | `https://s.apifox.cn/c385a75f-e176-42f5-899f-bf2ea59ca700/392646820e0` | 拉预算、状态、素材关联等静态字段；`id` 支持英文逗号分隔，单次最多 50 个 |
 | 拒登广告账户报告 | `GET /api/v1/fb/larr_api` | `https://s.apifox.cn/c385a75f-e176-42f5-899f-bf2ea59ca700/444065949e0` | 拒登报告，不属于实时投放指标主链路 |
 
 Meta breakdowns 参考：

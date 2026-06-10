@@ -686,7 +686,7 @@ program
 
 program
   .command('ad-insights')
-  .description('Tool 1：按 1-50 个 ad_id 拉广告级 hourly insights，队列重试并写入 SQLite/JSON/CSV')
+  .description('Tool 1：按多个 ad_id 拉广告级 hourly insights，内部按 50 个 ID 分批、队列重试并写入 SQLite/JSON/CSV')
   .requiredOption('--ids <ids>', 'ad_id 列表，多个用英文逗号/换行分隔')
   .option('--accounts <ids>', '用于补充 ACTIVE 维表和账户名，多个用英文逗号分隔')
   .option('--date-preset <preset>', 'Meta 预设日期（按广告账户时区解释）；不传则按账户时区自动增量/补近 7 天')

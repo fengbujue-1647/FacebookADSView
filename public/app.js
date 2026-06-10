@@ -62,8 +62,6 @@ const defaultFields = ["spend", "roas", "ctr_all", "clicks_all", "add_to_cart", 
 const coreFields = ["spend", "roas", "ctr_all", "clicks_all", "results", "cost_per_result"];
 const sumKeys = ["budget", "spend", "impressions", "clicks_all", "reach", "add_to_cart", "initiate_checkout", "purchases", "revenue", "results", "actions"];
 const ACTIVE_RESOURCE_ACCOUNT_ID = "8462513793771963";
-const TOM_SELECT_STYLE_URL = "/vendor/tom-select.min.css";
-const TOM_SELECT_SCRIPT_URL = "/vendor/tom-select.complete.min.js";
 const RESOURCE_LIMITS = {
   campaigns: Number.POSITIVE_INFINITY,
   ads: Number.POSITIVE_INFINITY
@@ -78,6 +76,7 @@ const state = {
   granularity: "day",
   selectedFields: new Set(defaultFields),
   selectedCampaigns: new Set(),
+  selectedAds: new Set(),
   delivery: "all",
   normalize: true,
   from: "",
@@ -85,6 +84,8 @@ const state = {
   activeWindowPreset: "",
   monitoredAccounts: [],
   monitorStatus: null,
+  environmentSettings: null,
+  environmentError: "",
   resourceCatalog: {
     account_id: ACTIVE_RESOURCE_ACCOUNT_ID,
     stale: true,
@@ -111,6 +112,12 @@ const state = {
       editingId: "",
       selectedPage: 1
     }
+  },
+  filterPickers: {
+    campaigns: { open: false, query: "" },
+    ads: { open: false, query: "" },
+    delivery: { open: false, query: "" },
+    fields: { open: false, query: "" }
   },
   savedSettingsSnapshot: "",
   settingsLoaded: false,
@@ -190,10 +197,8 @@ let lastChartData = [];
 let lastChartRows = [];
 let lastCampaignRows = [];
 let currentSeriesRaw = {};
-let campaignSelect;
-let fieldSelect;
+let adOptions = [];
 let isSyncingSelects = false;
-let choicePickerPromise = null;
 let iconRefreshPending = false;
 
 const chartPalette = [
@@ -249,8 +254,32 @@ const els = {
   fromDate: document.getElementById("fromDate"),
   toDate: document.getElementById("toDate"),
   campaignFilter: document.getElementById("campaignFilter"),
+  campaignFilterToggle: document.getElementById("campaignFilterToggle"),
+  campaignFilterLabel: document.getElementById("campaignFilterLabel"),
+  campaignFilterDropdown: document.getElementById("campaignFilterDropdown"),
+  campaignFilterSearch: document.getElementById("campaignFilterSearch"),
+  campaignFilterOptionList: document.getElementById("campaignFilterOptionList"),
+  campaignFilterSelectedList: document.getElementById("campaignFilterSelectedList"),
+  adFilter: document.getElementById("adFilter"),
+  adFilterToggle: document.getElementById("adFilterToggle"),
+  adFilterLabel: document.getElementById("adFilterLabel"),
+  adFilterDropdown: document.getElementById("adFilterDropdown"),
+  adFilterSearch: document.getElementById("adFilterSearch"),
+  adFilterOptionList: document.getElementById("adFilterOptionList"),
+  adFilterSelectedList: document.getElementById("adFilterSelectedList"),
   deliveryFilter: document.getElementById("deliveryFilter"),
+  deliveryFilterToggle: document.getElementById("deliveryFilterToggle"),
+  deliveryFilterLabel: document.getElementById("deliveryFilterLabel"),
+  deliveryFilterDropdown: document.getElementById("deliveryFilterDropdown"),
+  deliveryFilterSearch: document.getElementById("deliveryFilterSearch"),
+  deliveryFilterOptionList: document.getElementById("deliveryFilterOptionList"),
   fieldFilter: document.getElementById("fieldFilter"),
+  fieldFilterToggle: document.getElementById("fieldFilterToggle"),
+  fieldFilterLabel: document.getElementById("fieldFilterLabel"),
+  fieldFilterDropdown: document.getElementById("fieldFilterDropdown"),
+  fieldFilterSearch: document.getElementById("fieldFilterSearch"),
+  fieldFilterOptionList: document.getElementById("fieldFilterOptionList"),
+  fieldFilterSelectedList: document.getElementById("fieldFilterSelectedList"),
   fieldSummary: document.getElementById("fieldSummary"),
   viewToolbar: document.getElementById("viewToolbar"),
   chartCaption: document.getElementById("chartCaption"),
@@ -274,6 +303,9 @@ const els = {
   resetWindowButton: document.getElementById("resetWindowButton"),
   settingsCaption: document.getElementById("settingsCaption"),
   monitorStatusGrid: document.getElementById("monitorStatusGrid"),
+  envConfigCaption: document.getElementById("envConfigCaption"),
+  envFileStatus: document.getElementById("envFileStatus"),
+  envConfigGrid: document.getElementById("envConfigGrid"),
   monitorAccountsInput: document.getElementById("monitorAccountsInput"),
   settingsStatus: document.getElementById("settingsStatus"),
   reloadSettingsButton: document.getElementById("reloadSettingsButton"),
@@ -704,6 +736,7 @@ function mapCollectedRow(row) {
 
 function applyCampaignsFromRows(rows) {
   const campaigns = new Map();
+  const ads = new Map();
   rows.forEach((row) => {
     if (!campaigns.has(row.campaignId)) {
       campaigns.set(row.campaignId, {
@@ -717,11 +750,27 @@ function applyCampaignsFromRows(rows) {
         aov: 0
       });
     }
+    if (row.adId && !ads.has(row.adId)) {
+      ads.set(row.adId, {
+        id: row.adId,
+        name: row.adName || row.adId,
+        campaignId: row.campaignId,
+        campaignName: row.campaignName || row.campaign || "",
+        adsetId: row.adsetId || "",
+        adsetName: row.adsetName || ""
+      });
+    }
   });
 
   if (campaigns.size > 0) {
     CAMPAIGNS.splice(0, CAMPAIGNS.length, ...campaigns.values());
   }
+  adOptions = [...ads.values()].sort((a, b) => (
+    String(a.campaignName || "").localeCompare(String(b.campaignName || ""), "zh-CN")
+      || String(a.adsetName || "").localeCompare(String(b.adsetName || ""), "zh-CN")
+      || String(a.name || "").localeCompare(String(b.name || ""), "zh-CN")
+      || String(a.id).localeCompare(String(b.id))
+  ));
 }
 
 function clampNumber(value, fallback, min, max) {
@@ -1011,7 +1060,8 @@ function selectedResourcePageState(kind, rows) {
 function settingsSnapshotFromCurrentForm() {
   return JSON.stringify({
     accounts: parseAccountInput(els.monitorAccountsInput.value),
-    settings: collectSamplingSettings()
+    settings: collectSamplingSettings(),
+    environment: collectEnvironmentEntries()
   });
 }
 
@@ -1305,6 +1355,97 @@ function latestMonitorUpdateTime(run, monitorState) {
   return run?.completed_at || run?.started_at || monitorState?.last_run_at || monitorState?.updated_at || "";
 }
 
+function envStatusLabel(status) {
+  if (status === "configured") return "已配置";
+  if (status === "default") return "默认值";
+  if (status === "missing") return "缺失";
+  return "可选";
+}
+
+function collectEnvironmentEntries() {
+  return [...document.querySelectorAll("[data-env-key]")].map((input) => {
+    const key = input.dataset.envKey;
+    const clear = document.querySelector(`[data-env-clear="${CSS.escape(key)}"]`)?.checked === true;
+    const preserve = input.dataset.envSensitive === "true" && !clear && input.value === "" && input.dataset.envConfigured === "true";
+    return {
+      key,
+      value: clear ? "" : input.value,
+      preserve
+    };
+  });
+}
+
+function renderEnvironmentSettings() {
+  const environment = state.environmentSettings;
+  if (!environment) {
+    els.envConfigCaption.textContent = state.environmentError || "读取中";
+    els.envFileStatus.innerHTML = "";
+    els.envConfigGrid.innerHTML = `<div class="empty-inline">正在读取环境变量配置状态。</div>`;
+    return;
+  }
+
+  const summary = environment.summary || {};
+  const missingRequired = Math.max(0, Number(summary.requiredTotal || 0) - Number(summary.requiredConfigured || 0));
+  els.envConfigCaption.textContent = missingRequired
+    ? `必填缺失 ${missingRequired} 项 · 已配置 ${Number(summary.configuredTotal || 0)} / ${Number(summary.total || 0)} 项`
+    : `必填已齐 · 已配置 ${Number(summary.configuredTotal || 0)} / ${Number(summary.total || 0)} 项`;
+
+  const files = Array.isArray(environment.files) ? environment.files : [];
+  els.envFileStatus.innerHTML = files.map((file) => `
+    <span class="env-file-chip ${file.exists ? "exists" : "missing"}">
+      ${escapeHtml(file.path)}
+      <small>${file.exists ? `${Number(file.keys || 0)} 项${file.loaded ? " · 已加载" : ""}` : "未创建"}</small>
+    </span>
+  `).join("");
+
+  const groups = Array.isArray(environment.groups) ? environment.groups : [];
+  els.envConfigGrid.innerHTML = groups.map((group) => `
+    <section class="env-group">
+      <div class="env-group-head">
+        <strong>${escapeHtml(group.title)}</strong>
+        <span>${Number(group.items?.filter?.((item) => item.configured).length || 0)} / ${Number(group.items?.length || 0)} 已配置</span>
+      </div>
+      <div class="env-item-list">
+        ${(group.items || []).map((item) => `
+          <article class="env-item ${escapeHtml(item.status)}">
+            <div class="env-item-main">
+              <div class="env-key-line">
+                <code>${escapeHtml(item.key)}</code>
+                <span class="env-badge ${escapeHtml(item.status)}">${envStatusLabel(item.status)}</span>
+                ${item.required ? `<span class="env-badge required">必填</span>` : ""}
+              </div>
+              <strong>${escapeHtml(item.label)}</strong>
+              <small>${escapeHtml(item.description)}</small>
+            </div>
+            <div class="env-edit-row">
+              <input
+                data-env-key="${escapeHtml(item.key)}"
+                data-env-sensitive="${item.sensitive ? "true" : "false"}"
+                data-env-configured="${item.configured ? "true" : "false"}"
+                type="${item.sensitive ? "password" : "text"}"
+                spellcheck="false"
+                autocomplete="off"
+                value="${escapeHtml(item.editValue || "")}"
+                placeholder="${escapeHtml(item.sensitive && item.configured ? "已配置，输入新值覆盖" : item.defaultValue ? `默认 ${item.defaultValue}` : `${item.key}= 可留空`)}"
+              >
+              ${item.sensitive && item.configured ? `
+                <label class="env-clear-check">
+                  <input type="checkbox" data-env-clear="${escapeHtml(item.key)}">
+                  <span>清空</span>
+                </label>
+              ` : ""}
+            </div>
+            <div class="env-item-meta">
+              <span>${escapeHtml(item.displayValue)}</span>
+              <small>${escapeHtml(item.source || "-")}${item.usedBy ? ` · ${escapeHtml(item.usedBy)}` : ""}</small>
+            </div>
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `).join("") || `<div class="empty-inline">暂无环境变量配置项。</div>`;
+}
+
 function renderMonitorStatus() {
   const overview = state.monitorStatus;
   const campaignState = stateForList("campaigns");
@@ -1522,9 +1663,25 @@ async function loadMonitorStatus() {
   renderMonitorStatus();
 }
 
+async function loadEnvironmentSettings() {
+  try {
+    const response = await fetch("/api/settings/environment", { cache: "no-store" });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || "环境变量配置读取失败");
+    }
+    state.environmentSettings = payload.environment || null;
+    state.environmentError = "";
+  } catch (error) {
+    state.environmentSettings = null;
+    state.environmentError = error.message || "环境变量配置读取失败";
+  }
+  renderEnvironmentSettings();
+}
+
 async function loadResourceCatalog(message = "") {
   try {
-    const response = await fetch(`/api/settings/resources?account_id=${encodeURIComponent(ACTIVE_RESOURCE_ACCOUNT_ID)}`, { cache: "no-store" });
+    const response = await fetch("/api/settings/resources", { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
       throw new Error(payload.message || "ACTIVE 候选读取失败");
@@ -1558,10 +1715,12 @@ async function loadSettings(message = "") {
     try {
       await Promise.all([
         loadAccountSettings(),
-        loadSamplingSettings()
+        loadSamplingSettings(),
+        loadEnvironmentSettings()
       ]);
       renderAccountSettings();
       renderSamplingSettings();
+      renderEnvironmentSettings();
       captureSavedSettingsSnapshot();
       state.settingsLoaded = true;
       await Promise.all([
@@ -1596,7 +1755,6 @@ async function refreshActiveResources() {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        account_id: ACTIVE_RESOURCE_ACCOUNT_ID,
         force: true
       })
     });
@@ -1624,6 +1782,7 @@ async function refreshActiveResources() {
 async function saveSettings() {
   const accounts = parseAccountInput(els.monitorAccountsInput.value);
   const samplingSettings = collectSamplingSettings();
+  const environmentEntries = collectEnvironmentEntries();
   els.saveSettingsButton.disabled = true;
   updateDirtyState("保存中");
   try {
@@ -1649,10 +1808,23 @@ async function saveSettings() {
     if (!samplingResponse.ok || !samplingPayload.ok) {
       throw new Error(samplingPayload.message || "取样设置保存失败");
     }
+    const environmentResponse = await fetch("/api/settings/environment", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ entries: environmentEntries })
+    });
+    const environmentPayload = await environmentResponse.json();
+    if (!environmentResponse.ok || !environmentPayload.ok) {
+      throw new Error(environmentPayload.message || "环境变量保存失败");
+    }
     state.monitoredAccounts = accountPayload.accounts;
     state.samplingSettings = normalizeSamplingSettings(samplingPayload.settings);
+    state.environmentSettings = environmentPayload.environment || state.environmentSettings;
     renderAccountSettings();
     renderSamplingSettings();
+    renderEnvironmentSettings();
     await loadMonitorStatus();
     captureSavedSettingsSnapshot();
     updateDirtyState("已保存");
@@ -1743,6 +1915,9 @@ function getFilteredRows() {
     if (state.selectedCampaigns.size > 0 && !state.selectedCampaigns.has(row.campaignId)) {
       return false;
     }
+    if (!state.selectedAdId && state.selectedAds.size > 0 && !state.selectedAds.has(String(row.adId || ""))) {
+      return false;
+    }
     if (state.delivery !== "all" && row.delivery !== state.delivery) {
       return false;
     }
@@ -1794,11 +1969,19 @@ function aggregateByTime(rows) {
 }
 
 function campaignCompareEnabled() {
-  return !state.selectedAdId && state.selectedCampaigns.size > 1;
+  return !adCompareEnabled() && !state.selectedAdId && state.selectedCampaigns.size > 1;
 }
 
 function selectedCampaignsInDisplayOrder() {
   return CAMPAIGNS.filter((campaign) => state.selectedCampaigns.has(campaign.id));
+}
+
+function adCompareEnabled() {
+  return !state.selectedAdId && state.selectedAds.size > 1;
+}
+
+function selectedAdsInDisplayOrder() {
+  return adOptions.filter((ad) => state.selectedAds.has(ad.id));
 }
 
 function aggregateByCampaignTime(rows, timePoints) {
@@ -1838,6 +2021,46 @@ function aggregateByCampaignTime(rows, timePoints) {
   return campaigns.map((campaign) => ({
     campaign,
     points: timePoints.map((point) => deriveMetrics(campaignBuckets.get(campaign.id).get(point.key)))
+  }));
+}
+
+function aggregateByAdTime(rows, timePoints) {
+  if (!adCompareEnabled() || timePoints.length === 0) {
+    return [];
+  }
+
+  const ads = selectedAdsInDisplayOrder();
+  const pointKeys = new Set(timePoints.map((point) => point.key));
+  const adBuckets = new Map();
+
+  ads.forEach((ad) => {
+    const buckets = new Map();
+    timePoints.forEach((point) => {
+      buckets.set(point.key, {
+        key: point.key,
+        label: point.label,
+        sortDate: point.sortDate,
+        ...createAccumulator()
+      });
+    });
+    adBuckets.set(ad.id, buckets);
+  });
+
+  rows.forEach((row) => {
+    const buckets = adBuckets.get(String(row.adId || ""));
+    if (!buckets) {
+      return;
+    }
+    const key = bucketDate(new Date(row.timestamp), state.granularity).getTime();
+    if (!pointKeys.has(key)) {
+      return;
+    }
+    addToAccumulator(buckets.get(key), row);
+  });
+
+  return ads.map((ad) => ({
+    ad,
+    points: timePoints.map((point) => deriveMetrics(adBuckets.get(ad.id).get(point.key)))
   }));
 }
 
@@ -2088,12 +2311,27 @@ function pruneSelectedCampaigns() {
   });
 }
 
+function pruneSelectedAds() {
+  const adIds = new Set(adOptions.map((ad) => ad.id));
+  state.selectedAds.forEach((id) => {
+    if (!adIds.has(id)) {
+      state.selectedAds.delete(id);
+    }
+  });
+}
+
 function renderFilters() {
   pruneSelectedCampaigns();
+  pruneSelectedAds();
   setSelectOptions(els.campaignFilter, CAMPAIGNS.map((campaign) => ({
     value: campaign.id,
     label: campaign.name
   })), state.selectedCampaigns);
+
+  setSelectOptions(els.adFilter, adOptions.map((ad) => ({
+    value: ad.id,
+    label: `${ad.name} · ${ad.id}${ad.campaignName ? ` · ${ad.campaignName}` : ""}`
+  })), state.selectedAds);
 
   setSelectOptions(els.fieldFilter, metricFields.map((field) => ({
     value: field.id,
@@ -2102,11 +2340,12 @@ function renderFilters() {
 
   const deliveries = [...new Set(CAMPAIGNS.map((campaign) => campaign.delivery))];
   els.deliveryFilter.innerHTML = [
-    `<option value="all">全部投放状态</option>`,
-    ...deliveries.map((delivery) => `<option value="${delivery}">${delivery}</option>`)
+    `<option value="all" ${state.delivery === "all" ? "selected" : ""}>全部投放状态</option>`,
+    ...deliveries.map((delivery) => `<option value="${delivery}" ${state.delivery === delivery ? "selected" : ""}>${delivery}</option>`)
   ].join("");
 
   syncFieldSummary();
+  renderFilterPickers();
 }
 
 function selectedCampaignLabel() {
@@ -2118,6 +2357,17 @@ function selectedCampaignLabel() {
     return CAMPAIGNS.find((campaign) => campaign.id === campaignId)?.name || "未知广告系列";
   }
   return `广告系列：${state.selectedCampaigns.size} 个`;
+}
+
+function selectedAdFilterLabel() {
+  if (state.selectedAds.size === 0) {
+    return "";
+  }
+  if (state.selectedAds.size === 1) {
+    const [adId] = state.selectedAds;
+    return adOptions.find((ad) => ad.id === adId)?.name || adId;
+  }
+  return `单广告：${state.selectedAds.size} 个`;
 }
 
 function selectedDeliveryLabel() {
@@ -2138,6 +2388,7 @@ function renderActiveChips() {
     `时间：${formatRangeText()}`,
     getGranularityLabel(),
     selectedCampaignLabel(),
+    selectedAdFilterLabel(),
     selectedDeliveryLabel(),
     state.selectedAdId ? `AD：${selectedAdLabel()}` : "",
     `图表指标：${metricCount} 项`
@@ -2150,87 +2401,230 @@ function syncFieldSummary() {
   els.fieldSummary.textContent = `已选 ${state.selectedFields.size} 个指标`;
 }
 
+function filterPickerElements(kind) {
+  if (kind === "campaigns") {
+    return {
+      select: els.campaignFilter,
+      toggle: els.campaignFilterToggle,
+      label: els.campaignFilterLabel,
+      dropdown: els.campaignFilterDropdown,
+      search: els.campaignFilterSearch,
+      optionList: els.campaignFilterOptionList,
+      selectedList: els.campaignFilterSelectedList
+    };
+  }
+  if (kind === "ads") {
+    return {
+      select: els.adFilter,
+      toggle: els.adFilterToggle,
+      label: els.adFilterLabel,
+      dropdown: els.adFilterDropdown,
+      search: els.adFilterSearch,
+      optionList: els.adFilterOptionList,
+      selectedList: els.adFilterSelectedList
+    };
+  }
+  if (kind === "delivery") {
+    return {
+      select: els.deliveryFilter,
+      toggle: els.deliveryFilterToggle,
+      label: els.deliveryFilterLabel,
+      dropdown: els.deliveryFilterDropdown,
+      search: els.deliveryFilterSearch,
+      optionList: els.deliveryFilterOptionList,
+      selectedList: null
+    };
+  }
+  return {
+    select: els.fieldFilter,
+    toggle: els.fieldFilterToggle,
+    label: els.fieldFilterLabel,
+    dropdown: els.fieldFilterDropdown,
+    search: els.fieldFilterSearch,
+    optionList: els.fieldFilterOptionList,
+    selectedList: els.fieldFilterSelectedList
+  };
+}
+
+function filterPickerOptions(kind) {
+  if (kind === "campaigns") {
+    return CAMPAIGNS.map((campaign) => ({
+      id: campaign.id,
+      label: campaign.name,
+      meta: campaign.id,
+      search: `${campaign.name} ${campaign.id}`.toLowerCase()
+    }));
+  }
+  if (kind === "ads") {
+    return adOptions.map((ad) => ({
+      id: ad.id,
+      label: ad.name,
+      meta: [ad.id, ad.campaignName].filter(Boolean).join(" · "),
+      search: `${ad.name} ${ad.id} ${ad.campaignName || ""}`.toLowerCase()
+    }));
+  }
+  if (kind === "delivery") {
+    const deliveries = ["all", ...new Set(CAMPAIGNS.map((campaign) => campaign.delivery).filter(Boolean))];
+    return deliveries.map((delivery) => ({
+      id: delivery,
+      label: delivery === "all" ? "全部投放状态" : delivery,
+      meta: delivery === "all" ? "不限制投放状态" : "投放状态",
+      search: `${delivery === "all" ? "全部投放状态" : delivery} ${delivery}`.toLowerCase()
+    }));
+  }
+  return metricFields.map((field) => ({
+    id: field.id,
+    label: field.label,
+    meta: field.api || field.id,
+    search: `${field.label} ${field.id} ${field.api || ""}`.toLowerCase()
+  }));
+}
+
+function filterPickerSelection(kind) {
+  if (kind === "campaigns") return state.selectedCampaigns;
+  if (kind === "ads") return state.selectedAds;
+  if (kind === "delivery") return new Set([state.delivery || "all"]);
+  return state.selectedFields;
+}
+
+function filterPickerEmptyLabel(kind) {
+  if (kind === "campaigns") return "全部广告系列";
+  if (kind === "ads") return "全部单广告";
+  if (kind === "delivery") return "全部投放状态";
+  return "选择指标";
+}
+
+function filterPickerLabel(kind) {
+  const selected = filterPickerSelection(kind);
+  if (selected.size === 0) return filterPickerEmptyLabel(kind);
+  if (kind === "delivery") return selectedDeliveryLabel();
+  if (kind === "fields") return `已选 ${selected.size} 个指标`;
+  if (selected.size === 1) {
+    const [id] = selected;
+    return filterPickerOptions(kind).find((item) => item.id === id)?.label || id;
+  }
+  return `${kind === "campaigns" ? "广告系列" : "单广告"}：${selected.size} 个`;
+}
+
+function filteredPickerOptions(kind) {
+  const query = state.filterPickers[kind].query.trim().toLowerCase();
+  const options = filterPickerOptions(kind);
+  if (!query) return options;
+  return options.filter((option) => option.search.includes(query));
+}
+
+function setFilterPickerOpen(kind, open) {
+  Object.keys(state.filterPickers).forEach((key) => {
+    state.filterPickers[key].open = key === kind ? open : false;
+  });
+  renderFilterPickers();
+  if (open) {
+    requestAnimationFrame(() => filterPickerElements(kind).search?.focus());
+  }
+}
+
+function renderFilterPicker(kind) {
+  const elements = filterPickerElements(kind);
+  const selected = filterPickerSelection(kind);
+  const filteredOptions = filteredPickerOptions(kind);
+  const stateItem = state.filterPickers[kind];
+
+  elements.label.textContent = filterPickerLabel(kind);
+  elements.toggle.setAttribute("aria-expanded", String(stateItem.open));
+  elements.dropdown.hidden = !stateItem.open;
+  if (elements.search.value !== stateItem.query) {
+    elements.search.value = stateItem.query;
+  }
+
+  elements.optionList.innerHTML = filteredOptions.length
+    ? filteredOptions.map((option) => `
+      <label class="entity-option" title="${escapeHtml(option.meta)}">
+        <input type="checkbox" data-filter-picker="${escapeHtml(kind)}" data-filter-picker-id="${escapeHtml(option.id)}" ${selected.has(option.id) ? "checked" : ""}>
+        <span>
+          <strong>${escapeHtml(option.label)}</strong>
+          <small>${escapeHtml(option.meta)}</small>
+        </span>
+      </label>
+    `).join("")
+    : '<div class="empty-inline">当前筛选没有可选项</div>';
+
+  const selectedItems = [...selected]
+    .map((id) => filterPickerOptions(kind).find((item) => item.id === id) || { id, label: id, meta: id });
+  if (elements.selectedList) {
+    elements.selectedList.innerHTML = selectedItems.map((item) => `
+      <span class="entity-pill">
+        ${escapeHtml(item.label)}
+        <button type="button" data-remove-filter-picker="${escapeHtml(kind)}" data-filter-picker-id="${escapeHtml(item.id)}" aria-label="移除 ${escapeHtml(item.label)}">×</button>
+      </span>
+    `).join("");
+  }
+}
+
+function renderFilterPickers() {
+  ["campaigns", "ads", "delivery", "fields"].forEach(renderFilterPicker);
+  syncFieldSummary();
+}
+
+function setFilterPickerSelection(kind, ids) {
+  const normalized = new Set(ids.map((id) => String(id || "").trim()).filter(Boolean));
+  if (kind === "campaigns") {
+    state.selectedCampaigns = normalized;
+    state.selectedAdId = "";
+    if (normalized.size) {
+      state.selectedAds = new Set();
+    }
+  } else if (kind === "ads") {
+    state.selectedAds = normalized;
+    state.selectedAdId = "";
+    if (normalized.size) {
+      state.selectedCampaigns = new Set();
+    }
+  } else if (kind === "delivery") {
+    const [delivery] = normalized;
+    state.delivery = delivery || "all";
+  } else {
+    state.selectedFields = normalized;
+  }
+  syncCampaignChoiceSelection();
+  syncAdChoiceSelection();
+  syncDeliveryChoiceSelection();
+  syncFieldChoiceSelection();
+  renderDashboard();
+}
+
 function syncFieldChoiceSelection() {
   isSyncingSelects = true;
-  const selectedIds = [...state.selectedFields];
   [...els.fieldFilter.options].forEach((option) => {
     option.selected = state.selectedFields.has(option.value);
   });
-  if (fieldSelect) {
-    fieldSelect.setValue(selectedIds, true);
-  }
   isSyncingSelects = false;
   syncFieldSummary();
+  renderFilterPicker("fields");
 }
 
 function syncCampaignChoiceSelection() {
   isSyncingSelects = true;
-  const selectedIds = [...state.selectedCampaigns];
   [...els.campaignFilter.options].forEach((option) => {
     option.selected = state.selectedCampaigns.has(option.value);
   });
-  if (campaignSelect) {
-    campaignSelect.setValue(selectedIds, true);
-  }
   isSyncingSelects = false;
+  renderFilterPicker("campaigns");
 }
 
-function initChoicePickers() {
-  if (campaignSelect || fieldSelect) {
-    return;
-  }
-  if (!window.TomSelect) {
-    syncFieldSummary();
-    return;
-  }
-
-  const commonOptions = {
-    plugins: ["checkbox_options", "remove_button"],
-    controlInput: null,
-    create: false,
-    closeAfterSelect: false,
-    hideSelected: false,
-    maxOptions: null,
-    sortField: [{ field: "$order" }],
-    render: {
-      no_results() {
-        return '<div class="no-results">没有可选项</div>';
-      }
-    }
-  };
-
-  campaignSelect = new TomSelect(els.campaignFilter, {
-    ...commonOptions,
-    placeholder: "全部广告系列"
+function syncAdChoiceSelection() {
+  isSyncingSelects = true;
+  [...els.adFilter.options].forEach((option) => {
+    option.selected = state.selectedAds.has(option.value);
   });
-
-  fieldSelect = new TomSelect(els.fieldFilter, {
-    ...commonOptions,
-    placeholder: "选择指标"
-  });
-
-  syncFieldSummary();
+  isSyncingSelects = false;
+  renderFilterPicker("ads");
 }
 
-function ensureChoicePickers() {
-  if (campaignSelect && fieldSelect) {
-    return Promise.resolve();
-  }
-  if (!choicePickerPromise) {
-    choicePickerPromise = Promise.all([
-      loadStyleOnce(TOM_SELECT_STYLE_URL),
-      loadScriptOnce(TOM_SELECT_SCRIPT_URL, "TomSelect")
-    ])
-      .then(() => {
-        initChoicePickers();
-      })
-      .catch((error) => {
-        choicePickerPromise = null;
-        console.warn(error.message);
-        syncFieldSummary();
-      });
-  }
-  return choicePickerPromise;
+function syncDeliveryChoiceSelection() {
+  isSyncingSelects = true;
+  els.deliveryFilter.value = state.delivery || "all";
+  isSyncingSelects = false;
+  renderFilterPicker("delivery");
 }
 
 function renderKpis(total) {
@@ -2298,6 +2692,7 @@ function renderView() {
   if (state.activeView === "settings") {
     renderAccountSettings();
     renderSamplingSettings();
+    renderEnvironmentSettings();
     ensureSettingsLoaded().catch((error) => {
       updateDirtyState(error.message || "设置读取失败");
     });
@@ -2324,9 +2719,13 @@ function renderSettingsTabs() {
 
 function renderChart(points, rows = lastChartRows) {
   const metrics = selectedMetricIds();
+  const compareAdsMode = adCompareEnabled();
   const compareMode = campaignCompareEnabled();
+  const compareAdGroups = compareAdsMode ? aggregateByAdTime(rows, points) : [];
   const compareGroups = compareMode ? aggregateByCampaignTime(rows, points) : [];
-  const compareSuffix = compareMode ? ` · ${compareGroups.length} 个广告系列对比` : "";
+  const compareSuffix = compareAdsMode
+    ? ` · ${compareAdGroups.length} 个单广告对比`
+    : compareMode ? ` · ${compareGroups.length} 个广告系列对比` : "";
   const adSuffix = state.selectedAdId ? ` · AD：${selectedAdLabel()}` : "";
   els.chartCaption.textContent = `${getGranularityLabel()} · ${formatRangeText()}${compareSuffix}${adSuffix}`;
   els.chartEmpty.textContent = metrics.length === 0 ? "请选择至少一个数值指标" : "当前时间窗口没有可展示数据";
@@ -2361,7 +2760,7 @@ function renderChart(points, rows = lastChartRows) {
         width: 2
       },
       areaStyle: {
-        opacity: compareMode ? 0.06 : 0.14
+        opacity: compareAdsMode || compareMode ? 0.06 : 0.14
       },
       emphasis: {
         focus: "series"
@@ -2370,7 +2769,20 @@ function renderChart(points, rows = lastChartRows) {
     };
   };
 
-  const series = compareMode
+  const series = compareAdsMode
+    ? compareAdGroups.flatMap((group, adIndex) => metrics.map((id, metricIndex) => {
+      const field = fieldById.get(id);
+      const values = group.points.map((point) => Number(point[id] || 0));
+      const name = metrics.length === 1 ? group.ad.name : `${group.ad.name} · ${field.label}`;
+      return createSeries({
+        name,
+        field,
+        values,
+        color: chartPalette[(adIndex * metrics.length + metricIndex) % chartPalette.length],
+        seriesIndex: adIndex * metrics.length + metricIndex
+      });
+    }))
+    : compareMode
     ? compareGroups.flatMap((group, campaignIndex) => metrics.map((id, metricIndex) => {
       const field = fieldById.get(id);
       const values = group.points.map((point) => Number(point[id] || 0));
@@ -2411,7 +2823,9 @@ function renderChart(points, rows = lastChartRows) {
         const index = params[0]?.dataIndex || 0;
         const rows = params.map((item) => {
           const raw = currentSeriesRaw[item.seriesName];
-          return `${item.marker}${item.seriesName}: <strong>${formatValue(raw.id, raw.values[index])}</strong>`;
+          const metricId = raw?.id || item.seriesName;
+          const rawValue = raw?.values?.[index] ?? item.value;
+          return `${item.marker}${item.seriesName}: <strong>${formatValue(metricId, rawValue)}</strong>`;
         });
         return `<strong>${labels[index]}</strong><br>${rows.join("<br>")}`;
       }
@@ -2644,6 +3058,8 @@ function calculateTotals(rows) {
 function setAdDrilldown(adId, targetView = state.activeView) {
   state.selectedAdId = String(adId || "");
   if (state.selectedAdId) {
+    state.selectedAds = new Set();
+    syncAdChoiceSelection();
     const row = rawRows.find((item) => String(item.adId || "") === state.selectedAdId);
     if (row?.campaignId) {
       state.selectedCampaigns = new Set([row.campaignId]);
@@ -2823,10 +3239,7 @@ function bindEvents() {
     els.optionsPanel.hidden = !nextOpen;
     els.moreOptionsToggle.setAttribute("aria-expanded", String(nextOpen));
     if (nextOpen) {
-      els.campaignFilter.focus();
-      ensureChoicePickers().then(() => {
-        campaignSelect?.focus?.();
-      });
+      els.campaignFilterToggle.focus();
     }
   });
 
@@ -2866,13 +3279,31 @@ function bindEvents() {
     if (isSyncingSelects) {
       return;
     }
-    state.selectedCampaigns = new Set(selectedControlValues(els.campaignFilter, campaignSelect));
+    state.selectedCampaigns = new Set(selectedControlValues(els.campaignFilter));
     state.selectedAdId = "";
+    if (state.selectedCampaigns.size > 0) {
+      state.selectedAds = new Set();
+      syncAdChoiceSelection();
+    }
+    renderDashboard();
+  });
+
+  els.adFilter.addEventListener("change", () => {
+    if (isSyncingSelects) {
+      return;
+    }
+    state.selectedAds = new Set(selectedControlValues(els.adFilter));
+    state.selectedAdId = "";
+    if (state.selectedAds.size > 0) {
+      state.selectedCampaigns = new Set();
+      syncCampaignChoiceSelection();
+    }
     renderDashboard();
   });
 
   els.deliveryFilter.addEventListener("change", () => {
     state.delivery = els.deliveryFilter.value;
+    syncDeliveryChoiceSelection();
     renderDashboard();
   });
 
@@ -2886,8 +3317,76 @@ function bindEvents() {
     if (isSyncingSelects) {
       return;
     }
-    state.selectedFields = new Set(selectedControlValues(els.fieldFilter, fieldSelect));
+    state.selectedFields = new Set(selectedControlValues(els.fieldFilter));
     renderDashboard();
+  });
+
+  ["campaigns", "ads", "delivery", "fields"].forEach((kind) => {
+    const elements = filterPickerElements(kind);
+    elements.toggle.addEventListener("click", () => {
+      setFilterPickerOpen(kind, !state.filterPickers[kind].open);
+    });
+    elements.search.addEventListener("input", () => {
+      state.filterPickers[kind].query = elements.search.value;
+      state.filterPickers[kind].open = true;
+      renderFilterPicker(kind);
+    });
+  });
+
+  document.addEventListener("click", (event) => {
+    if (event.target.closest(".filter-entity-picker")) {
+      return;
+    }
+    if (Object.values(state.filterPickers).some((picker) => picker.open)) {
+      Object.values(state.filterPickers).forEach((picker) => {
+        picker.open = false;
+      });
+      renderFilterPickers();
+    }
+  });
+
+  document.addEventListener("change", (event) => {
+    const input = event.target.closest("[data-filter-picker-id][data-filter-picker]");
+    if (!input) {
+      return;
+    }
+    const kind = input.dataset.filterPicker;
+    if (kind === "delivery") {
+      setFilterPickerSelection(kind, input.checked ? [input.dataset.filterPickerId] : ["all"]);
+      state.filterPickers.delivery.open = false;
+      renderFilterPicker("delivery");
+      return;
+    }
+    const current = new Set(filterPickerSelection(kind));
+    if (input.checked) {
+      current.add(input.dataset.filterPickerId);
+    } else {
+      current.delete(input.dataset.filterPickerId);
+    }
+    setFilterPickerSelection(kind, [...current]);
+  });
+
+  document.addEventListener("click", (event) => {
+    const actionButton = event.target.closest("[data-filter-picker-action]");
+    if (actionButton) {
+      const kind = actionButton.dataset.filterPicker;
+      const action = actionButton.dataset.filterPickerAction;
+      if (action === "select-all") {
+        setFilterPickerSelection(kind, filteredPickerOptions(kind).map((option) => option.id));
+      }
+      if (action === "clear") {
+        setFilterPickerSelection(kind, []);
+      }
+      return;
+    }
+
+    const removeButton = event.target.closest("[data-remove-filter-picker]");
+    if (removeButton) {
+      const kind = removeButton.dataset.removeFilterPicker;
+      const current = new Set(filterPickerSelection(kind));
+      current.delete(removeButton.dataset.filterPickerId);
+      setFilterPickerSelection(kind, [...current]);
+    }
   });
 
   document.querySelectorAll("[data-field-action]").forEach((button) => {
@@ -2969,6 +3468,10 @@ function bindEvents() {
   });
 
   document.addEventListener("change", (event) => {
+    if (event.target.closest("[data-env-key], [data-env-clear]")) {
+      updateDirtyState();
+      return;
+    }
     const checkbox = event.target.closest(".resource-option input[type='checkbox']");
     if (!checkbox) {
       return;
@@ -3019,6 +3522,12 @@ function bindEvents() {
       state.resourceUi.campaigns.open = false;
       state.resourceUi.ads.open = false;
       renderResourcePickers();
+    }
+  });
+
+  document.addEventListener("input", (event) => {
+    if (event.target.closest("[data-env-key]")) {
+      updateDirtyState();
     }
   });
 

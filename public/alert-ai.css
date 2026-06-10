@@ -79,7 +79,7 @@
 }
 
 .alert-table {
-  min-width: 1120px;
+  min-width: 1240px;
 }
 
 .alert-table td small,
@@ -130,6 +130,14 @@
 .template-severity.low {
   background: var(--green-soft);
   color: var(--green);
+}
+
+.next-check-label {
+  display: block;
+  color: #17202a;
+  font-size: 13px;
+  font-weight: 900;
+  white-space: nowrap;
 }
 
 .rule-cell {
@@ -369,7 +377,7 @@
 
 .condition-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1fr) minmax(132px, 0.8fr) minmax(120px, 0.7fr) minmax(120px, 0.7fr) 38px;
+  grid-template-columns: minmax(108px, 0.72fr) minmax(140px, 1fr) minmax(132px, 0.82fr) minmax(120px, 0.72fr) minmax(120px, 0.72fr) 38px;
   gap: 8px;
   align-items: end;
   padding: 10px;
@@ -581,6 +589,80 @@
   border-radius: var(--radius);
   background: #ffffff;
   box-shadow: 0 18px 46px rgba(15, 23, 42, 0.18);
+}
+
+.searchable-native-select {
+  display: none !important;
+}
+
+.searchable-select-picker {
+  width: 100%;
+}
+
+.searchable-select-picker .entity-toggle {
+  width: 100%;
+}
+
+.searchable-select-picker .entity-dropdown {
+  width: min(360px, calc(100vw - 48px));
+}
+
+.condition-row .searchable-select-picker .entity-dropdown {
+  width: min(300px, calc(100vw - 48px));
+}
+
+.searchable-select-option {
+  cursor: pointer;
+}
+
+.searchable-select-option.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.entity-search {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.entity-search input {
+  width: 100%;
+  min-height: 36px;
+  border: 0;
+  outline: 0;
+}
+
+.entity-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.entity-toolbar button {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.window-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .entity-option-list {
