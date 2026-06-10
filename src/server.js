@@ -2760,9 +2760,17 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === "/api/collection/queue/status" && req.method === "GET") {
     try {
+      const pageSize = clampInteger(url.searchParams.get("page_size"), 50, 1, 100);
+      const page = clampInteger(url.searchParams.get("page"), 1, 1, 100000);
       writeJson(res, 200, {
         ok: true,
-        queue: readCollectionQueueOverview({ databaseFile }),
+        queue: readCollectionQueueOverview({
+          databaseFile,
+          limit: pageSize,
+          offset: (page - 1) * pageSize,
+          page,
+          pageSize
+        }),
         runner: collectionRunStatus,
         display_time_zone: displayTimeZone
       });

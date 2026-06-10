@@ -67,6 +67,7 @@ const RESOURCE_LIMITS = {
   ads: Number.POSITIVE_INFINITY
 };
 const RESOURCE_SELECTED_PAGE_SIZE = 8;
+const COLLECTION_PAGE_SIZE = 50;
 
 const state = {
   activeView: "chart",
@@ -86,6 +87,7 @@ const state = {
   monitorStatus: null,
   collectionQueue: null,
   collectionRunner: null,
+  collectionPage: 1,
   environmentSettings: null,
   environmentError: "",
   resourceCatalog: {
@@ -193,6 +195,10 @@ const viewCopy = {
   settings: {
     title: "设置",
     subtitle: "配置用于采集和看板展示的监控账户。"
+  },
+  tasks: {
+    title: "任务进度",
+    subtitle: "查看采集队列的 Job 进度、批处理状态和运行耗时。"
   }
 };
 
@@ -310,8 +316,11 @@ const els = {
   settingsCaption: document.getElementById("settingsCaption"),
   monitorStatusGrid: document.getElementById("monitorStatusGrid"),
   collectionConsoleGrid: document.getElementById("collectionConsoleGrid"),
-  collectionJobsBody: document.getElementById("collectionJobsBody"),
+  collectionJobsList: document.getElementById("collectionJobsList"),
   collectionQueueCaption: document.getElementById("collectionQueueCaption"),
+  collectionProgressFill: document.getElementById("collectionProgressFill"),
+  collectionProgressLabel: document.getElementById("collectionProgressLabel"),
+  collectionPageInfo: document.getElementById("collectionPageInfo"),
   collectionRunModeSelect: document.getElementById("collectionRunModeSelect"),
   refreshCollectionQueueButton: document.getElementById("refreshCollectionQueueButton"),
   runCollectionQueueButton: document.getElementById("runCollectionQueueButton"),
@@ -1549,14 +1558,91 @@ function collectionStatusText(status) {
   }[status] || status || "-";
 }
 
+function collectionJobProgress(job) {
+  const status = job?.status || "";
+  if (status === "completed") return 100;
+  if (status === "failed") return 100;
+  if (status === "running") return 65;
+  if (status === "retry") {
+    const attempts = Number(job?.attempts || 0);
+    const maxAttempts = Math.max(1, Number(job?.max_attempts || 1));
+    return Math.min(95, Math.max(12, Math.round((attempts / maxAttempts) * 100)));
+  }
+  return 0;
+}
+
+function collectionJobTone(job) {
+  if (job?.status === "completed") return "completed";
+  if (job?.status === "failed") return "failed";
+  if (job?.status === "running") return "running";
+  if (job?.status === "retry") return "retry";
+  return "waiting";
+}
+
+function collectionJobTitle(job) {
+  const level = job?.object_type || "-";
+  const idCount = Number(job?.id_count || 0);
+  const bucket = job?.bucket_key || job?.date_start || "-";
+  return `${level} · ${idCount} ID · ${bucket}`;
+}
+
+function collectionJobMeta(job) {
+  const flags = [
+    job?.rate_limited ? "限流" : "",
+    job?.quota_limited ? "超配额" : ""
+  ].filter(Boolean);
+  return [
+    `尝试 ${Number(job?.attempts || 0)} / ${Number(job?.max_attempts || 0)}`,
+    `行数 ${Number(job?.row_count || 0)} / 原始 ${Number(job?.raw_row_count || 0)}`,
+    `耗时 ${formatDuration(job?.duration_ms)}`,
+    flags.join(" · ")
+  ].filter(Boolean).join(" · ");
+}
+
+function renderCollectionJobCard(job) {
+  const tone = collectionJobTone(job);
+  const percent = collectionJobProgress(job);
+  const updatedAt = formatIso(job?.updated_at || job?.completed_at || job?.created_at);
+  const ids = Array.isArray(job?.objectIds) ? job.objectIds : [];
+  const idTotal = Math.max(ids.length, Number(job?.objectIdTotal || job?.id_count || ids.length));
+  const idPreview = ids.slice(0, 4).join(", ");
+  const idExtra = idTotal > ids.length ? ` 等 ${idTotal} 个` : "";
+  return `
+    <article class="task-progress-row ${escapeHtml(tone)}">
+      <div class="task-progress-main">
+        <span class="run-badge ${escapeHtml(job.status)}">${escapeHtml(collectionStatusText(job.status))}</span>
+        <div class="task-progress-title">
+          <strong>${escapeHtml(collectionJobTitle(job))}</strong>
+          <small>${escapeHtml(collectionJobMeta(job))}</small>
+        </div>
+      </div>
+      <div class="task-progress-body">
+        <div class="task-progress-track" aria-label="任务进度 ${percent}%">
+          <span style="width: ${percent}%"></span>
+        </div>
+        <div class="task-progress-foot">
+          <span>${percent}%</span>
+          <span>${escapeHtml(updatedAt)}</span>
+        </div>
+      </div>
+      <div class="task-progress-side">
+        <span>${escapeHtml(job.account_timezone || "-")}</span>
+        <small title="${escapeHtml(ids.join(", "))}">${escapeHtml(idPreview || "-")}${escapeHtml(idExtra)}</small>
+      </div>
+      ${job.error ? `<div class="task-progress-error">${escapeHtml(job.error)}</div>` : ""}
+    </article>
+  `;
+}
+
 function renderCollectionConsole() {
   const queue = state.collectionQueue;
   const runner = state.collectionRunner;
-  if (!els.collectionConsoleGrid || !els.collectionJobsBody) {
+  if (!els.collectionConsoleGrid || !els.collectionJobsList) {
     return;
   }
   const counts = queue?.statusCounts || {};
   const progress = queue?.progress || {};
+  const page = queue?.jobPage || { page: state.collectionPage, pageSize: COLLECTION_PAGE_SIZE, total: 0, pageCount: 1, offset: 0 };
   const recentWindow = queue?.recentWindow || {};
   const totals = queue?.totals || {};
   const runnerLabel = runner?.running
@@ -1568,6 +1654,8 @@ function renderCollectionConsole() {
   els.collectionQueueCaption.textContent = queue?.generatedAt
     ? `${runnerLabel} · ${formatIso(queue.generatedAt)}`
     : runnerLabel;
+  els.collectionProgressLabel.textContent = `${Number(progress.completed || 0)} / ${Number(progress.total || 0)} · ${Number(progress.percent || 0).toFixed(1)}%`;
+  els.collectionProgressFill.style.width = `${Math.max(0, Math.min(100, Number(progress.percent || 0)))}%`;
   els.collectionConsoleGrid.innerHTML = [
     {
       title: "当前 worker",
@@ -1608,22 +1696,22 @@ function renderCollectionConsole() {
   `).join("");
 
   const jobs = queue?.recentJobs || [];
-  els.collectionJobsBody.innerHTML = jobs.length
-    ? jobs.map((job) => `
-      <tr>
-        <td><span class="run-badge ${escapeHtml(job.status)}">${escapeHtml(collectionStatusText(job.status))}</span></td>
-        <td>${escapeHtml(job.object_type || "-")}</td>
-        <td>${Number(job.id_count || 0)}</td>
-        <td>${escapeHtml(job.bucket_key || "-")}</td>
-        <td>${Number(job.row_count || 0)} / ${Number(job.raw_row_count || 0)}</td>
-        <td>${Number(job.attempts || 0)} / ${Number(job.max_attempts || 0)}</td>
-        <td>${formatDuration(job.duration_ms)}</td>
-        <td>${job.rate_limited ? "限流" : job.quota_limited ? "超配额" : "-"}</td>
-        <td>${formatIso(job.updated_at || job.completed_at || job.created_at)}</td>
-        <td class="error-cell">${escapeHtml(job.error || "")}</td>
-      </tr>
-    `).join("")
-    : `<tr><td colspan="10">还没有采集 Job。点击“投递并运行”后，这里会显示持久化队列状态。</td></tr>`;
+  els.collectionJobsList.innerHTML = jobs.length
+    ? jobs.map(renderCollectionJobCard).join("")
+    : `<div class="empty-inline">还没有采集 Job。点击“投递并运行”后，这里会显示持久化队列状态。</div>`;
+
+  const total = Number(page.total || progress.total || 0);
+  const pageSize = Number(page.pageSize || COLLECTION_PAGE_SIZE);
+  const pageCount = Math.max(1, Number(page.pageCount || Math.ceil(total / pageSize) || 1));
+  const currentPage = Math.min(pageCount, Math.max(1, Number(page.page || state.collectionPage || 1)));
+  const start = total ? Number(page.offset || 0) + 1 : 0;
+  const end = total ? Math.min(total, Number(page.offset || 0) + jobs.length) : 0;
+  els.collectionPageInfo.textContent = `第 ${currentPage} / ${pageCount} 页 · ${start}-${end} / ${total} · 每页 ${pageSize}`;
+  document.querySelectorAll("[data-collection-page]").forEach((button) => {
+    const action = button.dataset.collectionPage;
+    const disabled = (action === "first" || action === "prev") ? currentPage <= 1 : currentPage >= pageCount;
+    button.disabled = disabled;
+  });
 }
 
 function renderAccountSettings(message = "") {
@@ -1781,12 +1869,21 @@ async function loadMonitorStatus() {
   renderMonitorStatus();
 }
 
-async function loadCollectionQueueStatus() {
+async function loadCollectionQueueStatus(page = state.collectionPage) {
+  state.collectionPage = Math.max(1, Number.parseInt(page, 10) || 1);
   try {
-    const response = await fetch("/api/collection/queue/status", { cache: "no-store" });
+    const params = new URLSearchParams({
+      page: String(state.collectionPage),
+      page_size: String(COLLECTION_PAGE_SIZE)
+    });
+    const response = await fetch(`/api/collection/queue/status?${params}`, { cache: "no-store" });
     const payload = await response.json();
     state.collectionQueue = payload.ok ? payload.queue : null;
     state.collectionRunner = payload.ok ? payload.runner : null;
+    const pageInfo = state.collectionQueue?.jobPage;
+    if (pageInfo?.page) {
+      state.collectionPage = pageInfo.page;
+    }
   } catch {
     state.collectionQueue = null;
     state.collectionRunner = null;
@@ -1817,11 +1914,26 @@ async function runCollectionQueue() {
     if (!response.ok || !payload.ok) {
       throw new Error(payload.message || "采集任务启动失败");
     }
-    await loadCollectionQueueStatus();
+    await loadCollectionQueueStatus(1);
   } catch (error) {
     els.collectionQueueCaption.textContent = error.message || "采集任务启动失败";
   } finally {
     els.runCollectionQueueButton.disabled = false;
+  }
+}
+
+function setCollectionPage(action) {
+  const page = state.collectionQueue?.jobPage || {};
+  const pageCount = Math.max(1, Number(page.pageCount || 1));
+  const currentPage = Math.min(pageCount, Math.max(1, Number(state.collectionPage || page.page || 1)));
+  const nextPage = {
+    first: 1,
+    prev: Math.max(1, currentPage - 1),
+    next: Math.min(pageCount, currentPage + 1),
+    last: pageCount
+  }[action] || currentPage;
+  if (nextPage !== currentPage) {
+    loadCollectionQueueStatus(nextPage);
   }
 }
 
@@ -1887,8 +1999,7 @@ async function loadSettings(message = "") {
       state.settingsLoaded = true;
       await Promise.all([
         loadResourceCatalog(),
-        loadMonitorStatus(),
-        loadCollectionQueueStatus()
+        loadMonitorStatus()
       ]);
       if (message) {
         updateDirtyState(message);
@@ -2831,7 +2942,7 @@ function renderView() {
   const copy = viewCopy[state.activeView];
   els.pageTitle.textContent = copy.title;
   els.pageSubtitle.textContent = copy.subtitle;
-  const usesDashboardToolbar = !["settings", "alerts", "analysis"].includes(state.activeView);
+  const usesDashboardToolbar = !["settings", "alerts", "analysis", "tasks"].includes(state.activeView);
   els.viewToolbar.hidden = !usesDashboardToolbar;
   els.resetWindowButton.hidden = !usesDashboardToolbar;
   const activePanelView = ["alerts", "analysis"].includes(state.activeView) ? "alert-ai" : state.activeView;
@@ -2858,6 +2969,12 @@ function renderView() {
     renderEnvironmentSettings();
     ensureSettingsLoaded().catch((error) => {
       updateDirtyState(error.message || "设置读取失败");
+    });
+  }
+  if (state.activeView === "tasks") {
+    renderCollectionConsole();
+    loadCollectionQueueStatus(state.collectionPage).catch(() => {
+      renderCollectionConsole();
     });
   }
   if (state.activeView === "alerts") {
@@ -3603,11 +3720,17 @@ function bindEvents() {
   });
 
   els.refreshCollectionQueueButton.addEventListener("click", () => {
-    loadCollectionQueueStatus();
+    loadCollectionQueueStatus(state.collectionPage);
   });
 
   els.runCollectionQueueButton.addEventListener("click", () => {
     runCollectionQueue();
+  });
+
+  document.querySelectorAll("[data-collection-page]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setCollectionPage(button.dataset.collectionPage);
+    });
   });
 
   els.resetSettingsButton.addEventListener("click", () => {

@@ -1067,6 +1067,200 @@ h2 {
   min-width: 980px;
 }
 
+.task-progress-panel {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.task-progress-head {
+  align-items: flex-start;
+}
+
+.task-progress-head h2 {
+  margin: 2px 0 4px;
+}
+
+.overall-task-progress {
+  display: grid;
+  grid-template-columns: minmax(170px, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding: 13px;
+  border: 1px solid #dce5f0;
+  border-radius: var(--radius);
+  background: #fbfcfe;
+}
+
+.overall-task-progress strong,
+.overall-task-progress span {
+  display: block;
+}
+
+.overall-task-progress strong {
+  color: #17202a;
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.overall-task-progress span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.task-progress-track {
+  width: 100%;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e6edf6;
+}
+
+.task-progress-track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #0f766e;
+  transition: width 180ms ease;
+}
+
+.task-progress-list {
+  display: grid;
+  gap: 10px;
+}
+
+.task-progress-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.2fr) minmax(240px, 1fr) minmax(180px, .6fr);
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e4e9f2;
+  border-left: 4px solid #cbd5e1;
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.task-progress-row.completed {
+  border-left-color: #0f766e;
+}
+
+.task-progress-row.running {
+  border-left-color: #2563eb;
+  background: #f8fbff;
+}
+
+.task-progress-row.retry {
+  border-left-color: #b45309;
+  background: #fffbeb;
+}
+
+.task-progress-row.failed {
+  border-left-color: #dc2626;
+  background: #fff7f7;
+}
+
+.task-progress-row.failed .task-progress-track span {
+  background: #dc2626;
+}
+
+.task-progress-row.retry .task-progress-track span {
+  background: #b45309;
+}
+
+.task-progress-row.running .task-progress-track span {
+  background: #2563eb;
+}
+
+.task-progress-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.task-progress-title,
+.task-progress-side {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.task-progress-title strong,
+.task-progress-title small,
+.task-progress-side span,
+.task-progress-side small,
+.task-progress-foot span,
+.task-progress-error {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-progress-title strong {
+  color: #17202a;
+  font-size: 13px;
+}
+
+.task-progress-title small,
+.task-progress-side small,
+.task-progress-foot,
+.task-progress-error {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.task-progress-body {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.task-progress-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-progress-side {
+  justify-self: stretch;
+  padding-left: 8px;
+  border-left: 1px solid #e4e9f2;
+}
+
+.task-progress-side span {
+  color: #253046;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.task-progress-error {
+  grid-column: 1 / -1;
+  padding-top: 8px;
+  border-top: 1px dashed #fecaca;
+  color: #b91c1c;
+}
+
+.task-progress-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.task-progress-pagination > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .monitor-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr));
@@ -2100,6 +2294,18 @@ td {
     grid-column: span 3;
   }
 
+  .task-progress-row {
+    grid-template-columns: minmax(260px, 1fr) minmax(240px, 1fr);
+  }
+
+  .task-progress-side {
+    grid-column: 1 / -1;
+    padding-left: 0;
+    padding-top: 8px;
+    border-left: 0;
+    border-top: 1px solid #e4e9f2;
+  }
+
 }
 
 @media (max-width: 860px) {
@@ -2155,6 +2361,15 @@ td {
     grid-column: span 2;
   }
 
+  .overall-task-progress,
+  .task-progress-row {
+    grid-template-columns: 1fr;
+  }
+
+  .task-progress-side {
+    grid-column: auto;
+  }
+
 }
 
 @media (max-width: 620px) {
@@ -2179,6 +2394,17 @@ td {
   }
 
   .resource-pagination {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .task-progress-pagination,
+  .collection-console-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .task-progress-main {
     align-items: flex-start;
     flex-direction: column;
   }

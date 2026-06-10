@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FB 广告数据看板</title>
-  <link rel="stylesheet" href="/styles.css?v=20260610-3">
-  <link rel="stylesheet" href="/alert-ai.css?v=20260610-3">
-  <script defer src="/vendor/echarts.min.js?v=20260610-3"></script>
+  <link rel="stylesheet" href="/styles.css?v=20260610-4">
+  <link rel="stylesheet" href="/alert-ai.css?v=20260610-4">
+  <script defer src="/vendor/echarts.min.js?v=20260610-4"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -27,6 +27,10 @@
         <button class="nav-item" type="button" data-view="list">
           <i data-lucide="list-filter"></i>
           <span>列表看板</span>
+        </button>
+        <button class="nav-item" type="button" data-view="tasks">
+          <i data-lucide="gauge"></i>
+          <span>任务进度</span>
         </button>
         <button class="nav-item" type="button" data-view="alerts">
           <i data-lucide="bell-ring"></i>
@@ -275,6 +279,61 @@
         <section id="alertAiModule" class="alert-ai-module" aria-label="广告预警与智能 AI 分析系统"></section>
       </section>
 
+      <section class="view-panel" data-view-panel="tasks" hidden>
+        <section class="panel task-progress-panel" aria-labelledby="collectionConsoleTitle">
+          <div class="panel-head task-progress-head">
+            <div>
+              <span class="monitor-kicker">SQLite Job Queue</span>
+              <h2 id="collectionConsoleTitle">任务进度</h2>
+              <span id="collectionQueueCaption">读取中</span>
+            </div>
+            <div class="collection-console-actions">
+              <select id="collectionRunModeSelect" aria-label="采集运行范围">
+                <option value="all">全部</option>
+                <option value="campaigns">广告系列</option>
+                <option value="ads">广告</option>
+              </select>
+              <button class="secondary-button" id="refreshCollectionQueueButton" type="button">
+                <i data-lucide="refresh-cw"></i>
+                <span>刷新</span>
+              </button>
+              <button class="primary-button" id="runCollectionQueueButton" type="button">
+                <i data-lucide="database-zap"></i>
+                <span>投递并运行</span>
+              </button>
+            </div>
+          </div>
+          <div class="collection-console-grid" id="collectionConsoleGrid"></div>
+          <div class="overall-task-progress">
+            <div>
+              <strong id="collectionProgressLabel">0 / 0</strong>
+              <span>整体完成进度</span>
+            </div>
+            <div class="task-progress-track" aria-hidden="true">
+              <span id="collectionProgressFill"></span>
+            </div>
+          </div>
+          <div class="task-progress-list" id="collectionJobsList"></div>
+          <div class="task-progress-pagination">
+            <span id="collectionPageInfo">第 1 / 1 页</span>
+            <div class="resource-page-controls">
+              <button type="button" title="第一页" aria-label="第一页" data-collection-page="first">
+                <i data-lucide="chevrons-left"></i>
+              </button>
+              <button type="button" title="上一页" aria-label="上一页" data-collection-page="prev">
+                <i data-lucide="chevron-left"></i>
+              </button>
+              <button type="button" title="下一页" aria-label="下一页" data-collection-page="next">
+                <i data-lucide="chevron-right"></i>
+              </button>
+              <button type="button" title="最后一页" aria-label="最后一页" data-collection-page="last">
+                <i data-lucide="chevrons-right"></i>
+              </button>
+            </div>
+          </div>
+        </section>
+      </section>
+
       <section class="view-panel" data-view-panel="settings" hidden>
         <section class="panel settings-panel">
           <div class="panel-head">
@@ -303,51 +362,6 @@
           </div>
           <div class="settings-body">
             <div class="monitor-status-strip" id="monitorStatusGrid"></div>
-
-            <section class="collection-console" aria-labelledby="collectionConsoleTitle">
-              <div class="collection-console-head">
-                <div>
-                  <span class="monitor-kicker">SQLite Job Queue</span>
-                  <h3 id="collectionConsoleTitle">采集队列控制台</h3>
-                </div>
-                <div class="collection-console-actions">
-                  <select id="collectionRunModeSelect" aria-label="采集运行范围">
-                    <option value="all">全部</option>
-                    <option value="campaigns">广告系列</option>
-                    <option value="ads">广告</option>
-                  </select>
-                  <button class="secondary-button" id="refreshCollectionQueueButton" type="button">
-                    <i data-lucide="refresh-cw"></i>
-                    <span>刷新</span>
-                  </button>
-                  <button class="primary-button" id="runCollectionQueueButton" type="button">
-                    <i data-lucide="database-zap"></i>
-                    <span>投递并运行</span>
-                  </button>
-                  <span id="collectionQueueCaption">读取中</span>
-                </div>
-              </div>
-              <div class="collection-console-grid" id="collectionConsoleGrid"></div>
-              <div class="table-scroll compact-table collection-job-table">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>状态</th>
-                      <th>层级</th>
-                      <th>ID 数</th>
-                      <th>小时桶</th>
-                      <th>行数</th>
-                      <th>尝试</th>
-                      <th>耗时</th>
-                      <th>限流</th>
-                      <th>更新时间(北京时间)</th>
-                      <th>错误</th>
-                    </tr>
-                  </thead>
-                  <tbody id="collectionJobsBody"></tbody>
-                </table>
-              </div>
-            </section>
 
             <section class="environment-card" aria-labelledby="environmentTitle">
               <div class="environment-head">
@@ -546,7 +560,7 @@
     </main>
   </div>
 
-  <script defer src="/app.js?v=20260610-3"></script>
-  <script defer src="/alert-ai.js?v=20260610-3"></script>
+  <script defer src="/app.js?v=20260610-4"></script>
+  <script defer src="/alert-ai.js?v=20260610-4"></script>
 </body>
 </html>

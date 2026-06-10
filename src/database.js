@@ -304,16 +304,79 @@ function emptyCollectionQueueOverview(queueName = "insights") {
 }
 
 function parseCollectionJob(row) {
+  const objectIds = parseJson(row.object_ids_json, []);
+  const metadata = parseJson(row.metadata_json, {});
   return {
-    ...row,
-    objectIds: parseJson(row.object_ids_json, []),
-    metadata: parseJson(row.metadata_json, {}),
+    id: row.id,
+    queue_name: row.queue_name,
+    status: row.status,
+    object_type: row.object_type,
+    account_id: row.account_id,
+    account_timezone: row.account_timezone,
+    date_start: row.date_start,
+    date_stop: row.date_stop,
+    bucket_key: row.bucket_key,
+    id_count: row.id_count,
+    attempts: row.attempts,
+    max_attempts: row.max_attempts,
+    row_count: row.row_count,
+    raw_row_count: row.raw_row_count,
+    duration_ms: row.duration_ms,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    started_at: row.started_at,
+    completed_at: row.completed_at,
+    next_run_at: row.next_run_at,
+    error: row.error,
+    objectIds: objectIds.slice(0, 4),
+    objectIdTotal: objectIds.length,
+    metadata: {
+      bucket: metadata.bucket || null,
+      batchIndex: metadata.batchIndex || 0,
+      batchMaxSize: metadata.batchMaxSize || 0,
+      lastCode: metadata.lastCode || "",
+      lastHttpStatus: metadata.lastHttpStatus || ""
+    },
     rate_limited: Boolean(row.rate_limited),
     quota_limited: Boolean(row.quota_limited)
   };
 }
 
-function readCollectionQueueOverview({ databaseFile, queueName = "insights", limit = 80 } = {}) {
+function parseCollectionBatch(row) {
+  const requestIds = parseJson(row.request_ids_json, []);
+  const metadata = parseJson(row.metadata_json, {});
+  return {
+    id: row.id,
+    job_id: row.job_id,
+    run_id: row.run_id,
+    kind: row.kind,
+    status: row.status,
+    id_count: row.id_count,
+    item_success_count: row.item_success_count,
+    item_failed_count: row.item_failed_count,
+    row_count: row.row_count,
+    raw_row_count: row.raw_row_count,
+    pages: row.pages,
+    http_status: row.http_status,
+    api_code: row.api_code,
+    body_size: row.body_size,
+    duration_ms: row.duration_ms,
+    error: row.error,
+    started_at: row.started_at,
+    completed_at: row.completed_at,
+    requestIds: requestIds.slice(0, 4),
+    requestIdTotal: requestIds.length,
+    metadata: {
+      bucketKey: metadata.bucketKey || "",
+      dateStart: metadata.dateStart || "",
+      hourlyRange: metadata.hourlyRange || ""
+    },
+    rate_limited: Boolean(row.rate_limited),
+    quota_limited: Boolean(row.quota_limited)
+  };
+}
+
+function readCollectionQueueOverview({ databaseFile, queueName = "insights", limit = 50, offset = 0, page = 1, pageSize = 50 } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return emptyCollectionQueueOverview(queueName);
   }
@@ -370,26 +433,22 @@ function readCollectionQueueOverview({ databaseFile, queueName = "insights", lim
         )
       `).get()
       : {};
+    const normalizedLimit = Math.min(100, Math.max(1, Number.parseInt(limit || pageSize, 10) || 50));
+    const normalizedOffset = Math.max(0, Number.parseInt(offset, 10) || 0);
     const recentJobs = db.prepare(`
       SELECT *
       FROM collection_jobs
       WHERE queue_name = ?
       ORDER BY updated_at DESC, created_at DESC
-      LIMIT ?
-    `).all(queueName, Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 80))).map(parseCollectionJob);
+      LIMIT ? OFFSET ?
+    `).all(queueName, normalizedLimit, normalizedOffset).map(parseCollectionJob);
     const recentBatches = canReadBatches
       ? db.prepare(`
         SELECT *
         FROM collection_job_batches
         ORDER BY completed_at DESC, started_at DESC
         LIMIT ?
-      `).all(Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 80))).map((row) => ({
-        ...row,
-        requestIds: parseJson(row.request_ids_json, []),
-        metadata: parseJson(row.metadata_json, {}),
-        rate_limited: Boolean(row.rate_limited),
-        quota_limited: Boolean(row.quota_limited)
-      }))
+      `).all(normalizedLimit).map(parseCollectionBatch)
       : [];
     const total = Number(totals?.total || 0);
     const completed = Number(totals?.completed || 0);
@@ -403,6 +462,13 @@ function readCollectionQueueOverview({ databaseFile, queueName = "insights", lim
         total,
         completed,
         percent: total ? Math.round((completed / total) * 1000) / 10 : 0
+      },
+      jobPage: {
+        page: Math.max(1, Number.parseInt(page, 10) || 1),
+        pageSize: normalizedLimit,
+        total,
+        pageCount: Math.max(1, Math.ceil(total / normalizedLimit)),
+        offset: normalizedOffset
       },
       totals: {
         rows: Number(totals?.rows || 0),
