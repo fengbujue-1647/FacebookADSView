@@ -13,6 +13,7 @@ import {
   getInsightCoverage,
   readCompletedBucketCoverage,
   readCollectionWatermarks,
+  readCollectionRunFinalStats,
   readResources,
   recoverStaleCollectionJobs,
   writeApiTaskRuns,
@@ -834,16 +835,21 @@ export class SyncService {
     await Promise.all(Array.from({ length: workerCount }, (_, index) => workerLoop(index)));
     const scopedRecords = runId ? records.filter((record) => record.runId === runId) : records;
     const scopedResults = runId ? results.filter((result) => result.runId === runId) : results;
-    const success = scopedRecords.filter((record) => record.status === 'success').length;
-    const failed = scopedRecords.length - success;
-    const retries = scopedRecords.reduce((total, record) => total + Math.max(0, Number(record.attempts || 0) - 1), 0)
-      + scopedRecords.filter((record) => record.queueStatus === 'retry').length;
+    const finalStats = runId ? readCollectionRunFinalStats({ runId, queueName }) : null;
+    const success = finalStats ? finalStats.completed : scopedRecords.filter((record) => record.status === 'success').length;
+    const failed = finalStats ? finalStats.failed : scopedRecords.length - success;
+    const pending = finalStats ? finalStats.pending : 0;
+    const retries = finalStats
+      ? finalStats.retries
+      : scopedRecords.reduce((total, record) => total + Math.max(0, Number(record.attempts || 0) - 1), 0)
+        + scopedRecords.filter((record) => record.queueStatus === 'retry').length;
 
     return {
       stats: {
-        total: scopedRecords.length,
+        total: finalStats?.total || scopedRecords.length,
         success,
         failed,
+        pending,
         retries,
         workerConcurrency: workerCount
       },
@@ -910,9 +916,10 @@ export class SyncService {
       qps,
       timeoutMs
     });
-    queue.stats.total = enqueue.inserted;
-    if (enqueue.inserted && queue.stats.success + queue.stats.failed < enqueue.inserted) {
-      queue.stats.failed += enqueue.inserted - queue.stats.success - queue.stats.failed;
+    queue.stats.total = Math.max(Number(queue.stats.total || 0), enqueue.inserted);
+    const unsettled = queue.stats.total - queue.stats.success - queue.stats.failed - Number(queue.stats.pending || 0);
+    if (unsettled > 0) {
+      queue.stats.pending = Number(queue.stats.pending || 0) + unsettled;
     }
 
     const rawRows = queue.results.flatMap((item) => item.rawRows || []);

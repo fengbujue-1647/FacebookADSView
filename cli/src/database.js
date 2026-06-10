@@ -1514,6 +1514,47 @@ export function readCollectionJobs({
   `).all(...params, Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 100))).map(collectionJobFromRow), databaseFile);
 }
 
+export function readCollectionRunFinalStats({
+  runId = '',
+  queueName = 'insights',
+  databaseFile = config.databaseFile
+} = {}) {
+  const normalizedRunId = String(runId || '').trim();
+  if (!normalizedRunId) return null;
+  return withDatabase((db) => {
+    const row = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN status = 'retry' THEN 1 ELSE 0 END) AS retry,
+        SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+        SUM(CASE WHEN status = 'waiting' THEN 1 ELSE 0 END) AS waiting,
+        SUM(CASE WHEN attempts > 1 THEN attempts - 1 ELSE 0 END) AS retries,
+        SUM(row_count) AS rows,
+        SUM(raw_row_count) AS raw_rows
+      FROM collection_jobs
+      WHERE queue_name = ?
+        AND run_id = ?
+    `).get(queueName, normalizedRunId);
+    const waiting = Number(row?.waiting || 0);
+    const retry = Number(row?.retry || 0);
+    const running = Number(row?.running || 0);
+    return {
+      total: Number(row?.total || 0),
+      completed: Number(row?.completed || 0),
+      failed: Number(row?.failed || 0),
+      pending: waiting + retry + running,
+      waiting,
+      retry,
+      running,
+      retries: Number(row?.retries || 0),
+      rows: Number(row?.rows || 0),
+      rawRows: Number(row?.raw_rows || 0)
+    };
+  }, databaseFile);
+}
+
 export function readCollectionQueueOverview({
   queueName = 'insights',
   limit = 80,

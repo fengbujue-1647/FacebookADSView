@@ -608,6 +608,75 @@ function readCollectionQueueOverview({ databaseFile, queueName = "insights", run
   }
 }
 
+function deleteCollectionRun({ databaseFile, runId, queueName = "insights" } = {}) {
+  const normalizedRunId = String(runId || "").trim();
+  if (!normalizedRunId) {
+    const error = new Error("缺少采集批次 ID");
+    error.statusCode = 400;
+    error.code = "missing_collection_run_id";
+    throw error;
+  }
+  if (!databaseFile || !fs.existsSync(databaseFile)) {
+    return {
+      runId: normalizedRunId,
+      deleted: { jobs: 0, batches: 0 }
+    };
+  }
+
+  const db = new DatabaseSync(databaseFile);
+  try {
+    if (!tableExists(db, "collection_jobs")) {
+      return {
+        runId: normalizedRunId,
+        deleted: { jobs: 0, batches: 0 }
+      };
+    }
+
+    const summary = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status IN ('waiting', 'running', 'retry') THEN 1 ELSE 0 END) AS active
+      FROM collection_jobs
+      WHERE queue_name = ?
+        AND run_id = ?
+    `).get(queueName, normalizedRunId);
+    if (!Number(summary?.total || 0)) {
+      return {
+        runId: normalizedRunId,
+        deleted: { jobs: 0, batches: 0 }
+      };
+    }
+    if (Number(summary?.active || 0) > 0) {
+      const error = new Error("该采集批次仍有等待、运行中或重试任务，不能删除");
+      error.statusCode = 409;
+      error.code = "collection_run_active";
+      throw error;
+    }
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const batches = tableExists(db, "collection_job_batches")
+        ? db.prepare("DELETE FROM collection_job_batches WHERE run_id = ?").run(normalizedRunId).changes
+        : 0;
+      const jobs = db.prepare(`
+        DELETE FROM collection_jobs
+        WHERE queue_name = ?
+          AND run_id = ?
+      `).run(queueName, normalizedRunId).changes;
+      db.exec("COMMIT");
+      return {
+        runId: normalizedRunId,
+        deleted: { jobs, batches }
+      };
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.close();
+  }
+}
+
 function activeStatusSql(alias) {
   return `UPPER(COALESCE(NULLIF(${alias}.effective_status, ''), NULLIF(${alias}.status, ''), NULLIF(${alias}.configured_status, ''))) = 'ACTIVE'`;
 }
@@ -1107,6 +1176,7 @@ module.exports = {
   readLatestInsightData,
   readMonitorOverview,
   readCollectionQueueOverview,
+  deleteCollectionRun,
   readActiveResourceCandidates,
   readAnalysisEntityOptions,
   readInsightRowsForAnalysis

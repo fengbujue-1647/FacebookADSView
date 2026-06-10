@@ -9,6 +9,7 @@ const {
   readLatestInsightData,
   readMonitorOverview,
   readCollectionQueueOverview,
+  deleteCollectionRun,
   readActiveResourceCandidates,
   readAnalysisEntityOptions,
   readInsightRowsForAnalysis
@@ -77,6 +78,7 @@ const analysisReportFile = path.join(alertAiDataDir, "analysis-reports.json");
 const displayTimeZone = DISPLAY_TIME_ZONE;
 const activeResourceAccountId = process.env.ACTIVE_RESOURCE_ACCOUNT_ID || "8462513793771963";
 const activeResourceRefreshIntervalMs = 120 * 60 * 1000;
+const monitorSchedulerIntervalMs = 30 * 1000;
 const alertReportMaxDays = 90;
 const alertReportPromptMaxLength = 1600;
 let activeReportGeneration = false;
@@ -95,10 +97,24 @@ let collectionRunStatus = {
   running: false,
   status: "idle",
   mode: "",
+  trigger_source: "",
   run_id: "",
   last_started_at: "",
   last_completed_at: "",
   exit_code: null,
+  error: ""
+};
+let monitorSchedulerStatus = {
+  enabled: true,
+  running: false,
+  status: "idle",
+  last_checked_at: "",
+  last_started_at: "",
+  last_completed_at: "",
+  last_mode: "",
+  next_due_at: "",
+  due: [],
+  reason: "",
   error: ""
 };
 
@@ -410,7 +426,7 @@ function writeJson(res, statusCode, body) {
 
 function cacheHeaderFor(filePath) {
   const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".html") {
+  if ([".html", ".css", ".js"].includes(ext)) {
     return "no-store";
   }
   return "public, max-age=31536000, immutable";
@@ -1207,7 +1223,7 @@ function normalizeCollectionRunMode(value) {
   return ["all", "campaigns", "ads"].includes(value) ? value : "all";
 }
 
-function startCollectionRun({ mode = "all", concurrency = 0, qps = 0 } = {}) {
+function startCollectionRun({ mode = "all", concurrency = 0, qps = 0, triggerSource = "manual" } = {}) {
   if (collectionRunProcess) {
     return {
       ok: false,
@@ -1240,6 +1256,7 @@ function startCollectionRun({ mode = "all", concurrency = 0, qps = 0 } = {}) {
     running: true,
     status: "running",
     mode: normalizedMode,
+    trigger_source: triggerSource,
     run_id: "",
     last_started_at: new Date().toISOString(),
     last_completed_at: "",
@@ -1253,23 +1270,43 @@ function startCollectionRun({ mode = "all", concurrency = 0, qps = 0 } = {}) {
     windowsHide: true
   });
   collectionRunProcess.on("error", (error) => {
+    const completedAt = new Date().toISOString();
     collectionRunStatus = {
       ...collectionRunStatus,
       running: false,
       status: "failed",
-      last_completed_at: new Date().toISOString(),
+      last_completed_at: completedAt,
       error: error.message
     };
+    if (triggerSource === "scheduler") {
+      monitorSchedulerStatus = {
+        ...monitorSchedulerStatus,
+        running: false,
+        status: "failed",
+        last_completed_at: completedAt,
+        error: error.message
+      };
+    }
     collectionRunProcess = null;
   });
   collectionRunProcess.on("exit", (code) => {
+    const completedAt = new Date().toISOString();
     collectionRunStatus = {
       ...collectionRunStatus,
       running: false,
       status: code === 0 ? "success" : "failed",
-      last_completed_at: new Date().toISOString(),
+      last_completed_at: completedAt,
       exit_code: code
     };
+    if (triggerSource === "scheduler") {
+      monitorSchedulerStatus = {
+        ...monitorSchedulerStatus,
+        running: false,
+        status: code === 0 ? "idle" : "failed",
+        last_completed_at: completedAt,
+        error: code === 0 ? "" : `采集进程退出码 ${code}`
+      };
+    }
     collectionRunProcess = null;
   });
 
@@ -1323,6 +1360,7 @@ function startCollectionQueueResume({ runId, reason = "auto", concurrency = 0, q
     running: true,
     status: "running",
     mode: reason === "startup" ? "恢复当前采集批次" : "续跑当前采集批次",
+    trigger_source: "queue-resume",
     run_id: runId,
     last_started_at: new Date().toISOString(),
     last_completed_at: "",
@@ -1398,6 +1436,183 @@ function scheduleCollectionQueueResume() {
   const bootTimer = setTimeout(() => resume("startup"), 1000);
   bootTimer.unref?.();
   const timer = setInterval(() => resume("interval"), 2000);
+  timer.unref?.();
+}
+
+function parseTimeMs(value) {
+  const ms = Date.parse(value || "");
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function monitorConfigForList(settings, listType) {
+  return listType === "ads" ? settings.adMonitor : settings.campaignMonitor;
+}
+
+function monitorModeForList(listType) {
+  return listType === "ads" ? "ads" : "campaigns";
+}
+
+function monitorHasTargets(config = {}, listType = "campaigns") {
+  if (config.enabled === false) return false;
+  if (listType === "ads") {
+    return Array.isArray(config.adIds) && config.adIds.length > 0;
+  }
+  return Boolean(config.autoActiveCampaigns)
+    || (Array.isArray(config.campaignIds) && config.campaignIds.length > 0)
+    || (Array.isArray(config.accountIds) && config.accountIds.length > 0);
+}
+
+function nextMonitorRunAt(config = {}, latestRun = null) {
+  if (latestRun?.next_run_at) {
+    return latestRun.next_run_at;
+  }
+  const baseMs = parseTimeMs(latestRun?.completed_at || latestRun?.started_at);
+  if (!baseMs) {
+    return new Date(0).toISOString();
+  }
+  const intervalMinutes = Math.max(1, Number(config.intervalMinutes || 60));
+  return new Date(baseMs + intervalMinutes * 60 * 1000).toISOString();
+}
+
+function evaluateMonitorSchedule(now = new Date()) {
+  const settings = readSamplingSettings();
+  const overview = readMonitorOverview({ databaseFile, runLimit: 30 });
+  const recentRuns = overview.recentRuns || [];
+  const nowMs = now.getTime();
+  const plans = ["campaigns", "ads"].map((listType) => {
+    const config = monitorConfigForList(settings, listType) || {};
+    const latestRun = recentRuns.find((run) => run.list_type === listType) || null;
+    const enabled = config.enabled !== false && monitorHasTargets(config, listType);
+    const nextRunAt = enabled ? nextMonitorRunAt(config, latestRun) : "";
+    const due = enabled && (!nextRunAt || parseTimeMs(nextRunAt) <= nowMs);
+    return {
+      list_type: listType,
+      mode: monitorModeForList(listType),
+      enabled,
+      due,
+      interval_minutes: Number(config.intervalMinutes || 0),
+      next_run_at: nextRunAt,
+      latest_status: latestRun?.status || "",
+      latest_completed_at: latestRun?.completed_at || ""
+    };
+  });
+  const due = plans.filter((plan) => plan.due);
+  const nextDueAt = plans
+    .filter((plan) => plan.enabled && plan.next_run_at)
+    .map((plan) => plan.next_run_at)
+    .sort((a, b) => parseTimeMs(a) - parseTimeMs(b))[0] || "";
+  return {
+    plans,
+    due,
+    next_due_at: nextDueAt
+  };
+}
+
+function collectionRunSettingsForMode(mode = "all") {
+  const settings = readSamplingSettings();
+  const pool = [
+    mode === "all" || mode === "campaigns" ? settings.campaignMonitor : null,
+    mode === "all" || mode === "ads" ? settings.adMonitor : null
+  ].filter(Boolean);
+  const fallback = [settings.campaignMonitor, settings.adMonitor].filter(Boolean);
+  const candidates = pool.length ? pool : fallback;
+  return {
+    concurrency: Math.max(...candidates.map((item) => Number(item?.concurrency || 1))),
+    qps: Math.max(...candidates.map((item) => Number(item?.qps || 1)))
+  };
+}
+
+function monitorSchedulerSnapshot() {
+  try {
+    const schedule = evaluateMonitorSchedule();
+    return {
+      ...monitorSchedulerStatus,
+      running: Boolean(collectionRunProcess && collectionRunStatus.trigger_source === "scheduler"),
+      runner: collectionRunStatus,
+      due: schedule.due,
+      plans: schedule.plans,
+      next_due_at: schedule.next_due_at || monitorSchedulerStatus.next_due_at
+    };
+  } catch (error) {
+    return {
+      ...monitorSchedulerStatus,
+      status: "failed",
+      error: error.message
+    };
+  }
+}
+
+function triggerDueMonitorRuns(reason = "interval") {
+  const checkedAt = new Date().toISOString();
+  const schedule = evaluateMonitorSchedule(new Date());
+  const due = schedule.due;
+  monitorSchedulerStatus = {
+    ...monitorSchedulerStatus,
+    enabled: true,
+    last_checked_at: checkedAt,
+    next_due_at: schedule.next_due_at,
+    due,
+    reason,
+    error: ""
+  };
+
+  if (!due.length) {
+    monitorSchedulerStatus = {
+      ...monitorSchedulerStatus,
+      running: false,
+      status: "idle"
+    };
+    return { ok: true, skipped: true, reason: "not_due", schedule };
+  }
+
+  if (collectionRunProcess) {
+    const schedulerOwnedRun = collectionRunStatus.trigger_source === "scheduler";
+    monitorSchedulerStatus = {
+      ...monitorSchedulerStatus,
+      running: schedulerOwnedRun,
+      status: schedulerOwnedRun ? "running" : "blocked",
+      reason: schedulerOwnedRun ? "scheduler_running" : "runner_busy"
+    };
+    return { ok: false, skipped: true, reason: monitorSchedulerStatus.reason, schedule };
+  }
+
+  const mode = due.length > 1 ? "all" : due[0].mode;
+  const settings = collectionRunSettingsForMode(mode);
+  const result = startCollectionRun({
+    mode,
+    concurrency: settings.concurrency,
+    qps: settings.qps,
+    triggerSource: "scheduler"
+  });
+  monitorSchedulerStatus = {
+    ...monitorSchedulerStatus,
+    running: Boolean(result.ok),
+    status: result.ok ? "running" : "failed",
+    last_started_at: result.ok ? result.run.last_started_at : monitorSchedulerStatus.last_started_at,
+    last_mode: mode,
+    error: result.ok ? "" : result.message || result.error || "自动采集触发失败"
+  };
+  return { ...result, schedule };
+}
+
+function scheduleMonitorCollectionTriggers() {
+  const tick = (reason) => {
+    try {
+      triggerDueMonitorRuns(reason);
+    } catch (error) {
+      monitorSchedulerStatus = {
+        ...monitorSchedulerStatus,
+        running: false,
+        status: "failed",
+        last_checked_at: new Date().toISOString(),
+        error: error.message
+      };
+      console.warn(`Monitor scheduler failed: ${error.message}`);
+    }
+  };
+  const bootTimer = setTimeout(() => tick("startup"), 5000);
+  bootTimer.unref?.();
+  const timer = setInterval(() => tick("interval"), monitorSchedulerIntervalMs);
   timer.unref?.();
 }
 
@@ -2867,9 +3082,13 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === "/api/monitor/status") {
     try {
+      const status = readMonitorOverview({ databaseFile });
       writeJson(res, 200, {
         ok: true,
-        status: readMonitorOverview({ databaseFile })
+        status: {
+          ...status,
+          scheduler: monitorSchedulerSnapshot()
+        }
       });
     } catch (error) {
       writeJson(res, 500, {
@@ -2877,6 +3096,21 @@ const server = http.createServer((req, res) => {
         error: "read_monitor_status_failed",
         message: error.message
       });
+    }
+    return;
+  }
+
+  const collectionRunMatch = url.pathname.match(/^\/api\/collection\/queue\/runs\/([^/]+)$/);
+  if (collectionRunMatch && req.method === "DELETE") {
+    try {
+      const runId = decodeURIComponent(collectionRunMatch[1] || "");
+      const result = deleteCollectionRun({ databaseFile, runId });
+      writeJson(res, 200, {
+        ok: true,
+        ...result
+      });
+    } catch (error) {
+      writeApiError(res, error, "delete_collection_run_failed");
     }
     return;
   }
@@ -2918,7 +3152,8 @@ const server = http.createServer((req, res) => {
         const result = startCollectionRun({
           mode: payload.mode,
           concurrency: payload.concurrency,
-          qps: payload.qps
+          qps: payload.qps,
+          triggerSource: "manual"
         });
         writeJson(res, result.statusCode || (result.ok ? 202 : 409), result);
       })
@@ -3110,3 +3345,4 @@ server.listen(port, host, () => {
 
 scheduleActiveResourceRefresh();
 scheduleCollectionQueueResume();
+scheduleMonitorCollectionTriggers();

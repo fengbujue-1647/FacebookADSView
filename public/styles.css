@@ -957,7 +957,7 @@ h2 {
 
 .monitor-status-strip {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -1131,7 +1131,7 @@ h2 {
 
 .collection-run-item {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 5px 8px;
   width: 100%;
   min-width: 0;
@@ -1144,6 +1144,11 @@ h2 {
   cursor: pointer;
 }
 
+.collection-run-item:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 2px;
+}
+
 .collection-run-item:hover,
 .collection-run-item.active {
   border-color: #0f766e;
@@ -1153,6 +1158,36 @@ h2 {
 .collection-run-item .run-badge {
   grid-row: span 3;
   align-self: start;
+}
+
+.collection-run-delete {
+  grid-row: span 3;
+  align-self: start;
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid #d8e2ec;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #8a1f1f;
+  cursor: pointer;
+}
+
+.collection-run-delete:hover:not(:disabled) {
+  border-color: #fecaca;
+  background: #fff5f5;
+}
+
+.collection-run-delete:disabled {
+  color: #aeb9c7;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.collection-run-delete svg {
+  width: 15px;
+  height: 15px;
 }
 
 .collection-run-item strong,
@@ -2525,6 +2560,12 @@ td {
   .collection-run-item .run-badge {
     grid-row: auto;
     width: max-content;
+  }
+
+  .collection-run-delete {
+    grid-row: auto;
+    width: 100%;
+    height: 32px;
   }
 
   .environment-head,

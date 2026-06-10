@@ -31,7 +31,7 @@ function parseIdList(value) {
 
 function logQueuedInsightResult(result) {
   info(`队列任务：${result.queue.stats.total} 个`);
-  info(`成功/失败：${result.queue.stats.success}/${result.queue.stats.failed}`);
+  info(`成功/失败/待重试：${result.queue.stats.success}/${result.queue.stats.failed}/${result.queue.stats.pending || 0}`);
   info(`重试次数：${result.queue.stats.retries}`);
   info(`返回行数：${result.normalizedRows.length}`);
   info(`JSON 输出：${result.jsonPath}`);
@@ -258,9 +258,10 @@ async function runAdMonitorCycle({ service, settings, options = {} }) {
       timeoutMs: parseInteger(options.timeoutMs) || monitor.requestTimeoutMs,
       maxAttempts: parseInteger(options.maxAttempts) || monitor.maxAttempts
     });
-    if (result.queue.stats.failed > 0) {
+    if (result.queue.stats.failed > 0 || result.queue.stats.pending > 0) {
       status = 'partial';
-      errorSummary = summarizeErrors(result.queue.taskRecords);
+      errorSummary = summarizeErrors(result.queue.taskRecords)
+        || (result.queue.stats.pending ? `仍有 ${result.queue.stats.pending} 个任务等待重试` : '');
     }
   } catch (error) {
     status = 'failed';
@@ -346,9 +347,10 @@ async function runCampaignMonitorCycle({ service, settings, options = {} }) {
       timeoutMs: parseInteger(options.timeoutMs) || monitor.requestTimeoutMs,
       maxAttempts: parseInteger(options.maxAttempts) || monitor.maxAttempts
     });
-    if (result.queue.stats.failed > 0) {
+    if (result.queue.stats.failed > 0 || result.queue.stats.pending > 0) {
       status = 'partial';
-      errorSummary = summarizeErrors(result.queue.taskRecords);
+      errorSummary = summarizeErrors(result.queue.taskRecords)
+        || (result.queue.stats.pending ? `仍有 ${result.queue.stats.pending} 个任务等待重试` : '');
     }
   } catch (error) {
     status = 'failed';

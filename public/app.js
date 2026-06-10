@@ -69,6 +69,7 @@ const RESOURCE_LIMITS = {
 const RESOURCE_SELECTED_PAGE_SIZE = 8;
 const COLLECTION_PAGE_SIZE = 50;
 const COLLECTION_REFRESH_INTERVAL_MS = 2000;
+const MONITOR_STATUS_REFRESH_INTERVAL_MS = 15000;
 
 const state = {
   activeView: "chart",
@@ -92,6 +93,7 @@ const state = {
   collectionRunId: "",
   collectionLoading: false,
   collectionRefreshTimer: null,
+  monitorStatusRefreshTimer: null,
   environmentSettings: null,
   environmentError: "",
   resourceCatalog: {
@@ -1384,6 +1386,29 @@ function statusLabel(value) {
   return "未运行";
 }
 
+function schedulerStatusLabel(scheduler = {}) {
+  if (scheduler.running || scheduler.status === "running") return "自动采集中";
+  if (scheduler.status === "blocked") return "等待队列空闲";
+  if (scheduler.status === "failed") return "调度异常";
+  return "自动调度已启用";
+}
+
+function schedulerTileStatus(scheduler = {}) {
+  if (scheduler.running || scheduler.status === "running") return "success";
+  if (scheduler.status === "blocked") return "partial";
+  if (scheduler.status === "failed") return "failed";
+  return "success";
+}
+
+function schedulerStatusMeta(scheduler = {}) {
+  const due = Array.isArray(scheduler.due) ? scheduler.due : [];
+  if (due.length) {
+    const names = due.map((item) => (item.list_type === "ads" ? "List 2" : "List 1")).join("、");
+    return `到期 ${names}`;
+  }
+  return scheduler.next_due_at ? `下次 ${formatIso(scheduler.next_due_at)}` : "等待下一次计划";
+}
+
 function historyLabel(run) {
   const slices = run?.metadata?.slices || [];
   if (slices.length >= 7) return `补全 ${slices.length} 天`;
@@ -1500,6 +1525,7 @@ function renderMonitorStatus() {
   const latestAdRun = (overview?.recentRuns || []).find((run) => run.list_type === "ads");
   const resourceAccountId = state.resourceCatalog?.account_id || ACTIVE_RESOURCE_ACCOUNT_ID;
   const resourceUpdateTime = state.resourceCatalog?.last_synced_at || state.resourceRefresh?.last_completed_at || "";
+  const scheduler = overview?.scheduler || {};
 
   els.monitorStatusGrid.innerHTML = [
     {
@@ -1522,6 +1548,13 @@ function renderMonitorStatus() {
       meta: `账户 ${resourceAccountId} · ${Number(resourceCounts.campaigns?.active || 0)} 个广告系列 · ${Number(resourceCounts.adsets?.active || 0)} 个广告组`,
       updated: updatedAtLabel(resourceUpdateTime),
       status: state.resourceCatalog?.stale ? "partial" : "success"
+    },
+    {
+      title: "自动采集调度",
+      value: schedulerStatusLabel(scheduler),
+      meta: schedulerStatusMeta(scheduler),
+      updated: scheduler.last_checked_at ? `检查 ${formatIso(scheduler.last_checked_at)}` : "检查 -",
+      status: schedulerTileStatus(scheduler)
     }
   ].map((item) => `
     <article class="status-tile ${item.status}">
@@ -1613,6 +1646,14 @@ function collectionRunMeta(run) {
   ].filter(Boolean).join(" · ");
 }
 
+function collectionRunCanDelete(run) {
+  return !["running", "pending"].includes(run?.status)
+    && Number(run?.pendingJobs || 0) === 0
+    && Number(run?.running || 0) === 0
+    && Number(run?.waiting || 0) === 0
+    && Number(run?.retry || 0) === 0;
+}
+
 function renderCollectionRunHistory() {
   if (!els.collectionRunList) return;
   const runs = state.collectionQueue?.runSummaries || [];
@@ -1620,16 +1661,21 @@ function renderCollectionRunHistory() {
   els.collectionRunList.innerHTML = runs.length
     ? runs.map((run) => {
       const active = run.runId === currentRunId;
+      const canDelete = collectionRunCanDelete(run);
       return `
-        <button class="collection-run-item ${active ? "active" : ""}" type="button" data-collection-run-id="${escapeHtml(run.runId)}">
+        <article class="collection-run-item ${active ? "active" : ""}" role="button" tabindex="0" data-collection-run-id="${escapeHtml(run.runId)}">
           <span class="run-badge ${escapeHtml(run.status)}">${escapeHtml(collectionRunStatusText(run.status))}</span>
           <strong>${escapeHtml(collectionRunTitle(run))}</strong>
           <small>${escapeHtml(collectionRunMeta(run))}</small>
           <em>${escapeHtml(formatIso(run.updatedAt || run.createdAt))}</em>
-        </button>
+          <button class="collection-run-delete" type="button" data-delete-collection-run="${escapeHtml(run.runId)}" title="${canDelete ? "删除采集批次" : "运行中或待重试批次不能删除"}" aria-label="删除采集批次" ${canDelete ? "" : "disabled"}>
+            <i data-lucide="trash-2"></i>
+          </button>
+        </article>
       `;
     }).join("")
     : `<div class="empty-inline">还没有历史采集批次。</div>`;
+  scheduleIconRefresh();
 }
 
 function collectionJobProgress(job) {
@@ -1726,6 +1772,10 @@ function renderCollectionConsole() {
     : runner?.last_completed_at
       ? `${runner.status === "success" ? "上次完成" : "上次失败"} · ${formatIso(runner.last_completed_at)}`
       : "空闲";
+  const configuredConcurrency = Math.max(state.samplingSettings.campaignMonitor.concurrency, state.samplingSettings.adMonitor.concurrency);
+  const workerMeta = currentRun
+    ? `${collectionRunStatusText(currentRun.status)} / 配置并发`
+    : "无当前批次";
 
   els.collectionQueueCaption.textContent = queue?.generatedAt
     ? `${runnerLabel} · 自动刷新 ${COLLECTION_REFRESH_INTERVAL_MS / 1000}s · ${formatIsoWithSeconds(queue.generatedAt)}`
@@ -1740,8 +1790,8 @@ function renderCollectionConsole() {
   els.collectionConsoleGrid.innerHTML = [
     {
       title: "当前 worker",
-      value: `${Number(queue?.activeWorkers || 0)} / ${Math.max(state.samplingSettings.campaignMonitor.concurrency, state.samplingSettings.adMonitor.concurrency)}`,
-      meta: "当前批次运行中 / 配置并发"
+      value: `${Number(queue?.activeWorkers || 0)} / ${configuredConcurrency}`,
+      meta: workerMeta
     },
     {
       title: "待处理 / 重试",
@@ -1754,7 +1804,7 @@ function renderCollectionConsole() {
       meta: `${Number(progress.completed || 0)} / ${Number(progress.total || 0)}`
     },
     {
-      title: "失败 / 限流",
+      title: "失败任务 / 限流",
       value: `${Number(counts.failed || 0)} / ${Number(totals.rateLimited || 0)}`,
       meta: `超配额 ${Number(totals.quotaLimited || 0)}`
     },
@@ -2038,6 +2088,34 @@ function selectCollectionRun(runId) {
   loadCollectionQueueStatus(1, state.collectionRunId);
 }
 
+async function deleteCollectionRun(runId) {
+  const normalizedRunId = String(runId || "").trim();
+  if (!normalizedRunId) return;
+  const confirmed = window.confirm("删除这个历史采集批次？只清理队列记录，不删除已写入的 Insights 数据。");
+  if (!confirmed) return;
+  if (els.collectionQueueCaption) {
+    els.collectionQueueCaption.textContent = "正在删除采集批次";
+  }
+  try {
+    const response = await fetch(`/api/collection/queue/runs/${encodeURIComponent(normalizedRunId)}`, {
+      method: "DELETE"
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || "采集批次删除失败");
+    }
+    if (state.collectionRunId === normalizedRunId) {
+      state.collectionRunId = "";
+      state.collectionPage = 1;
+    }
+    await loadCollectionQueueStatus(1, state.collectionRunId);
+  } catch (error) {
+    if (els.collectionQueueCaption) {
+      els.collectionQueueCaption.textContent = error.message || "采集批次删除失败";
+    }
+  }
+}
+
 function stopCollectionAutoRefresh() {
   if (state.collectionRefreshTimer) {
     clearInterval(state.collectionRefreshTimer);
@@ -2059,6 +2137,30 @@ function syncCollectionAutoRefresh() {
     startCollectionAutoRefresh();
   } else {
     stopCollectionAutoRefresh();
+  }
+}
+
+function stopMonitorStatusAutoRefresh() {
+  if (state.monitorStatusRefreshTimer) {
+    clearInterval(state.monitorStatusRefreshTimer);
+    state.monitorStatusRefreshTimer = null;
+  }
+}
+
+function startMonitorStatusAutoRefresh() {
+  if (state.monitorStatusRefreshTimer) return;
+  state.monitorStatusRefreshTimer = setInterval(() => {
+    if (state.activeView === "settings") {
+      loadMonitorStatus();
+    }
+  }, MONITOR_STATUS_REFRESH_INTERVAL_MS);
+}
+
+function syncMonitorStatusAutoRefresh() {
+  if (state.activeView === "settings") {
+    startMonitorStatusAutoRefresh();
+  } else {
+    stopMonitorStatusAutoRefresh();
   }
 }
 
@@ -3082,6 +3184,7 @@ function renderView() {
     panel.classList.toggle("active", active);
   });
   syncCollectionAutoRefresh();
+  syncMonitorStatusAutoRefresh();
 
   if (state.activeView === "chart" && chart) {
     requestAnimationFrame(() => chart.resize());
@@ -3860,9 +3963,25 @@ function bindEvents() {
   });
 
   els.collectionRunList?.addEventListener("click", (event) => {
+    const deleteButton = event.target.closest("[data-delete-collection-run]");
+    if (deleteButton) {
+      event.stopPropagation();
+      if (!deleteButton.disabled) {
+        deleteCollectionRun(deleteButton.dataset.deleteCollectionRun);
+      }
+      return;
+    }
     const button = event.target.closest("[data-collection-run-id]");
     if (!button) return;
     selectCollectionRun(button.dataset.collectionRunId);
+  });
+
+  els.collectionRunList?.addEventListener("keydown", (event) => {
+    if (!["Enter", " "].includes(event.key)) return;
+    const item = event.target.closest("[data-collection-run-id]");
+    if (!item || event.target.closest("[data-delete-collection-run]")) return;
+    event.preventDefault();
+    selectCollectionRun(item.dataset.collectionRunId);
   });
 
   els.resetSettingsButton.addEventListener("click", () => {
