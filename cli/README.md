@@ -110,6 +110,17 @@ npm run monitor-run -- --mode all
 npm run monitor-loop -- --mode all
 ```
 
+## 采集队列与小时桶
+
+- `monitor-run`、`monitor-loop`、`ad-insights`、`campaign-insights` 在 hourly 模式且未显式传 `--date-preset` 时，会先把对象和已结算小时桶规划为 SQLite 持久化 Job，再由 worker 池执行。
+- Job 是队列排队、重试和进度统计单位；单个 Job 内的 API Batch 最多包含 50 个广告系列/广告组/广告 ID。
+- 小时桶按账户 `timezone_name` 计算，只采集已结算桶；当前正在进行中的小时不会入队。
+- 新对象没有水位时检查最近 7 天缺失小时桶；已有水位时从水位日期到最新已结算桶检查缺口。
+- 写入 `insight_rows` 仍按同对象加同小时桶覆盖式 upsert，批量写入在 SQLite 事务内完成。
+- 队列状态、批次指标、完成小时桶和水位分别记录在 `collection_jobs`、`collection_job_batches`、`collection_completed_buckets`、`collection_watermarks`。
+
+本轮评估过 BullMQ/bull-board 和 SQLite 队列库。BullMQ/bull-board 需要 Redis；SQLite 队列库会引入独立 schema 和面板模型，无法直接表达广告小时桶、水位、批次子项校验和限流指标。因此当前实现复用现有 SQLite，不新增依赖。
+
 旧取样监控命令：
 
 ```bash

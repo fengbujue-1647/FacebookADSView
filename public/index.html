@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FB 广告数据看板</title>
-  <link rel="stylesheet" href="/styles.css?v=20260610-2">
-  <link rel="stylesheet" href="/alert-ai.css?v=20260610-2">
-  <script defer src="/vendor/echarts.min.js?v=20260610-2"></script>
+  <link rel="stylesheet" href="/styles.css?v=20260610-3">
+  <link rel="stylesheet" href="/alert-ai.css?v=20260610-3">
+  <script defer src="/vendor/echarts.min.js?v=20260610-3"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -304,6 +304,51 @@
           <div class="settings-body">
             <div class="monitor-status-strip" id="monitorStatusGrid"></div>
 
+            <section class="collection-console" aria-labelledby="collectionConsoleTitle">
+              <div class="collection-console-head">
+                <div>
+                  <span class="monitor-kicker">SQLite Job Queue</span>
+                  <h3 id="collectionConsoleTitle">采集队列控制台</h3>
+                </div>
+                <div class="collection-console-actions">
+                  <select id="collectionRunModeSelect" aria-label="采集运行范围">
+                    <option value="all">全部</option>
+                    <option value="campaigns">广告系列</option>
+                    <option value="ads">广告</option>
+                  </select>
+                  <button class="secondary-button" id="refreshCollectionQueueButton" type="button">
+                    <i data-lucide="refresh-cw"></i>
+                    <span>刷新</span>
+                  </button>
+                  <button class="primary-button" id="runCollectionQueueButton" type="button">
+                    <i data-lucide="database-zap"></i>
+                    <span>投递并运行</span>
+                  </button>
+                  <span id="collectionQueueCaption">读取中</span>
+                </div>
+              </div>
+              <div class="collection-console-grid" id="collectionConsoleGrid"></div>
+              <div class="table-scroll compact-table collection-job-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>状态</th>
+                      <th>层级</th>
+                      <th>ID 数</th>
+                      <th>小时桶</th>
+                      <th>行数</th>
+                      <th>尝试</th>
+                      <th>耗时</th>
+                      <th>限流</th>
+                      <th>更新时间(北京时间)</th>
+                      <th>错误</th>
+                    </tr>
+                  </thead>
+                  <tbody id="collectionJobsBody"></tbody>
+                </table>
+              </div>
+            </section>
+
             <section class="environment-card" aria-labelledby="environmentTitle">
               <div class="environment-head">
                 <div>
@@ -336,6 +381,22 @@
                   <div class="control-group">
                     <label for="campaignResultActionInput">成效口径</label>
                     <input id="campaignResultActionInput" type="text" placeholder="omni_purchase">
+                  </div>
+                  <div class="control-group">
+                    <label for="campaignConcurrencyInput">并发</label>
+                    <input id="campaignConcurrencyInput" type="number" min="1" max="20" step="1">
+                  </div>
+                  <div class="control-group">
+                    <label for="campaignQpsInput">QPS</label>
+                    <input id="campaignQpsInput" type="number" min="1" max="20" step="1">
+                  </div>
+                  <div class="control-group">
+                    <label for="campaignTimeoutInput">超时(ms)</label>
+                    <input id="campaignTimeoutInput" type="number" min="1000" max="60000" step="500">
+                  </div>
+                  <div class="control-group">
+                    <label for="campaignMaxAttemptsInput">最大尝试</label>
+                    <input id="campaignMaxAttemptsInput" type="number" min="1" max="20" step="1">
                   </div>
                   <label class="switch settings-switch wide-switch tooltip-switch" data-tooltip="开启后，List 1 会按监控账户自动拉取账户下 ACTIVE 广告系列；关闭后只使用下方勾选列表。" title="开启后，List 1 会按监控账户自动拉取账户下 ACTIVE 广告系列；关闭后只使用下方勾选列表。">
                     <input id="campaignAutoActiveInput" type="checkbox">
@@ -485,7 +546,7 @@
     </main>
   </div>
 
-  <script defer src="/app.js?v=20260610-2"></script>
-  <script defer src="/alert-ai.js?v=20260610-2"></script>
+  <script defer src="/app.js?v=20260610-3"></script>
+  <script defer src="/alert-ai.js?v=20260610-3"></script>
 </body>
 </html>

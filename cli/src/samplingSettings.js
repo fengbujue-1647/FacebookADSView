@@ -13,7 +13,11 @@ const defaultSamplingSettings = {
     campaignIds: [],
     datePreset: '',
     resultAction: '',
-    hourly: true
+    hourly: true,
+    concurrency: 20,
+    qps: 5,
+    requestTimeoutMs: 7000,
+    maxAttempts: 8
   },
   adMonitor: {
     enabled: true,
@@ -90,7 +94,11 @@ export function normalizeSamplingSettings(input = {}) {
     campaignIds: normalizeIds(campaignInput.campaignIds),
     datePreset: String(campaignInput.datePreset ?? '').trim(),
     resultAction: String(campaignInput.resultAction || activeInput.resultAction || '').trim(),
-    hourly: campaignInput.hourly !== false
+    hourly: campaignInput.hourly !== false,
+    concurrency: clampInteger(campaignInput.concurrency, 20, 1, 20),
+    qps: clampInteger(campaignInput.qps, 5, 1, 20),
+    requestTimeoutMs: clampInteger(campaignInput.requestTimeoutMs, 7000, 1000, 60_000),
+    maxAttempts: clampInteger(campaignInput.maxAttempts, 8, 1, 20)
   };
   const adMonitor = {
     enabled: adInput.enabled ?? targetedInput.enabled ?? defaultSamplingSettings.adMonitor.enabled,

@@ -30,6 +30,41 @@ function isRetryableError(error) {
     || /network|timeout|aborted|abort/i.test(error?.message || '');
 }
 
+function collectItemErrors(value, path = 'data') {
+  if (!value || typeof value !== 'object') return [];
+  const errors = [];
+  if (Object.hasOwn(value, 'code')) {
+    const code = Number(value.code);
+    if (Number.isFinite(code) && code !== 200) {
+      errors.push({
+        path,
+        code: value.code,
+        message: value.msg || value.message || value.error?.message || ''
+      });
+    }
+  }
+  if (value.success === false || value.ok === false) {
+    errors.push({
+      path,
+      code: value.code || value.status || '',
+      message: value.msg || value.message || value.error?.message || ''
+    });
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      errors.push(...collectItemErrors(item, `${path}[${index}]`));
+    });
+    return errors;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'paging' || key === 'summary') continue;
+    if (child && typeof child === 'object') {
+      errors.push(...collectItemErrors(child, `${path}.${key}`));
+    }
+  }
+  return errors;
+}
+
 export class YinoClient {
   constructor({ baseUrl = config.baseUrl } = {}) {
     this.baseUrl = baseUrl;
@@ -274,6 +309,19 @@ export class YinoClient {
       code = result.code;
       httpStatus = result.httpStatus;
       pages += 1;
+      const pageItemErrors = collectItemErrors(payload.data || {}, 'data');
+      if (pageItemErrors.length) {
+        const message = pageItemErrors.slice(0, 3).map((item) => `${item.path}:code=${item.code}`).join(', ');
+        throw new YinoApiError(`批处理子项失败 /api/v1/meta_api/insights: ${message}`, {
+          httpStatus,
+          code: 'BATCH_ITEM_FAILED',
+          requestId: result.requestId || '',
+          bodySize,
+          durationMs,
+          retryable: pageItemErrors.some((item) => Number(item.code) === 429 || Number(item.code) === 203),
+          itemErrors: pageItemErrors
+        });
+      }
 
       const next = payload.data?.paging?.cursors?.after || '';
       if (!next || seen.has(next)) break;

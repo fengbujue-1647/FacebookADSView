@@ -5,9 +5,31 @@ import { YinoClient } from './yinoClient.js';
 import { info, warn } from './logger.js';
 import { normalizeInsight, insightColumns } from './normalizer.js';
 import { outputFile, outputJsonFile, rawFile, writeCsv, writeJson } from './storage.js';
-import { getInsightCoverage, writeApiTaskRuns, writeInsightBatch, writeResources } from './database.js';
+import {
+  claimCollectionJob,
+  completeCollectionJob,
+  enqueueCollectionJobs,
+  failCollectionJob,
+  getInsightCoverage,
+  readCompletedBucketCoverage,
+  readCollectionWatermarks,
+  readResources,
+  recoverStaleCollectionJobs,
+  writeApiTaskRuns,
+  writeCollectionJobBatch,
+  writeInsightBatch,
+  writeResources
+} from './database.js';
 import { runTaskQueue } from './taskQueue.js';
-import { API_FALLBACK_TIME_ZONE, dateRangeDays, normalizeTimeZone, recentSevenDays } from './time.js';
+import {
+  API_FALLBACK_TIME_ZONE,
+  dateRangeDays,
+  enumerateSettledHourBuckets,
+  hourFromHourlyRange,
+  latestSettledHourBucket,
+  normalizeTimeZone,
+  recentSevenDays
+} from './time.js';
 
 const ACCOUNT_FIELDS = [
   'account_id',
@@ -217,6 +239,46 @@ function extractInfoRows(payload) {
   return [];
 }
 
+function createRequestStartLimiter(qps = 5) {
+  const interval = Math.ceil(1000 / Math.max(1, Number(qps || 1)));
+  let nextSlot = 0;
+  return async () => {
+    const now = Date.now();
+    const delay = Math.max(0, nextSlot - now);
+    nextSlot = Math.max(now, nextSlot) + interval;
+    if (delay > 0) await sleep(delay);
+  };
+}
+
+function rateLimitFlags(error = {}) {
+  const text = `${error.message || ''} ${error.code || ''} ${error.httpStatus || ''}`.toLowerCase();
+  return {
+    rateLimited: Number(error.code) === 429 || Number(error.httpStatus) === 429 || /rate.?limit|too many requests|qps|限流/.test(text),
+    quotaLimited: /quota|over.?quota|超配额|配额/.test(text)
+  };
+}
+
+function isRetryableJobError(error = {}) {
+  if (error.retryable === true) return true;
+  if (Number(error.code) === 429 || Number(error.httpStatus) === 429 || Number(error.code) === 203) return true;
+  return /timeout|abort|network|fetch|限流|rate.?limit|temporar/i.test(error.message || '');
+}
+
+function backoffForAttempt(attempt) {
+  return Math.min(15 * 60_000, Math.round(1000 * (2 ** Math.max(0, Number(attempt || 1) - 1))));
+}
+
+function objectIdFromNormalized(row, objectType) {
+  if (objectType === 'campaigns') return String(row.campaign_id || '').trim();
+  if (objectType === 'adsets') return String(row.adset_id || '').trim();
+  return String(row.ad_id || '').trim();
+}
+
+function rowMatchesBucket(row, bucket) {
+  return String(row.date_start || '') === bucket.dateStart
+    && hourFromHourlyRange(row.hourly_stats_aggregated_by_advertiser_time_zone) === bucket.hour;
+}
+
 export class SyncService {
   constructor({ client = new YinoClient(), concurrency = config.concurrency } = {}) {
     this.client = client;
@@ -413,6 +475,489 @@ export class SyncService {
     }
   }
 
+  planHourlyCollectionJobs({
+    sourceRows = [],
+    resourceType = 'ads',
+    accountMap = new Map(),
+    since,
+    until,
+    runId,
+    resultAction = '',
+    source = '',
+    tool = '',
+    outputName = '',
+    maxAttempts = 8
+  } = {}) {
+    const ids = sourceRows.map((row) => String(row.id || '')).filter(Boolean);
+    const watermarks = readCollectionWatermarks({ objectType: resourceType, ids });
+    const groups = new Map();
+    const plannedSlices = [];
+
+    for (const resource of sourceRows) {
+      const objectId = String(resource.id || '').trim();
+      if (!objectId) continue;
+      const sourceTimeZone = sourceTimeZoneFor(resource, accountMap);
+      const latestSettled = latestSettledHourBucket(sourceTimeZone);
+      const recent = recentSevenDays(sourceTimeZone);
+      const watermark = watermarks.get(objectId)?.last_completed_bucket || '';
+      const planSince = since || (watermark ? watermark.slice(0, 10) : recent.since);
+      const planUntil = until || latestSettled.dateStart;
+      const buckets = enumerateSettledHourBuckets({
+        since: planSince,
+        until: planUntil,
+        timeZone: sourceTimeZone
+      });
+      const coverage = readCompletedBucketCoverage({
+        objectType: resourceType,
+        ids: [objectId],
+        bucketKeys: buckets.map((bucket) => bucket.bucketKey)
+      });
+      const covered = coverage.get(objectId) || new Set();
+      const missingBuckets = buckets.filter((bucket) => !covered.has(bucket.bucketKey));
+      const planReason = since && until
+        ? 'manual-range'
+        : watermark
+          ? 'incremental'
+          : 'initial-7d-backfill';
+
+      plannedSlices.push({
+        objectId,
+        sourceTimeZone,
+        reason: planReason,
+        since: planSince,
+        until: planUntil,
+        latestSettledBucket: latestSettled.bucketKey,
+        watermark,
+        bucketCount: buckets.length,
+        missingBucketCount: missingBuckets.length
+      });
+
+      for (const bucket of missingBuckets) {
+        const accountId = String(resource.account_id || '').trim();
+        const groupKey = [
+          resourceType,
+          accountId,
+          sourceTimeZone,
+          bucket.bucketKey
+        ].join('|');
+        if (!groups.has(groupKey)) {
+          groups.set(groupKey, {
+            resourceType,
+            accountId,
+            sourceTimeZone,
+            bucket,
+            resources: []
+          });
+        }
+        groups.get(groupKey).resources.push(resource);
+      }
+    }
+
+    const jobs = [];
+    for (const group of groups.values()) {
+      for (const [batchIndex, batch] of chunks(group.resources, META_BATCH_ID_LIMIT).entries()) {
+        const objectIds = batch.map((row) => String(row.id));
+        const sortedObjectIds = [...objectIds].sort();
+        jobs.push({
+          runId,
+          queueName: 'insights',
+          triggerSource: source || tool || `queue:${resourceType}`,
+          level: resourceType,
+          objectType: resourceType,
+          accountId: group.accountId,
+          accountTimeZone: group.sourceTimeZone,
+          objectIds,
+          dateStart: group.bucket.dateStart,
+          hourlyRange: group.bucket.hourlyRange,
+          bucketKey: group.bucket.bucketKey,
+          bucketStartUtc: group.bucket.bucketStartUtc,
+          bucketEndUtc: group.bucket.bucketEndUtc,
+          maxAttempts,
+          dedupeKey: [
+            resourceType,
+            group.accountId,
+            group.sourceTimeZone,
+            group.bucket.bucketKey,
+            sortedObjectIds.join(',')
+          ].join('|'),
+          metadata: {
+            resultAction,
+            tool,
+            outputName,
+            batchIndex: batchIndex + 1,
+            batchMaxSize: META_BATCH_ID_LIMIT,
+            resources: batch,
+            bucket: group.bucket
+          }
+        });
+      }
+    }
+
+    return {
+      jobs,
+      plannedSlices
+    };
+  }
+
+  async executeCollectionJob(job, { timeoutMs = 7000 } = {}) {
+    const objectIds = job.objectIds || [];
+    const bucket = {
+      dateStart: job.date_start,
+      hour: hourFromHourlyRange(job.hourly_range),
+      hourlyRange: job.hourly_range,
+      bucketKey: job.bucket_key
+    };
+    const metadata = job.metadata || {};
+    const startedAt = new Date().toISOString();
+    const startedMs = Date.now();
+    const resourceRows = Array.isArray(metadata.resources) && metadata.resources.length
+      ? metadata.resources
+      : readResources({
+        getType: job.object_type,
+        ids: objectIds,
+        limit: Math.max(objectIds.length, 1)
+      }).map((row) => resourceIdentity(row, job.object_type));
+    const resourcesById = new Map(resourceRows.map((row) => resourceIdentity(row, job.object_type)).map((row) => [String(row.id), row]));
+    const accountsById = new Map();
+    if (job.account_id) {
+      accountsById.set(String(job.account_id), {
+        account_id: job.account_id,
+        timezone_name: job.account_timezone
+      });
+    }
+
+    const stats = await this.client.getAllInsightsWithStats({
+      id: objectIds,
+      fields: INSIGHT_FIELDS,
+      since: job.date_start,
+      until: job.date_start,
+      breakdowns: HOURLY_BREAKDOWN,
+      timeoutMs
+    });
+    const rawRows = stats.rows
+      .filter((row) => rowMatchesBucket(row, bucket))
+      .map((row) => (objectIds.length === 1 ? { ...row, id: objectIds[0] } : row));
+    const normalizedRows = rawRows.map((row) => normalizeInsight(row, {
+      accountsById,
+      resourcesById,
+      resultAction: metadata.resultAction || ''
+    }));
+    const rowCountByObject = {};
+    for (const row of normalizedRows) {
+      const objectId = objectIdFromNormalized(row, job.object_type);
+      if (!objectId) continue;
+      rowCountByObject[objectId] = (rowCountByObject[objectId] || 0) + 1;
+    }
+
+    const db = writeInsightBatch({
+      source: job.trigger_source || metadata.tool || `queue:${job.object_type}`,
+      level: job.object_type,
+      accountIds: [job.account_id].filter(Boolean),
+      rows: normalizedRows,
+      metadata: {
+        runId: job.run_id,
+        collectionJobId: job.id,
+        bucketKey: job.bucket_key,
+        dateStart: job.date_start,
+        hourlyRange: job.hourly_range,
+        objectIds,
+        resultAction: metadata.resultAction || '',
+        hourly: true,
+        rawRowCount: rawRows.length
+      }
+    });
+    const completedAt = new Date().toISOString();
+    const durationMs = Date.now() - startedMs;
+    writeCollectionJobBatch({
+      jobId: job.id,
+      runId: job.run_id,
+      kind: 'insights',
+      status: 'success',
+      requestIds: stats.requestIds || [],
+      idCount: objectIds.length,
+      itemSuccessCount: objectIds.length,
+      itemFailedCount: 0,
+      rowCount: normalizedRows.length,
+      rawRowCount: rawRows.length,
+      pages: stats.pages || 0,
+      httpStatus: stats.httpStatus,
+      apiCode: stats.code,
+      bodySize: stats.bodySize,
+      durationMs,
+      startedAt,
+      completedAt,
+      metadata: {
+        bucketKey: job.bucket_key,
+        dateStart: job.date_start,
+        hourlyRange: job.hourly_range
+      }
+    });
+    completeCollectionJob({
+      jobId: job.id,
+      rowCount: normalizedRows.length,
+      rawRowCount: rawRows.length,
+      durationMs,
+      rowCountByObject,
+      metadata: {
+        batchId: db.batchId
+      }
+    });
+
+    return {
+      jobId: job.id,
+      runId: job.run_id,
+      objectType: job.object_type,
+      objectIds,
+      status: 'success',
+      attempts: job.attempts,
+      durationMs,
+      rows: normalizedRows.length,
+      rawRows,
+      normalizedRows,
+      db
+    };
+  }
+
+  async runPersistentCollectionQueue({
+    queueName = 'insights',
+    runId = '',
+    concurrency = 20,
+    qps = 5,
+    timeoutMs = 7000
+  } = {}) {
+    recoverStaleCollectionJobs({ queueName });
+    const workerCount = Math.max(1, Number.parseInt(concurrency, 10) || 1);
+    const waitForStartSlot = createRequestStartLimiter(qps);
+    const records = [];
+    const results = [];
+    const workerPrefix = `pid-${process.pid}-${Date.now()}`;
+
+    const workerLoop = async (index) => {
+      const workerId = `${workerPrefix}-${index + 1}`;
+      while (true) {
+        const job = claimCollectionJob({ queueName, workerId });
+        if (!job) break;
+        const startedAt = new Date().toISOString();
+        const startedMs = Date.now();
+        try {
+          await waitForStartSlot();
+          const result = await this.executeCollectionJob(job, { timeoutMs });
+          results.push(result);
+          records.push({
+            taskId: job.id,
+            runId: job.run_id,
+            objectType: job.object_type,
+            objectId: (job.objectIds || []).join(','),
+            label: `${job.objectIds?.length || 0} 个${job.object_type}`,
+            attempts: job.attempts,
+            durationMs: result.durationMs,
+            status: 'success',
+            code: 200,
+            bodySize: 0,
+            rows: result.rows,
+            error: '',
+            startedAt,
+            completedAt: new Date().toISOString(),
+            since: job.date_start,
+            until: job.date_start,
+            sourceTimeZone: job.account_timezone,
+            bucketKey: job.bucket_key
+          });
+        } catch (error) {
+          const durationMs = Date.now() - startedMs;
+          const flags = rateLimitFlags(error);
+          const completedAt = new Date().toISOString();
+          writeCollectionJobBatch({
+            jobId: job.id,
+            runId: job.run_id,
+            kind: 'insights',
+            status: 'failed',
+            idCount: job.objectIds?.length || 0,
+            itemSuccessCount: 0,
+            itemFailedCount: job.objectIds?.length || 0,
+            rowCount: 0,
+            rawRowCount: 0,
+            httpStatus: error.httpStatus || '',
+            apiCode: error.code || '',
+            bodySize: error.bodySize || 0,
+            durationMs,
+            rateLimited: flags.rateLimited,
+            quotaLimited: flags.quotaLimited,
+            error: error.message,
+            startedAt,
+            completedAt,
+            metadata: {
+              bucketKey: job.bucket_key,
+              itemErrors: error.itemErrors || []
+            }
+          });
+          const failed = failCollectionJob({
+            jobId: job.id,
+            error: error.message,
+            durationMs,
+            rateLimited: flags.rateLimited,
+            quotaLimited: flags.quotaLimited,
+            retry: isRetryableJobError(error),
+            backoffMs: backoffForAttempt(job.attempts),
+            metadata: {
+              lastCode: error.code || '',
+              lastHttpStatus: error.httpStatus || ''
+            }
+          });
+          records.push({
+            taskId: job.id,
+            runId: job.run_id,
+            objectType: job.object_type,
+            objectId: (job.objectIds || []).join(','),
+            label: `${job.objectIds?.length || 0} 个${job.object_type}`,
+            attempts: job.attempts,
+            durationMs,
+            status: failed.status === 'retry' ? 'failed' : 'failed',
+            code: error.code || error.httpStatus || '',
+            bodySize: error.bodySize || 0,
+            rows: 0,
+            error: error.message,
+            startedAt,
+            completedAt,
+            since: job.date_start,
+            until: job.date_start,
+            sourceTimeZone: job.account_timezone,
+            bucketKey: job.bucket_key,
+            queueStatus: failed.status,
+            nextAttemptAt: failed.nextAttemptAt
+          });
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: workerCount }, (_, index) => workerLoop(index)));
+    const scopedRecords = runId ? records.filter((record) => record.runId === runId) : records;
+    const scopedResults = runId ? results.filter((result) => result.runId === runId) : results;
+    const success = scopedRecords.filter((record) => record.status === 'success').length;
+    const failed = scopedRecords.length - success;
+    const retries = scopedRecords.reduce((total, record) => total + Math.max(0, Number(record.attempts || 0) - 1), 0)
+      + scopedRecords.filter((record) => record.queueStatus === 'retry').length;
+
+    return {
+      stats: {
+        total: scopedRecords.length,
+        success,
+        failed,
+        retries,
+        workerConcurrency: workerCount
+      },
+      taskRecords: scopedRecords,
+      results: scopedResults
+    };
+  }
+
+  async pullQueuedHourlyInsights(options = {}) {
+    const {
+      ids = [],
+      resources = {},
+      accounts = [],
+      level = 'ads',
+      since,
+      until,
+      resultAction = '',
+      concurrency = 20,
+      qps = 5,
+      timeoutMs = 7000,
+      maxAttempts = 8,
+      source = '',
+      outputName = '',
+      tool = '',
+      maxObjects
+    } = options;
+    const resourceType = resourceTypeForLevel(level);
+    const objectLimit = Number.isFinite(maxObjects)
+      ? maxObjects
+      : Number.POSITIVE_INFINITY;
+    const normalizedIds = normalizeObjectIds(ids, {
+      min: 1,
+      max: objectLimit,
+      label: objectIdLabelForResourceType(resourceType)
+    });
+    const resourceRows = (resources[resourceType] || [])
+      .map((row) => resourceIdentity(row, resourceType))
+      .filter((row) => row.id);
+    const resourceMap = new Map(resourceRows.map((row) => [String(row.id), row]));
+    let sourceRows = normalizedIds.map((id) => resourceMap.get(String(id)) || resourceIdentity({ id, name: id }, resourceType));
+    sourceRows = await this.enrichSourceRowsWithInfo(sourceRows, resourceType);
+    const accountMap = mapById(accounts, 'account_id');
+    const runId = randomUUID();
+    const plan = this.planHourlyCollectionJobs({
+      sourceRows,
+      resourceType,
+      accountMap,
+      since,
+      until,
+      runId,
+      resultAction,
+      source,
+      tool,
+      outputName,
+      maxAttempts
+    });
+    const enqueue = enqueueCollectionJobs({ jobs: plan.jobs });
+
+    info(`持久化采集队列：${resourceType} ${sourceRows.length} 个对象，规划 ${plan.jobs.length} 个 Job，写入 ${enqueue.inserted} 个，跳过 ${enqueue.skipped} 个，并发 ${concurrency}，QPS ${qps}`);
+    const queue = await this.runPersistentCollectionQueue({
+      queueName: 'insights',
+      runId,
+      concurrency,
+      qps,
+      timeoutMs
+    });
+    queue.stats.total = enqueue.inserted;
+    if (enqueue.inserted && queue.stats.success + queue.stats.failed < enqueue.inserted) {
+      queue.stats.failed += enqueue.inserted - queue.stats.success - queue.stats.failed;
+    }
+
+    const rawRows = queue.results.flatMap((item) => item.rawRows || []);
+    const normalizedRows = queue.results.flatMap((item) => item.normalizedRows || []);
+    await writeJson(rawFile(`${tool || resourceType}_persistent_queue`), {
+      runId,
+      plan,
+      enqueue,
+      tasks: queue.taskRecords,
+      rawRows
+    });
+    const baseOutputName = outputName || `facebook_ads_${resourceType}_hourly`;
+    const jsonPath = await writeJson(outputJsonFile(baseOutputName), normalizedRows);
+    const csvPath = await writeCsv(outputFile(baseOutputName), normalizedRows, insightColumns);
+    writeApiTaskRuns({
+      runId,
+      tool: tool || `queue:${resourceType}`,
+      taskRecords: queue.taskRecords,
+      metadata: {
+        since: since || '',
+        until: until || '',
+        hourly: true,
+        persistentQueue: true
+      }
+    });
+
+    return {
+      runId,
+      queue,
+      csvPath,
+      jsonPath,
+      db: {
+        databaseFile: config.databaseFile,
+        batchId: runId,
+        rowCount: normalizedRows.length,
+        completedAt: new Date().toISOString()
+      },
+      rawRows,
+      normalizedRows,
+      tasks: plan.jobs,
+      batchTasks: plan.jobs,
+      slices: plan.plannedSlices,
+      enqueue
+    };
+  }
+
   async pullQueuedInsights({
     ids = [],
     resources = {},
@@ -432,6 +977,26 @@ export class SyncService {
     tool = '',
     maxObjects
   } = {}) {
+    if (hourly && !datePreset) {
+      return this.pullQueuedHourlyInsights({
+        ids,
+        resources,
+        accounts,
+        level,
+        since,
+        until,
+        resultAction,
+        concurrency,
+        qps,
+        timeoutMs,
+        maxAttempts,
+        source,
+        outputName,
+        tool,
+        maxObjects
+      });
+    }
+
     const resourceType = resourceTypeForLevel(level);
     const objectLimit = Number.isFinite(maxObjects)
       ? maxObjects

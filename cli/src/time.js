@@ -118,6 +118,10 @@ function parseDateOnly(value) {
   };
 }
 
+export function parseDateOnlyParts(value) {
+  return parseDateOnly(value);
+}
+
 export function addDaysToDateString(dateString, amount) {
   const parts = parseDateOnly(dateString);
   if (!parts) {
@@ -168,6 +172,87 @@ function hourFromRange(hourlyRange) {
   if (!match) return null;
   const hour = Number(match[1]);
   return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : null;
+}
+
+export function hourFromHourlyRange(hourlyRange) {
+  return hourFromRange(hourlyRange);
+}
+
+export function hourlyRangeForHour(hour) {
+  const value = Number.parseInt(hour, 10);
+  if (!Number.isInteger(value) || value < 0 || value > 23) {
+    throw new Error('小时桶必须是 0-23 的整数');
+  }
+  return `${pad(value)}:00:00 - ${pad(value)}:59:59`;
+}
+
+export function hourBucketKey(dateStart, hour) {
+  const parts = parseDateOnly(dateStart);
+  const value = Number.parseInt(hour, 10);
+  if (!parts || !Number.isInteger(value) || value < 0 || value > 23) {
+    return '';
+  }
+  return `${dateStart}T${pad(value)}:00:00`;
+}
+
+function bucketFromLocalParts(parts, timeZone) {
+  const normalized = normalizeTimeZone(timeZone);
+  const dateStart = `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
+  const hour = Number(parts.hour || 0);
+  const bucketStartUtc = zonedDateTimeToUtc({
+    year: parts.year,
+    month: parts.month,
+    day: parts.day,
+    hour
+  }, normalized);
+  return {
+    dateStart,
+    hour,
+    hourlyRange: hourlyRangeForHour(hour),
+    bucketKey: hourBucketKey(dateStart, hour),
+    bucketStartUtc: bucketStartUtc.toISOString(),
+    bucketEndUtc: new Date(bucketStartUtc.getTime() + 60 * 60 * 1000).toISOString(),
+    sourceTimeZone: normalized
+  };
+}
+
+export function latestSettledHourBucket(timeZone = API_FALLBACK_TIME_ZONE, now = new Date()) {
+  const normalized = normalizeTimeZone(timeZone);
+  const localNow = datePartsInTimeZone(now, normalized);
+  const currentHourUtc = zonedDateTimeToUtc({
+    year: localNow.year,
+    month: localNow.month,
+    day: localNow.day,
+    hour: localNow.hour
+  }, normalized);
+  const settledInstant = new Date(currentHourUtc.getTime() - 60 * 60 * 1000);
+  return bucketFromLocalParts(datePartsInTimeZone(settledInstant, normalized), normalized);
+}
+
+export function enumerateSettledHourBuckets({
+  since,
+  until,
+  timeZone = API_FALLBACK_TIME_ZONE,
+  now = new Date()
+} = {}) {
+  const normalized = normalizeTimeZone(timeZone);
+  const days = dateRangeDays(since, until);
+  const latest = latestSettledHourBucket(normalized, now);
+  const latestUtc = new Date(latest.bucketStartUtc).getTime();
+  const buckets = [];
+
+  for (const day of days) {
+    const parts = parseDateOnly(day.since);
+    if (!parts) continue;
+    for (let hour = 0; hour < 24; hour += 1) {
+      const bucket = bucketFromLocalParts({ ...parts, hour }, normalized);
+      if (new Date(bucket.bucketStartUtc).getTime() <= latestUtc) {
+        buckets.push(bucket);
+      }
+    }
+  }
+
+  return buckets;
 }
 
 export function dateStartInDisplayTimeZone(dateStart, sourceTimeZone = API_FALLBACK_TIME_ZONE) {

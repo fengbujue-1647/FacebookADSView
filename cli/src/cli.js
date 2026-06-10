@@ -341,10 +341,10 @@ async function runCampaignMonitorCycle({ service, settings, options = {} }) {
       until: options.until,
       resultAction: options.resultAction || monitor.resultAction,
       hourly: options.daily ? false : monitor.hourly,
-      concurrency: parseInteger(options.concurrency) || 20,
-      qps: parseInteger(options.qps) || 5,
-      timeoutMs: parseInteger(options.timeoutMs) || 7000,
-      maxAttempts: parseInteger(options.maxAttempts) || 8
+      concurrency: parseInteger(options.concurrency) || monitor.concurrency,
+      qps: parseInteger(options.qps) || monitor.qps,
+      timeoutMs: parseInteger(options.timeoutMs) || monitor.requestTimeoutMs,
+      maxAttempts: parseInteger(options.maxAttempts) || monitor.maxAttempts
     });
     if (result.queue.stats.failed > 0) {
       status = 'partial';
@@ -492,7 +492,11 @@ async function bootstrapMonitorSettings(options = {}) {
     autoActiveCampaigns: false,
     campaignIds: selectedCampaigns,
     datePreset: '',
-    hourly: true
+    hourly: true,
+    concurrency: 20,
+    qps: 5,
+    requestTimeoutMs: 7000,
+    maxAttempts: 8
   };
   settings.adMonitor = {
     ...settings.adMonitor,

@@ -253,6 +253,115 @@ function createSchema(db) {
       updated_at TEXT NOT NULL,
       metadata_json TEXT NOT NULL DEFAULT '{}'
     );
+
+    CREATE TABLE IF NOT EXISTS collection_jobs (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL DEFAULT '',
+      queue_name TEXT NOT NULL DEFAULT 'insights',
+      trigger_source TEXT NOT NULL DEFAULT '',
+      level TEXT NOT NULL DEFAULT '',
+      object_type TEXT NOT NULL DEFAULT '',
+      account_id TEXT NOT NULL DEFAULT '',
+      account_timezone TEXT NOT NULL DEFAULT '',
+      object_ids_json TEXT NOT NULL DEFAULT '[]',
+      id_count INTEGER NOT NULL DEFAULT 0,
+      date_start TEXT NOT NULL DEFAULT '',
+      hourly_range TEXT NOT NULL DEFAULT '',
+      bucket_key TEXT NOT NULL DEFAULT '',
+      bucket_start_utc TEXT NOT NULL DEFAULT '',
+      bucket_end_utc TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'waiting',
+      priority INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 8,
+      next_attempt_at TEXT NOT NULL DEFAULT '',
+      locked_at TEXT NOT NULL DEFAULT '',
+      locked_by TEXT NOT NULL DEFAULT '',
+      started_at TEXT NOT NULL DEFAULT '',
+      completed_at TEXT NOT NULL DEFAULT '',
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      row_count INTEGER NOT NULL DEFAULT 0,
+      raw_row_count INTEGER NOT NULL DEFAULT 0,
+      rate_limited INTEGER NOT NULL DEFAULT 0,
+      quota_limited INTEGER NOT NULL DEFAULT 0,
+      error TEXT NOT NULL DEFAULT '',
+      dedupe_key TEXT NOT NULL DEFAULT '',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_collection_jobs_status
+      ON collection_jobs(queue_name, status, next_attempt_at, priority, created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_collection_jobs_run
+      ON collection_jobs(run_id, status, updated_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_collection_jobs_bucket
+      ON collection_jobs(object_type, account_id, bucket_key);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_jobs_open_dedupe
+      ON collection_jobs(dedupe_key)
+      WHERE dedupe_key <> '' AND status IN ('waiting', 'retry', 'running');
+
+    CREATE TABLE IF NOT EXISTS collection_job_batches (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      run_id TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL DEFAULT 'insights',
+      status TEXT NOT NULL DEFAULT '',
+      request_ids_json TEXT NOT NULL DEFAULT '[]',
+      id_count INTEGER NOT NULL DEFAULT 0,
+      item_success_count INTEGER NOT NULL DEFAULT 0,
+      item_failed_count INTEGER NOT NULL DEFAULT 0,
+      row_count INTEGER NOT NULL DEFAULT 0,
+      raw_row_count INTEGER NOT NULL DEFAULT 0,
+      pages INTEGER NOT NULL DEFAULT 0,
+      http_status TEXT NOT NULL DEFAULT '',
+      api_code TEXT NOT NULL DEFAULT '',
+      body_size INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      rate_limited INTEGER NOT NULL DEFAULT 0,
+      quota_limited INTEGER NOT NULL DEFAULT 0,
+      error TEXT NOT NULL DEFAULT '',
+      started_at TEXT NOT NULL DEFAULT '',
+      completed_at TEXT NOT NULL DEFAULT '',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY (job_id) REFERENCES collection_jobs(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_collection_job_batches_job
+      ON collection_job_batches(job_id, completed_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_collection_job_batches_status
+      ON collection_job_batches(status, completed_at DESC);
+
+    CREATE TABLE IF NOT EXISTS collection_completed_buckets (
+      object_type TEXT NOT NULL,
+      object_id TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      account_timezone TEXT NOT NULL DEFAULT '',
+      bucket_key TEXT NOT NULL,
+      date_start TEXT NOT NULL DEFAULT '',
+      hourly_range TEXT NOT NULL DEFAULT '',
+      completed_at TEXT NOT NULL,
+      row_count INTEGER NOT NULL DEFAULT 0,
+      job_id TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (object_type, object_id, bucket_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_collection_completed_buckets_object
+      ON collection_completed_buckets(object_type, object_id, bucket_key);
+
+    CREATE TABLE IF NOT EXISTS collection_watermarks (
+      object_type TEXT NOT NULL,
+      object_id TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      account_timezone TEXT NOT NULL DEFAULT '',
+      last_completed_bucket TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (object_type, object_id)
+    );
   `);
   migrateInsightColumns(db);
 }
@@ -486,6 +595,14 @@ export function writeResources({
 
 function placeholders(items) {
   return items.map(() => '?').join(', ');
+}
+
+function chunkItems(items, size) {
+  const result = [];
+  for (let index = 0; index < items.length; index += size) {
+    result.push(items.slice(index, index + size));
+  }
+  return result;
 }
 
 function parseJson(value, fallback) {
@@ -833,6 +950,652 @@ export function readMonitorOverview({
       taskSummary,
       resourceCounts,
       activeCampaigns
+    };
+  }, databaseFile);
+}
+
+function collectionJobFromRow(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    objectIds: parseJson(row.object_ids_json, []),
+    metadata: parseJson(row.metadata_json, {}),
+    rate_limited: Boolean(row.rate_limited),
+    quota_limited: Boolean(row.quota_limited)
+  };
+}
+
+function normalizeJobStatus(status) {
+  return ['waiting', 'running', 'completed', 'failed', 'retry'].includes(status) ? status : 'waiting';
+}
+
+function jobObjectIds(job) {
+  return Array.isArray(job?.objectIds)
+    ? job.objectIds.map(String).filter(Boolean)
+    : parseJson(job?.object_ids_json, []).map(String).filter(Boolean);
+}
+
+function collectionIdColumn(objectType) {
+  if (objectType === 'campaigns') return 'campaign_id';
+  if (objectType === 'adsets') return 'adset_id';
+  return 'ad_id';
+}
+
+export function enqueueCollectionJobs({
+  jobs = [],
+  databaseFile = config.databaseFile
+} = {}) {
+  if (!jobs.length) {
+    return { inserted: 0, skipped: 0, total: 0 };
+  }
+
+  const now = new Date().toISOString();
+  return withDatabase((db) => runInTransaction(db, () => {
+    const statement = db.prepare(`
+      INSERT OR IGNORE INTO collection_jobs (
+        id,
+        run_id,
+        queue_name,
+        trigger_source,
+        level,
+        object_type,
+        account_id,
+        account_timezone,
+        object_ids_json,
+        id_count,
+        date_start,
+        hourly_range,
+        bucket_key,
+        bucket_start_utc,
+        bucket_end_utc,
+        status,
+        priority,
+        attempts,
+        max_attempts,
+        next_attempt_at,
+        locked_at,
+        locked_by,
+        started_at,
+        completed_at,
+        duration_ms,
+        row_count,
+        raw_row_count,
+        rate_limited,
+        quota_limited,
+        error,
+        dedupe_key,
+        metadata_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    let inserted = 0;
+    for (const job of jobs) {
+      const objectIds = [...new Set((job.objectIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+      const result = statement.run(
+        job.id || randomUUID(),
+        toText(job.runId),
+        toText(job.queueName || 'insights'),
+        toText(job.triggerSource || job.source),
+        toText(job.level || job.objectType),
+        toText(job.objectType || job.level),
+        toText(job.accountId),
+        toText(job.accountTimeZone),
+        JSON.stringify(objectIds),
+        objectIds.length,
+        toText(job.dateStart),
+        toText(job.hourlyRange),
+        toText(job.bucketKey),
+        toText(job.bucketStartUtc),
+        toText(job.bucketEndUtc),
+        normalizeJobStatus(job.status),
+        toNumber(job.priority),
+        0,
+        toNumber(job.maxAttempts || 8),
+        toText(job.nextAttemptAt),
+        '',
+        '',
+        '',
+        '',
+        0,
+        0,
+        0,
+        0,
+        0,
+        '',
+        toText(job.dedupeKey),
+        JSON.stringify(job.metadata || {}),
+        now,
+        now
+      );
+      inserted += Number(result.changes || 0);
+    }
+
+    return {
+      inserted,
+      skipped: jobs.length - inserted,
+      total: jobs.length,
+      databaseFile
+    };
+  }), databaseFile);
+}
+
+export function recoverStaleCollectionJobs({
+  queueName = 'insights',
+  staleAfterMs = 30 * 60 * 1000,
+  databaseFile = config.databaseFile
+} = {}) {
+  const threshold = new Date(Date.now() - staleAfterMs).toISOString();
+  const now = new Date().toISOString();
+  return withDatabase((db) => {
+    const result = db.prepare(`
+      UPDATE collection_jobs
+      SET status = 'retry',
+        next_attempt_at = ?,
+        locked_at = '',
+        locked_by = '',
+        error = CASE WHEN error = '' THEN '进程重启或 worker 超时，已恢复为重试' ELSE error END,
+        updated_at = ?
+      WHERE queue_name = ?
+        AND status = 'running'
+        AND locked_at <> ''
+        AND locked_at < ?
+    `).run(now, now, queueName, threshold);
+    return { recovered: Number(result.changes || 0), databaseFile };
+  }, databaseFile);
+}
+
+export function claimCollectionJob({
+  queueName = 'insights',
+  workerId = '',
+  databaseFile = config.databaseFile
+} = {}) {
+  const now = new Date().toISOString();
+  return withDatabase((db) => runInTransaction(db, () => {
+    const row = db.prepare(`
+      SELECT *
+      FROM collection_jobs
+      WHERE queue_name = ?
+        AND status IN ('waiting', 'retry')
+        AND (next_attempt_at = '' OR next_attempt_at <= ?)
+      ORDER BY priority DESC, bucket_start_utc, created_at
+      LIMIT 1
+    `).get(queueName, now);
+
+    if (!row) return null;
+
+    db.prepare(`
+      UPDATE collection_jobs
+      SET status = 'running',
+        attempts = attempts + 1,
+        started_at = CASE WHEN started_at = '' THEN ? ELSE started_at END,
+        locked_at = ?,
+        locked_by = ?,
+        updated_at = ?,
+        error = ''
+      WHERE id = ?
+    `).run(now, now, workerId, now, row.id);
+
+    return collectionJobFromRow({
+      ...row,
+      status: 'running',
+      attempts: Number(row.attempts || 0) + 1,
+      started_at: row.started_at || now,
+      locked_at: now,
+      locked_by: workerId,
+      updated_at: now,
+      error: ''
+    });
+  }), databaseFile);
+}
+
+export function writeCollectionJobBatch({
+  jobId,
+  runId = '',
+  kind = 'insights',
+  status = '',
+  requestIds = [],
+  idCount = 0,
+  itemSuccessCount = 0,
+  itemFailedCount = 0,
+  rowCount = 0,
+  rawRowCount = 0,
+  pages = 0,
+  httpStatus = '',
+  apiCode = '',
+  bodySize = 0,
+  durationMs = 0,
+  rateLimited = false,
+  quotaLimited = false,
+  error = '',
+  startedAt = '',
+  completedAt = '',
+  metadata = {},
+  databaseFile = config.databaseFile
+} = {}) {
+  if (!jobId) {
+    throw new Error('写入批处理指标缺少 jobId');
+  }
+  return withDatabase((db) => {
+    db.prepare(`
+      INSERT INTO collection_job_batches (
+        id,
+        job_id,
+        run_id,
+        kind,
+        status,
+        request_ids_json,
+        id_count,
+        item_success_count,
+        item_failed_count,
+        row_count,
+        raw_row_count,
+        pages,
+        http_status,
+        api_code,
+        body_size,
+        duration_ms,
+        rate_limited,
+        quota_limited,
+        error,
+        started_at,
+        completed_at,
+        metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(),
+      jobId,
+      toText(runId),
+      toText(kind),
+      toText(status),
+      JSON.stringify(requestIds || []),
+      toNumber(idCount),
+      toNumber(itemSuccessCount),
+      toNumber(itemFailedCount),
+      toNumber(rowCount),
+      toNumber(rawRowCount),
+      toNumber(pages),
+      toText(httpStatus),
+      toText(apiCode),
+      toNumber(bodySize),
+      toNumber(durationMs),
+      rateLimited ? 1 : 0,
+      quotaLimited ? 1 : 0,
+      toText(error),
+      toText(startedAt),
+      toText(completedAt),
+      JSON.stringify(metadata || {})
+    );
+    return { databaseFile };
+  }, databaseFile);
+}
+
+export function completeCollectionJob({
+  jobId,
+  rowCount = 0,
+  rawRowCount = 0,
+  durationMs = 0,
+  rowCountByObject = {},
+  metadata = {},
+  databaseFile = config.databaseFile
+} = {}) {
+  const completedAt = new Date().toISOString();
+  return withDatabase((db) => runInTransaction(db, () => {
+    const job = collectionJobFromRow(db.prepare('SELECT * FROM collection_jobs WHERE id = ?').get(jobId));
+    if (!job) {
+      throw new Error(`未找到采集 Job：${jobId}`);
+    }
+
+    db.prepare(`
+      UPDATE collection_jobs
+      SET status = 'completed',
+        completed_at = ?,
+        duration_ms = ?,
+        row_count = ?,
+        raw_row_count = ?,
+        rate_limited = 0,
+        quota_limited = 0,
+        locked_at = '',
+        locked_by = '',
+        next_attempt_at = '',
+        error = '',
+        metadata_json = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      completedAt,
+      toNumber(durationMs),
+      toNumber(rowCount),
+      toNumber(rawRowCount),
+      JSON.stringify({ ...(job.metadata || {}), ...(metadata || {}) }),
+      completedAt,
+      jobId
+    );
+
+    const completedBucket = db.prepare(`
+      INSERT INTO collection_completed_buckets (
+        object_type,
+        object_id,
+        account_id,
+        account_timezone,
+        bucket_key,
+        date_start,
+        hourly_range,
+        completed_at,
+        row_count,
+        job_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (object_type, object_id, bucket_key)
+      DO UPDATE SET
+        account_id = excluded.account_id,
+        account_timezone = excluded.account_timezone,
+        date_start = excluded.date_start,
+        hourly_range = excluded.hourly_range,
+        completed_at = excluded.completed_at,
+        row_count = excluded.row_count,
+        job_id = excluded.job_id
+    `);
+    const watermark = db.prepare(`
+      INSERT INTO collection_watermarks (
+        object_type,
+        object_id,
+        account_id,
+        account_timezone,
+        last_completed_bucket,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (object_type, object_id)
+      DO UPDATE SET
+        account_id = excluded.account_id,
+        account_timezone = excluded.account_timezone,
+        last_completed_bucket = CASE
+          WHEN excluded.last_completed_bucket > collection_watermarks.last_completed_bucket
+          THEN excluded.last_completed_bucket
+          ELSE collection_watermarks.last_completed_bucket
+        END,
+        updated_at = excluded.updated_at
+    `);
+
+    for (const objectId of jobObjectIds(job)) {
+      const objectRowCount = Number(rowCountByObject[String(objectId)] || 0);
+      completedBucket.run(
+        job.object_type,
+        objectId,
+        job.account_id,
+        job.account_timezone,
+        job.bucket_key,
+        job.date_start,
+        job.hourly_range,
+        completedAt,
+        objectRowCount,
+        jobId
+      );
+      watermark.run(
+        job.object_type,
+        objectId,
+        job.account_id,
+        job.account_timezone,
+        job.bucket_key,
+        completedAt
+      );
+    }
+
+    return {
+      jobId,
+      status: 'completed',
+      rowCount,
+      completedAt,
+      databaseFile
+    };
+  }), databaseFile);
+}
+
+export function failCollectionJob({
+  jobId,
+  error = '',
+  durationMs = 0,
+  rateLimited = false,
+  quotaLimited = false,
+  retry = true,
+  backoffMs = 0,
+  metadata = {},
+  databaseFile = config.databaseFile
+} = {}) {
+  const updatedAt = new Date().toISOString();
+  return withDatabase((db) => runInTransaction(db, () => {
+    const job = collectionJobFromRow(db.prepare('SELECT * FROM collection_jobs WHERE id = ?').get(jobId));
+    if (!job) {
+      throw new Error(`未找到采集 Job：${jobId}`);
+    }
+    const shouldRetry = retry && Number(job.attempts || 0) < Number(job.max_attempts || 1);
+    const status = shouldRetry ? 'retry' : 'failed';
+    const nextAttemptAt = shouldRetry
+      ? new Date(Date.now() + Math.max(1000, Number(backoffMs || 0))).toISOString()
+      : '';
+
+    db.prepare(`
+      UPDATE collection_jobs
+      SET status = ?,
+        duration_ms = ?,
+        rate_limited = ?,
+        quota_limited = ?,
+        locked_at = '',
+        locked_by = '',
+        next_attempt_at = ?,
+        completed_at = CASE WHEN ? = 'failed' THEN ? ELSE completed_at END,
+        error = ?,
+        metadata_json = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      status,
+      toNumber(durationMs),
+      rateLimited ? 1 : 0,
+      quotaLimited ? 1 : 0,
+      nextAttemptAt,
+      status,
+      updatedAt,
+      toText(error),
+      JSON.stringify({ ...(job.metadata || {}), ...(metadata || {}) }),
+      updatedAt,
+      jobId
+    );
+
+    return {
+      jobId,
+      status,
+      nextAttemptAt,
+      databaseFile
+    };
+  }), databaseFile);
+}
+
+export function readCollectionWatermarks({
+  objectType = 'ads',
+  ids = [],
+  databaseFile = config.databaseFile
+} = {}) {
+  const normalizedIds = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!normalizedIds.length) return new Map();
+
+  return withDatabase((db) => {
+    const rows = db.prepare(`
+      SELECT *
+      FROM collection_watermarks
+      WHERE object_type = ?
+        AND object_id IN (${placeholders(normalizedIds)})
+    `).all(objectType, ...normalizedIds);
+    return new Map(rows.map((row) => [String(row.object_id), row]));
+  }, databaseFile);
+}
+
+export function readCompletedBucketCoverage({
+  objectType = 'ads',
+  ids = [],
+  bucketKeys = [],
+  databaseFile = config.databaseFile
+} = {}) {
+  const normalizedIds = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
+  const normalizedBuckets = [...new Set(bucketKeys.map((key) => String(key || '').trim()).filter(Boolean))];
+  const coverage = new Map(normalizedIds.map((id) => [id, new Set()]));
+  if (!normalizedIds.length || !normalizedBuckets.length) return coverage;
+
+  return withDatabase((db) => {
+    const idColumn = collectionIdColumn(objectType);
+    for (const bucketChunk of chunkItems(normalizedBuckets, 700)) {
+      const completedRows = db.prepare(`
+        SELECT object_id, bucket_key
+        FROM collection_completed_buckets
+        WHERE object_type = ?
+          AND object_id IN (${placeholders(normalizedIds)})
+          AND bucket_key IN (${placeholders(bucketChunk)})
+      `).all(objectType, ...normalizedIds, ...bucketChunk);
+
+      for (const row of completedRows) {
+        coverage.get(String(row.object_id))?.add(String(row.bucket_key));
+      }
+
+      const insightRows = db.prepare(`
+        SELECT ${idColumn} AS object_id, hour_start AS bucket_key
+        FROM insight_rows
+        WHERE ${idColumn} IN (${placeholders(normalizedIds)})
+          AND hour_start IN (${placeholders(bucketChunk)})
+          AND hour_start <> ''
+        GROUP BY ${idColumn}, hour_start
+      `).all(...normalizedIds, ...bucketChunk);
+
+      for (const row of insightRows) {
+        coverage.get(String(row.object_id))?.add(String(row.bucket_key));
+      }
+    }
+
+    return coverage;
+  }, databaseFile);
+}
+
+export function readCollectionJobs({
+  runId = '',
+  status = '',
+  limit = 100,
+  databaseFile = config.databaseFile
+} = {}) {
+  const clauses = [];
+  const params = [];
+  if (runId) {
+    clauses.push('run_id = ?');
+    params.push(runId);
+  }
+  if (status) {
+    clauses.push('status = ?');
+    params.push(status);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  return withDatabase((db) => db.prepare(`
+    SELECT *
+    FROM collection_jobs
+    ${where}
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT ?
+  `).all(...params, Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 100))).map(collectionJobFromRow), databaseFile);
+}
+
+export function readCollectionQueueOverview({
+  queueName = 'insights',
+  limit = 80,
+  databaseFile = config.databaseFile
+} = {}) {
+  return withDatabase((db) => {
+    const statusRows = db.prepare(`
+      SELECT status, COUNT(*) AS count
+      FROM collection_jobs
+      WHERE queue_name = ?
+      GROUP BY status
+    `).all(queueName);
+    const statusCounts = Object.fromEntries(['waiting', 'running', 'completed', 'failed', 'retry'].map((key) => [key, 0]));
+    for (const row of statusRows) {
+      statusCounts[row.status] = Number(row.count || 0);
+    }
+
+    const totals = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+        SUM(row_count) AS rows,
+        SUM(raw_row_count) AS raw_rows,
+        SUM(CASE WHEN rate_limited = 1 THEN 1 ELSE 0 END) AS rate_limited,
+        SUM(CASE WHEN quota_limited = 1 THEN 1 ELSE 0 END) AS quota_limited
+      FROM collection_jobs
+      WHERE queue_name = ?
+    `).get(queueName);
+    const activeWorkers = db.prepare(`
+      SELECT COUNT(DISTINCT locked_by) AS count
+      FROM collection_jobs
+      WHERE queue_name = ?
+        AND status = 'running'
+        AND locked_by <> ''
+    `).get(queueName);
+    const recentBatch = db.prepare(`
+      SELECT
+        AVG(duration_ms) AS avg_duration_ms,
+        COUNT(*) AS total,
+        SUM(CASE WHEN rate_limited = 1 THEN 1 ELSE 0 END) AS rate_limited,
+        SUM(CASE WHEN quota_limited = 1 THEN 1 ELSE 0 END) AS quota_limited
+      FROM (
+        SELECT duration_ms, rate_limited, quota_limited
+        FROM collection_job_batches
+        WHERE kind = 'insights'
+          AND completed_at <> ''
+        ORDER BY completed_at DESC
+        LIMIT 50
+      )
+    `).get();
+    const recentJobs = db.prepare(`
+      SELECT *
+      FROM collection_jobs
+      WHERE queue_name = ?
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT ?
+    `).all(queueName, Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 80))).map(collectionJobFromRow);
+    const recentBatches = db.prepare(`
+      SELECT *
+      FROM collection_job_batches
+      ORDER BY completed_at DESC, started_at DESC
+      LIMIT ?
+    `).all(Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 80))).map((row) => ({
+      ...row,
+      requestIds: parseJson(row.request_ids_json, []),
+      metadata: parseJson(row.metadata_json, {}),
+      rate_limited: Boolean(row.rate_limited),
+      quota_limited: Boolean(row.quota_limited)
+    }));
+
+    const total = Number(totals?.total || 0);
+    const completed = Number(totals?.completed || 0);
+    return {
+      queueName,
+      generatedAt: new Date().toISOString(),
+      statusCounts,
+      activeWorkers: Number(activeWorkers?.count || 0),
+      progress: {
+        total,
+        completed,
+        percent: total ? Math.round((completed / total) * 1000) / 10 : 0
+      },
+      totals: {
+        rows: Number(totals?.rows || 0),
+        rawRows: Number(totals?.raw_rows || 0),
+        rateLimited: Number(totals?.rate_limited || 0),
+        quotaLimited: Number(totals?.quota_limited || 0)
+      },
+      recentWindow: {
+        batchCount: Number(recentBatch?.total || 0),
+        avgDurationMs: Math.round(Number(recentBatch?.avg_duration_ms || 0)),
+        rateLimited: Number(recentBatch?.rate_limited || 0),
+        quotaLimited: Number(recentBatch?.quota_limited || 0)
+      },
+      recentJobs,
+      recentBatches
     };
   }, databaseFile);
 }

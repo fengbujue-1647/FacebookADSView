@@ -1006,6 +1006,67 @@ h2 {
   background: #fff5f5;
 }
 
+.collection-console {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #dce5f0;
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.collection-console-head,
+.collection-console-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.collection-console-head {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.collection-console-head h3 {
+  margin: 0;
+  color: #17202a;
+  font-size: 17px;
+  line-height: 1.2;
+}
+
+.collection-console-actions {
+  flex-wrap: wrap;
+}
+
+.collection-console-actions select {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #ffffff;
+  color: #253046;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+#collectionQueueCaption {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.collection-console-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  gap: 10px;
+}
+
+.collection-job-table table {
+  min-width: 980px;
+}
+
 .monitor-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr));
@@ -1362,6 +1423,26 @@ h2 {
 .run-badge.success {
   background: var(--green-soft);
   color: var(--green);
+}
+
+.run-badge.completed {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.run-badge.running {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.run-badge.waiting {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.run-badge.retry {
+  background: var(--amber-soft);
+  color: var(--amber);
 }
 
 .run-badge.partial {

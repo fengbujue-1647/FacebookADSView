@@ -269,6 +269,166 @@ function readMonitorOverview({ databaseFile, runLimit = 8 } = {}) {
   }
 }
 
+function emptyCollectionQueueOverview(queueName = "insights") {
+  return {
+    queueName,
+    generatedAt: new Date().toISOString(),
+    statusCounts: {
+      waiting: 0,
+      running: 0,
+      completed: 0,
+      failed: 0,
+      retry: 0
+    },
+    activeWorkers: 0,
+    progress: {
+      total: 0,
+      completed: 0,
+      percent: 0
+    },
+    totals: {
+      rows: 0,
+      rawRows: 0,
+      rateLimited: 0,
+      quotaLimited: 0
+    },
+    recentWindow: {
+      batchCount: 0,
+      avgDurationMs: 0,
+      rateLimited: 0,
+      quotaLimited: 0
+    },
+    recentJobs: [],
+    recentBatches: []
+  };
+}
+
+function parseCollectionJob(row) {
+  return {
+    ...row,
+    objectIds: parseJson(row.object_ids_json, []),
+    metadata: parseJson(row.metadata_json, {}),
+    rate_limited: Boolean(row.rate_limited),
+    quota_limited: Boolean(row.quota_limited)
+  };
+}
+
+function readCollectionQueueOverview({ databaseFile, queueName = "insights", limit = 80 } = {}) {
+  if (!databaseFile || !fs.existsSync(databaseFile)) {
+    return emptyCollectionQueueOverview(queueName);
+  }
+
+  const db = new DatabaseSync(databaseFile);
+  try {
+    if (!tableExists(db, "collection_jobs")) {
+      return emptyCollectionQueueOverview(queueName);
+    }
+
+    const statusRows = db.prepare(`
+      SELECT status, COUNT(*) AS count
+      FROM collection_jobs
+      WHERE queue_name = ?
+      GROUP BY status
+    `).all(queueName);
+    const statusCounts = emptyCollectionQueueOverview(queueName).statusCounts;
+    statusRows.forEach((row) => {
+      statusCounts[row.status] = Number(row.count || 0);
+    });
+    const totals = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+        SUM(row_count) AS rows,
+        SUM(raw_row_count) AS raw_rows,
+        SUM(CASE WHEN rate_limited = 1 THEN 1 ELSE 0 END) AS rate_limited,
+        SUM(CASE WHEN quota_limited = 1 THEN 1 ELSE 0 END) AS quota_limited
+      FROM collection_jobs
+      WHERE queue_name = ?
+    `).get(queueName);
+    const activeWorkers = db.prepare(`
+      SELECT COUNT(DISTINCT locked_by) AS count
+      FROM collection_jobs
+      WHERE queue_name = ?
+        AND status = 'running'
+        AND locked_by <> ''
+    `).get(queueName);
+    const canReadBatches = tableExists(db, "collection_job_batches");
+    const recentWindow = canReadBatches
+      ? db.prepare(`
+        SELECT
+          AVG(duration_ms) AS avg_duration_ms,
+          COUNT(*) AS total,
+          SUM(CASE WHEN rate_limited = 1 THEN 1 ELSE 0 END) AS rate_limited,
+          SUM(CASE WHEN quota_limited = 1 THEN 1 ELSE 0 END) AS quota_limited
+        FROM (
+          SELECT duration_ms, rate_limited, quota_limited
+          FROM collection_job_batches
+          WHERE kind = 'insights'
+            AND completed_at <> ''
+          ORDER BY completed_at DESC
+          LIMIT 50
+        )
+      `).get()
+      : {};
+    const recentJobs = db.prepare(`
+      SELECT *
+      FROM collection_jobs
+      WHERE queue_name = ?
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT ?
+    `).all(queueName, Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 80))).map(parseCollectionJob);
+    const recentBatches = canReadBatches
+      ? db.prepare(`
+        SELECT *
+        FROM collection_job_batches
+        ORDER BY completed_at DESC, started_at DESC
+        LIMIT ?
+      `).all(Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 80))).map((row) => ({
+        ...row,
+        requestIds: parseJson(row.request_ids_json, []),
+        metadata: parseJson(row.metadata_json, {}),
+        rate_limited: Boolean(row.rate_limited),
+        quota_limited: Boolean(row.quota_limited)
+      }))
+      : [];
+    const total = Number(totals?.total || 0);
+    const completed = Number(totals?.completed || 0);
+
+    return {
+      queueName,
+      generatedAt: new Date().toISOString(),
+      statusCounts,
+      activeWorkers: Number(activeWorkers?.count || 0),
+      progress: {
+        total,
+        completed,
+        percent: total ? Math.round((completed / total) * 1000) / 10 : 0
+      },
+      totals: {
+        rows: Number(totals?.rows || 0),
+        rawRows: Number(totals?.raw_rows || 0),
+        rateLimited: Number(totals?.rate_limited || 0),
+        quotaLimited: Number(totals?.quota_limited || 0)
+      },
+      recentWindow: {
+        batchCount: Number(recentWindow?.total || 0),
+        avgDurationMs: Math.round(Number(recentWindow?.avg_duration_ms || 0)),
+        rateLimited: Number(recentWindow?.rate_limited || 0),
+        quotaLimited: Number(recentWindow?.quota_limited || 0)
+      },
+      recentJobs,
+      recentBatches
+    };
+  } catch (error) {
+    return {
+      ...emptyCollectionQueueOverview(queueName),
+      error: error.message
+    };
+  } finally {
+    db.close();
+  }
+}
+
 function activeStatusSql(alias) {
   return `UPPER(COALESCE(NULLIF(${alias}.effective_status, ''), NULLIF(${alias}.status, ''), NULLIF(${alias}.configured_status, ''))) = 'ACTIVE'`;
 }
@@ -767,6 +927,7 @@ function readInsightRowsForAnalysis({
 module.exports = {
   readLatestInsightData,
   readMonitorOverview,
+  readCollectionQueueOverview,
   readActiveResourceCandidates,
   readAnalysisEntityOptions,
   readInsightRowsForAnalysis

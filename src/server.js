@@ -4,9 +4,11 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const zlib = require("node:zlib");
 const { randomUUID } = require("node:crypto");
+const { spawn } = require("node:child_process");
 const {
   readLatestInsightData,
   readMonitorOverview,
+  readCollectionQueueOverview,
   readActiveResourceCandidates,
   readAnalysisEntityOptions,
   readInsightRowsForAnalysis
@@ -79,6 +81,7 @@ const alertReportMaxDays = 90;
 const alertReportPromptMaxLength = 1600;
 let activeReportGeneration = false;
 let resourceRefreshPromise = null;
+let collectionRunProcess = null;
 let resourceRefreshStatus = {
   running: false,
   status: "idle",
@@ -86,6 +89,15 @@ let resourceRefreshStatus = {
   last_started_at: "",
   last_completed_at: "",
   reason: "",
+  error: ""
+};
+let collectionRunStatus = {
+  running: false,
+  status: "idle",
+  mode: "",
+  last_started_at: "",
+  last_completed_at: "",
+  exit_code: null,
   error: ""
 };
 
@@ -545,7 +557,11 @@ function normalizeSamplingSettings(input = {}) {
     campaignIds: normalizeIds(campaignInput.campaignIds),
     datePreset: String(campaignInput.datePreset ?? "").trim(),
     resultAction: String(campaignInput.resultAction || "").trim(),
-    hourly: campaignInput.hourly !== false
+    hourly: campaignInput.hourly !== false,
+    concurrency: clampInteger(campaignInput.concurrency, 20, 1, 20),
+    qps: clampInteger(campaignInput.qps, 5, 1, 20),
+    requestTimeoutMs: clampInteger(campaignInput.requestTimeoutMs, 7000, 1000, 60000),
+    maxAttempts: clampInteger(campaignInput.maxAttempts, 8, 1, 20)
   };
   const adMonitor = {
     enabled: adInput.enabled !== false,
@@ -1184,6 +1200,82 @@ async function refreshActiveResources({ accountId = activeResourceAccountId, rea
   })();
 
   return resourceRefreshPromise;
+}
+
+function normalizeCollectionRunMode(value) {
+  return ["all", "campaigns", "ads"].includes(value) ? value : "all";
+}
+
+function startCollectionRun({ mode = "all", concurrency = 0, qps = 0 } = {}) {
+  if (collectionRunProcess) {
+    return {
+      ok: false,
+      statusCode: 409,
+      error: "collection_run_already_running",
+      message: "采集任务正在运行",
+      run: collectionRunStatus
+    };
+  }
+
+  const normalizedMode = normalizeCollectionRunMode(mode);
+  const args = [
+    "--disable-warning=ExperimentalWarning",
+    path.join(repoRoot, "cli", "src", "cli.js"),
+    "monitor-run",
+    "--mode",
+    normalizedMode,
+    "--force"
+  ];
+  const parsedConcurrency = Number.parseInt(concurrency, 10);
+  if (Number.isFinite(parsedConcurrency) && parsedConcurrency > 0) {
+    args.push("--concurrency", String(parsedConcurrency));
+  }
+  const parsedQps = Number.parseInt(qps, 10);
+  if (Number.isFinite(parsedQps) && parsedQps > 0) {
+    args.push("--qps", String(parsedQps));
+  }
+
+  collectionRunStatus = {
+    running: true,
+    status: "running",
+    mode: normalizedMode,
+    last_started_at: new Date().toISOString(),
+    last_completed_at: "",
+    exit_code: null,
+    error: ""
+  };
+  collectionRunProcess = spawn(process.execPath, args, {
+    cwd: path.join(repoRoot, "cli"),
+    env: process.env,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  collectionRunProcess.on("error", (error) => {
+    collectionRunStatus = {
+      ...collectionRunStatus,
+      running: false,
+      status: "failed",
+      last_completed_at: new Date().toISOString(),
+      error: error.message
+    };
+    collectionRunProcess = null;
+  });
+  collectionRunProcess.on("exit", (code) => {
+    collectionRunStatus = {
+      ...collectionRunStatus,
+      running: false,
+      status: code === 0 ? "success" : "failed",
+      last_completed_at: new Date().toISOString(),
+      exit_code: code
+    };
+    collectionRunProcess = null;
+  });
+
+  return {
+    ok: true,
+    statusCode: 202,
+    run: collectionRunStatus
+  };
 }
 
 function scheduleActiveResourceRefresh() {
@@ -2663,6 +2755,45 @@ const server = http.createServer((req, res) => {
         message: error.message
       });
     }
+    return;
+  }
+
+  if (url.pathname === "/api/collection/queue/status" && req.method === "GET") {
+    try {
+      writeJson(res, 200, {
+        ok: true,
+        queue: readCollectionQueueOverview({ databaseFile }),
+        runner: collectionRunStatus,
+        display_time_zone: displayTimeZone
+      });
+    } catch (error) {
+      writeJson(res, 500, {
+        ok: false,
+        error: "read_collection_queue_failed",
+        message: error.message
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/collection/queue/run" && req.method === "POST") {
+    readRequestBody(req)
+      .then((body) => {
+        const payload = JSON.parse(body || "{}");
+        const result = startCollectionRun({
+          mode: payload.mode,
+          concurrency: payload.concurrency,
+          qps: payload.qps
+        });
+        writeJson(res, result.statusCode || (result.ok ? 202 : 409), result);
+      })
+      .catch((error) => {
+        writeJson(res, error.message === "request_body_too_large" ? 413 : 400, {
+          ok: false,
+          error: "start_collection_queue_failed",
+          message: error.message
+        });
+      });
     return;
   }
 

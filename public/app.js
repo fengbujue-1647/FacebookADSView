@@ -84,6 +84,8 @@ const state = {
   activeWindowPreset: "",
   monitoredAccounts: [],
   monitorStatus: null,
+  collectionQueue: null,
+  collectionRunner: null,
   environmentSettings: null,
   environmentError: "",
   resourceCatalog: {
@@ -133,7 +135,11 @@ const state = {
       campaignIds: [],
       datePreset: "",
       resultAction: "",
-      hourly: true
+      hourly: true,
+      concurrency: 20,
+      qps: 5,
+      requestTimeoutMs: 7000,
+      maxAttempts: 8
     },
     adMonitor: {
       enabled: true,
@@ -303,6 +309,12 @@ const els = {
   resetWindowButton: document.getElementById("resetWindowButton"),
   settingsCaption: document.getElementById("settingsCaption"),
   monitorStatusGrid: document.getElementById("monitorStatusGrid"),
+  collectionConsoleGrid: document.getElementById("collectionConsoleGrid"),
+  collectionJobsBody: document.getElementById("collectionJobsBody"),
+  collectionQueueCaption: document.getElementById("collectionQueueCaption"),
+  collectionRunModeSelect: document.getElementById("collectionRunModeSelect"),
+  refreshCollectionQueueButton: document.getElementById("refreshCollectionQueueButton"),
+  runCollectionQueueButton: document.getElementById("runCollectionQueueButton"),
   envConfigCaption: document.getElementById("envConfigCaption"),
   envFileStatus: document.getElementById("envFileStatus"),
   envConfigGrid: document.getElementById("envConfigGrid"),
@@ -315,6 +327,10 @@ const els = {
   campaignMonitorEnabled: document.getElementById("campaignMonitorEnabled"),
   campaignIntervalInput: document.getElementById("campaignIntervalInput"),
   campaignResultActionInput: document.getElementById("campaignResultActionInput"),
+  campaignConcurrencyInput: document.getElementById("campaignConcurrencyInput"),
+  campaignQpsInput: document.getElementById("campaignQpsInput"),
+  campaignTimeoutInput: document.getElementById("campaignTimeoutInput"),
+  campaignMaxAttemptsInput: document.getElementById("campaignMaxAttemptsInput"),
   campaignAutoActiveInput: document.getElementById("campaignAutoActiveInput"),
   campaignIdsInput: document.getElementById("campaignIdsInput"),
   campaignPickerToggle: document.getElementById("campaignPickerToggle"),
@@ -812,7 +828,11 @@ function normalizeSamplingSettings(settings = {}) {
       campaignIds: Array.isArray(campaignMonitor.campaignIds) ? campaignMonitor.campaignIds.filter((id) => /^\d{3,32}$/.test(String(id))) : [],
       datePreset: String(campaignMonitor.datePreset || "").trim(),
       resultAction: String(campaignMonitor.resultAction || "").trim(),
-      hourly: campaignMonitor.hourly !== false
+      hourly: campaignMonitor.hourly !== false,
+      concurrency: clampNumber(campaignMonitor.concurrency, 20, 1, 20),
+      qps: clampNumber(campaignMonitor.qps, 5, 1, 20),
+      requestTimeoutMs: clampNumber(campaignMonitor.requestTimeoutMs, 7000, 1000, 60000),
+      maxAttempts: clampNumber(campaignMonitor.maxAttempts, 8, 1, 20)
     },
     adMonitor: {
       enabled: adMonitor.enabled !== false,
@@ -1519,6 +1539,93 @@ function renderMonitorStatus() {
     : `<tr><td colspan="8">还没有监控批次，运行 monitor-run 后显示。</td></tr>`;
 }
 
+function collectionStatusText(status) {
+  return {
+    waiting: "等待",
+    running: "进行中",
+    completed: "完成",
+    failed: "失败",
+    retry: "重试"
+  }[status] || status || "-";
+}
+
+function renderCollectionConsole() {
+  const queue = state.collectionQueue;
+  const runner = state.collectionRunner;
+  if (!els.collectionConsoleGrid || !els.collectionJobsBody) {
+    return;
+  }
+  const counts = queue?.statusCounts || {};
+  const progress = queue?.progress || {};
+  const recentWindow = queue?.recentWindow || {};
+  const totals = queue?.totals || {};
+  const runnerLabel = runner?.running
+    ? `运行中 · ${runner.mode || "all"}`
+    : runner?.last_completed_at
+      ? `${runner.status === "success" ? "上次完成" : "上次失败"} · ${formatIso(runner.last_completed_at)}`
+      : "空闲";
+
+  els.collectionQueueCaption.textContent = queue?.generatedAt
+    ? `${runnerLabel} · ${formatIso(queue.generatedAt)}`
+    : runnerLabel;
+  els.collectionConsoleGrid.innerHTML = [
+    {
+      title: "当前 worker",
+      value: `${Number(queue?.activeWorkers || 0)} / ${Math.max(state.samplingSettings.campaignMonitor.concurrency, state.samplingSettings.adMonitor.concurrency)}`,
+      meta: "运行中 / 配置并发"
+    },
+    {
+      title: "等待 / 重试",
+      value: `${Number(counts.waiting || 0)} / ${Number(counts.retry || 0)}`,
+      meta: "持久化 Job"
+    },
+    {
+      title: "完成进度",
+      value: `${Number(progress.percent || 0).toFixed(1)}%`,
+      meta: `${Number(progress.completed || 0)} / ${Number(progress.total || 0)}`
+    },
+    {
+      title: "失败 / 限流",
+      value: `${Number(counts.failed || 0)} / ${Number(totals.rateLimited || 0)}`,
+      meta: `超配额 ${Number(totals.quotaLimited || 0)}`
+    },
+    {
+      title: "返回行数",
+      value: Number(totals.rows || 0).toLocaleString("en-US"),
+      meta: `原始 ${Number(totals.rawRows || 0).toLocaleString("en-US")}`
+    },
+    {
+      title: "近窗口平均耗时",
+      value: formatDuration(recentWindow.avgDurationMs),
+      meta: `${Number(recentWindow.batchCount || 0)} 个批次`
+    }
+  ].map((item) => `
+    <article class="status-tile">
+      <span>${escapeHtml(item.title)}</span>
+      <strong>${escapeHtml(item.value)}</strong>
+      <small>${escapeHtml(item.meta)}</small>
+    </article>
+  `).join("");
+
+  const jobs = queue?.recentJobs || [];
+  els.collectionJobsBody.innerHTML = jobs.length
+    ? jobs.map((job) => `
+      <tr>
+        <td><span class="run-badge ${escapeHtml(job.status)}">${escapeHtml(collectionStatusText(job.status))}</span></td>
+        <td>${escapeHtml(job.object_type || "-")}</td>
+        <td>${Number(job.id_count || 0)}</td>
+        <td>${escapeHtml(job.bucket_key || "-")}</td>
+        <td>${Number(job.row_count || 0)} / ${Number(job.raw_row_count || 0)}</td>
+        <td>${Number(job.attempts || 0)} / ${Number(job.max_attempts || 0)}</td>
+        <td>${formatDuration(job.duration_ms)}</td>
+        <td>${job.rate_limited ? "限流" : job.quota_limited ? "超配额" : "-"}</td>
+        <td>${formatIso(job.updated_at || job.completed_at || job.created_at)}</td>
+        <td class="error-cell">${escapeHtml(job.error || "")}</td>
+      </tr>
+    `).join("")
+    : `<tr><td colspan="10">还没有采集 Job。点击“投递并运行”后，这里会显示持久化队列状态。</td></tr>`;
+}
+
 function renderAccountSettings(message = "") {
   const accounts = state.samplingSettings.campaignMonitor.accountIds.length
     ? state.samplingSettings.campaignMonitor.accountIds
@@ -1550,13 +1657,19 @@ function renderSamplingSettings() {
   els.campaignMonitorEnabled.checked = campaign.enabled;
   els.campaignIntervalInput.value = campaign.intervalMinutes;
   els.campaignResultActionInput.value = campaign.resultAction;
+  els.campaignConcurrencyInput.value = campaign.concurrency;
+  els.campaignQpsInput.value = campaign.qps;
+  els.campaignTimeoutInput.value = campaign.requestTimeoutMs;
+  els.campaignMaxAttemptsInput.value = campaign.maxAttempts;
   els.campaignAutoActiveInput.checked = campaign.autoActiveCampaigns;
   els.campaignMonitorSummary.innerHTML = summaryChips([
     campaign.enabled ? "启用" : "停用",
     `${campaign.intervalMinutes} 分钟`,
     "勾选列表",
     `${campaign.campaignIds.length} 个广告系列`,
-    campaignStale ? `${campaignStale} 个不在 ACTIVE 候选` : ""
+    campaignStale ? `${campaignStale} 个不在 ACTIVE 候选` : "",
+    `${campaign.concurrency} 并发`,
+    `${campaign.qps}/s`
   ]);
 
   els.adMonitorEnabled.checked = ad.enabled;
@@ -1577,6 +1690,7 @@ function renderSamplingSettings() {
   renderSettingsCaption();
   renderResourcePickers();
   renderMonitorStatus();
+  renderCollectionConsole();
 }
 
 function collectSamplingSettings() {
@@ -1592,7 +1706,11 @@ function collectSamplingSettings() {
       campaignIds,
       datePreset: "",
       resultAction: els.campaignResultActionInput.value,
-      hourly: true
+      hourly: true,
+      concurrency: els.campaignConcurrencyInput.value,
+      qps: els.campaignQpsInput.value,
+      requestTimeoutMs: els.campaignTimeoutInput.value,
+      maxAttempts: els.campaignMaxAttemptsInput.value
     },
     adMonitor: {
       enabled: els.adMonitorEnabled.checked,
@@ -1663,6 +1781,50 @@ async function loadMonitorStatus() {
   renderMonitorStatus();
 }
 
+async function loadCollectionQueueStatus() {
+  try {
+    const response = await fetch("/api/collection/queue/status", { cache: "no-store" });
+    const payload = await response.json();
+    state.collectionQueue = payload.ok ? payload.queue : null;
+    state.collectionRunner = payload.ok ? payload.runner : null;
+  } catch {
+    state.collectionQueue = null;
+    state.collectionRunner = null;
+  }
+  renderCollectionConsole();
+}
+
+async function runCollectionQueue() {
+  els.runCollectionQueueButton.disabled = true;
+  els.collectionQueueCaption.textContent = "正在投递";
+  try {
+    const mode = els.collectionRunModeSelect.value || "all";
+    const concurrency = mode === "campaigns"
+      ? state.samplingSettings.campaignMonitor.concurrency
+      : state.samplingSettings.adMonitor.concurrency;
+    const qps = mode === "campaigns"
+      ? state.samplingSettings.campaignMonitor.qps
+      : state.samplingSettings.adMonitor.qps;
+    const response = await fetch("/api/collection/queue/run", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ mode, concurrency, qps })
+    });
+    const payload = await response.json();
+    state.collectionRunner = payload.run || state.collectionRunner;
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || "采集任务启动失败");
+    }
+    await loadCollectionQueueStatus();
+  } catch (error) {
+    els.collectionQueueCaption.textContent = error.message || "采集任务启动失败";
+  } finally {
+    els.runCollectionQueueButton.disabled = false;
+  }
+}
+
 async function loadEnvironmentSettings() {
   try {
     const response = await fetch("/api/settings/environment", { cache: "no-store" });
@@ -1725,7 +1887,8 @@ async function loadSettings(message = "") {
       state.settingsLoaded = true;
       await Promise.all([
         loadResourceCatalog(),
-        loadMonitorStatus()
+        loadMonitorStatus(),
+        loadCollectionQueueStatus()
       ]);
       if (message) {
         updateDirtyState(message);
@@ -3439,6 +3602,14 @@ function bindEvents() {
     refreshActiveResources();
   });
 
+  els.refreshCollectionQueueButton.addEventListener("click", () => {
+    loadCollectionQueueStatus();
+  });
+
+  els.runCollectionQueueButton.addEventListener("click", () => {
+    runCollectionQueue();
+  });
+
   els.resetSettingsButton.addEventListener("click", () => {
     loadSettings("已取消未保存改动");
   });
@@ -3535,6 +3706,10 @@ function bindEvents() {
     els.campaignMonitorEnabled,
     els.campaignIntervalInput,
     els.campaignResultActionInput,
+    els.campaignConcurrencyInput,
+    els.campaignQpsInput,
+    els.campaignTimeoutInput,
+    els.campaignMaxAttemptsInput,
     els.campaignAutoActiveInput,
     els.monitorAccountsInput,
     els.adMonitorEnabled,
