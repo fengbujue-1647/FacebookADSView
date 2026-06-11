@@ -1223,7 +1223,7 @@ function normalizeCollectionRunMode(value) {
   return ["all", "campaigns", "ads"].includes(value) ? value : "all";
 }
 
-function startCollectionRun({ mode = "all", concurrency = 0, qps = 0, triggerSource = "manual" } = {}) {
+function startCollectionRun({ mode = "all", triggerSource = "manual" } = {}) {
   if (collectionRunProcess) {
     return {
       ok: false,
@@ -1243,14 +1243,6 @@ function startCollectionRun({ mode = "all", concurrency = 0, qps = 0, triggerSou
     normalizedMode,
     "--force"
   ];
-  const parsedConcurrency = Number.parseInt(concurrency, 10);
-  if (Number.isFinite(parsedConcurrency) && parsedConcurrency > 0) {
-    args.push("--concurrency", String(parsedConcurrency));
-  }
-  const parsedQps = Number.parseInt(qps, 10);
-  if (Number.isFinite(parsedQps) && parsedQps > 0) {
-    args.push("--qps", String(parsedQps));
-  }
 
   collectionRunStatus = {
     running: true,
@@ -1508,20 +1500,6 @@ function evaluateMonitorSchedule(now = new Date()) {
   };
 }
 
-function collectionRunSettingsForMode(mode = "all") {
-  const settings = readSamplingSettings();
-  const pool = [
-    mode === "all" || mode === "campaigns" ? settings.campaignMonitor : null,
-    mode === "all" || mode === "ads" ? settings.adMonitor : null
-  ].filter(Boolean);
-  const fallback = [settings.campaignMonitor, settings.adMonitor].filter(Boolean);
-  const candidates = pool.length ? pool : fallback;
-  return {
-    concurrency: Math.max(...candidates.map((item) => Number(item?.concurrency || 1))),
-    qps: Math.max(...candidates.map((item) => Number(item?.qps || 1)))
-  };
-}
-
 function monitorSchedulerSnapshot() {
   try {
     const schedule = evaluateMonitorSchedule();
@@ -1577,11 +1555,8 @@ function triggerDueMonitorRuns(reason = "interval") {
   }
 
   const mode = due.length > 1 ? "all" : due[0].mode;
-  const settings = collectionRunSettingsForMode(mode);
   const result = startCollectionRun({
     mode,
-    concurrency: settings.concurrency,
-    qps: settings.qps,
     triggerSource: "scheduler"
   });
   monitorSchedulerStatus = {
@@ -3187,8 +3162,6 @@ const server = http.createServer((req, res) => {
         const payload = JSON.parse(body || "{}");
         const result = startCollectionRun({
           mode: payload.mode,
-          concurrency: payload.concurrency,
-          qps: payload.qps,
           triggerSource: "manual"
         });
         writeJson(res, result.statusCode || (result.ok ? 202 : 409), result);

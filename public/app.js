@@ -1784,7 +1784,15 @@ function renderCollectionConsole() {
     : runner?.last_completed_at
       ? `${runner.status === "success" ? "上次完成" : "上次失败"} · ${formatIso(runner.last_completed_at)}`
       : "空闲";
-  const configuredConcurrency = Math.max(state.samplingSettings.campaignMonitor.concurrency, state.samplingSettings.adMonitor.concurrency);
+  const currentObjectTypes = Array.isArray(currentRun?.objectTypes) ? currentRun.objectTypes : [];
+  const usesCampaigns = currentObjectTypes.includes("campaigns");
+  const usesAds = currentObjectTypes.includes("ads") || currentObjectTypes.includes("adsets");
+  const configuredConcurrency = Math.max(
+    usesCampaigns ? Number(state.samplingSettings.campaignMonitor.concurrency || 1) : 0,
+    usesAds ? Number(state.samplingSettings.adMonitor.concurrency || 1) : 0,
+    !usesCampaigns && !usesAds ? Number(state.samplingSettings.campaignMonitor.concurrency || 1) : 0,
+    !usesCampaigns && !usesAds ? Number(state.samplingSettings.adMonitor.concurrency || 1) : 0
+  );
   const workerMeta = currentRun
     ? `${collectionRunStatusText(currentRun.status)} / 配置并发`
     : "无当前批次";
@@ -2033,18 +2041,12 @@ async function runCollectionQueue() {
   els.collectionQueueCaption.textContent = "正在投递";
   try {
     const mode = els.collectionRunModeSelect.value || "all";
-    const concurrency = mode === "campaigns"
-      ? state.samplingSettings.campaignMonitor.concurrency
-      : state.samplingSettings.adMonitor.concurrency;
-    const qps = mode === "campaigns"
-      ? state.samplingSettings.campaignMonitor.qps
-      : state.samplingSettings.adMonitor.qps;
     const response = await fetch("/api/collection/queue/run", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ mode, concurrency, qps })
+      body: JSON.stringify({ mode })
     });
     const payload = await response.json();
     state.collectionRunner = payload.run || state.collectionRunner;

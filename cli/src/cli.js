@@ -21,6 +21,17 @@ function parseInteger(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function monitorRuntimeOptions(monitor, options = {}, listType = '') {
+  const mode = options.mode || 'all';
+  const allowOverride = mode === listType;
+  return {
+    concurrency: allowOverride ? parseInteger(options.concurrency) || monitor.concurrency : monitor.concurrency,
+    qps: allowOverride ? parseInteger(options.qps) || monitor.qps : monitor.qps,
+    timeoutMs: allowOverride ? parseInteger(options.timeoutMs) || monitor.requestTimeoutMs : monitor.requestTimeoutMs,
+    maxAttempts: allowOverride ? parseInteger(options.maxAttempts) || monitor.maxAttempts : monitor.maxAttempts
+  };
+}
+
 function addMinutes(date, minutes) {
   return new Date(date.getTime() + minutes * 60_000);
 }
@@ -224,6 +235,7 @@ async function runAdMonitorCycle({ service, settings, options = {} }) {
   let status = 'success';
   let result = null;
   let errorSummary = '';
+  const runtimeOptions = monitorRuntimeOptions(monitor, options, 'ads');
 
   try {
     if (!ids.length) {
@@ -253,10 +265,7 @@ async function runAdMonitorCycle({ service, settings, options = {} }) {
       until: options.until,
       resultAction: options.resultAction || monitor.resultAction,
       hourly: options.daily ? false : monitor.hourly,
-      concurrency: parseInteger(options.concurrency) || monitor.concurrency,
-      qps: parseInteger(options.qps) || monitor.qps,
-      timeoutMs: parseInteger(options.timeoutMs) || monitor.requestTimeoutMs,
-      maxAttempts: parseInteger(options.maxAttempts) || monitor.maxAttempts
+      ...runtimeOptions
     });
     if (result.queue.stats.failed > 0 || result.queue.stats.pending > 0) {
       status = 'partial';
@@ -288,6 +297,7 @@ async function runAdMonitorCycle({ service, settings, options = {} }) {
         runId: result?.runId || '',
         rowCount: result?.normalizedRows?.length || 0,
         slices: result?.slices || [],
+        runtime: runtimeOptions,
         source: 'monitor-run:ads'
       }
     });
@@ -310,6 +320,7 @@ async function runCampaignMonitorCycle({ service, settings, options = {} }) {
   let status = 'success';
   let result = null;
   let errorSummary = '';
+  const runtimeOptions = monitorRuntimeOptions(monitor, options, 'campaigns');
 
   try {
     const resolvedAccounts = monitor.accountIds.length ? monitor.accountIds : await resolveAccountIds(options);
@@ -343,10 +354,7 @@ async function runCampaignMonitorCycle({ service, settings, options = {} }) {
       until: options.until,
       resultAction: options.resultAction || monitor.resultAction,
       hourly: options.daily ? false : monitor.hourly,
-      concurrency: parseInteger(options.concurrency) || monitor.concurrency,
-      qps: parseInteger(options.qps) || monitor.qps,
-      timeoutMs: parseInteger(options.timeoutMs) || monitor.requestTimeoutMs,
-      maxAttempts: parseInteger(options.maxAttempts) || monitor.maxAttempts
+      ...runtimeOptions
     });
     if (result.queue.stats.failed > 0 || result.queue.stats.pending > 0) {
       status = 'partial';
@@ -379,6 +387,7 @@ async function runCampaignMonitorCycle({ service, settings, options = {} }) {
         rowCount: result?.normalizedRows?.length || 0,
         slices: result?.slices || [],
         autoActiveCampaigns: monitor.autoActiveCampaigns,
+        runtime: runtimeOptions,
         source: 'monitor-run:campaigns'
       }
     });
@@ -788,10 +797,10 @@ program
   .option('--until <date>', '自定义结束日期 YYYY-MM-DD（广告账户时区）')
   .option('--result-action <actionType>', '覆盖成效 action_type')
   .option('--daily', '拉日级 Insights，不使用小时 breakdown')
-  .option('--concurrency <number>', '队列并发')
-  .option('--qps <number>', '请求启动速率')
-  .option('--timeout-ms <number>', '单请求 Abort 超时')
-  .option('--max-attempts <number>', '最大尝试次数')
+  .option('--concurrency <number>', '单模式队列并发；all 模式按各 List 配置')
+  .option('--qps <number>', '单模式请求启动速率；all 模式按各 List 配置')
+  .option('--timeout-ms <number>', '单模式单请求 Abort 超时；all 模式按各 List 配置')
+  .option('--max-attempts <number>', '单模式最大尝试次数；all 模式按各 List 配置')
   .option('--force', '即使配置未启用也执行')
   .action(async (options) => {
     const result = await runMonitorCycle(options);
