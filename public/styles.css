@@ -1396,7 +1396,7 @@ h2 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr));
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .environment-card {
@@ -1629,6 +1629,7 @@ h2 {
   min-width: 0;
   display: grid;
   gap: 14px;
+  align-content: start;
   padding: 14px;
   border: 1px solid #e4e9f2;
   border-radius: var(--radius);
@@ -1668,55 +1669,32 @@ h2 {
   grid-column: 1 / -1;
 }
 
-.resolved-list {
-  display: grid;
-  gap: 8px;
-}
-
-.resolved-head strong,
-.resolved-head span {
-  display: block;
-}
-
-.resolved-head strong {
-  color: #253046;
-  font-size: 13px;
-}
-
-.resolved-head span {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.resolved-items {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.resolved-items span {
-  max-width: 260px;
-  min-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 9px;
-  overflow: hidden;
-  border: 1px solid #cde1dc;
-  border-radius: 999px;
-  background: var(--teal-soft);
-  color: var(--teal);
-  font-size: 12px;
-  font-weight: 900;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .recent-runs {
   display: grid;
   gap: 10px;
   min-width: 0;
   padding-top: 2px;
+}
+
+.recent-runs-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.recent-runs-filter select {
+  min-width: 120px;
+  min-height: 34px;
+  padding: 0 32px 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #ffffff;
+  color: #253046;
+  font-size: 13px;
+  font-weight: 900;
 }
 
 .compact-table {
@@ -1789,6 +1767,11 @@ h2 {
   max-width: 340px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.error-cell.has-error {
+  color: var(--red);
+  font-weight: 900;
 }
 
 .settings-tabs {
@@ -2290,26 +2273,6 @@ h2 {
 
 .settings-status[data-tone="success"] {
   color: var(--teal);
-}
-
-.settings-summary {
-  min-height: 32px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.settings-summary span {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid #e4e9f2;
-  border-radius: 999px;
-  background: #ffffff;
-  color: #526071;
-  font-size: 12px;
-  font-weight: 900;
 }
 
 .view-panel {

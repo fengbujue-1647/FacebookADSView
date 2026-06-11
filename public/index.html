@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FB 广告数据看板</title>
-  <link rel="stylesheet" href="/styles.css?v=20260610-8">
-  <link rel="stylesheet" href="/alert-ai.css?v=20260610-8">
-  <script defer src="/vendor/echarts.min.js?v=20260610-8"></script>
+  <link rel="stylesheet" href="/styles.css?v=20260611-1">
+  <link rel="stylesheet" href="/alert-ai.css?v=20260611-1">
+  <script defer src="/vendor/echarts.min.js?v=20260611-1"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -473,8 +473,6 @@
                     <div class="selected-resource-list" id="campaignSelectedList"></div>
                   </div>
                 </div>
-                <div class="settings-summary" id="campaignMonitorSummary"></div>
-                <div class="resolved-list" id="campaignResolvedList"></div>
               </section>
 
               <section class="monitor-card">
@@ -547,13 +545,20 @@
                     <div class="selected-resource-list" id="adSelectedList"></div>
                   </div>
                 </div>
-                <div class="settings-summary" id="adMonitorSummary"></div>
               </section>
             </div>
 
             <section class="recent-runs">
               <div class="recent-runs-head">
                 <h3>最近批次</h3>
+                <label class="recent-runs-filter">
+                  <span>列表筛选</span>
+                  <select id="recentRunsFilter">
+                    <option value="all">全部</option>
+                    <option value="campaigns">List 1</option>
+                    <option value="ads">List 2</option>
+                  </select>
+                </label>
               </div>
               <div class="table-scroll compact-table">
                 <table>
@@ -566,7 +571,7 @@
                       <th>成功/失败</th>
                       <th>重试</th>
                       <th>耗时</th>
-                      <th>错误</th>
+                      <th>说明</th>
                     </tr>
                   </thead>
                   <tbody id="recentRunsBody"></tbody>
@@ -579,7 +584,7 @@
     </main>
   </div>
 
-  <script defer src="/app.js?v=20260610-8"></script>
-  <script defer src="/alert-ai.js?v=20260610-8"></script>
+  <script defer src="/app.js?v=20260611-1"></script>
+  <script defer src="/alert-ai.js?v=20260611-1"></script>
 </body>
 </html>

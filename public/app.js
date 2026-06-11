@@ -1,7 +1,7 @@
 const MS_HOUR = 60 * 60 * 1000;
 const MS_DAY = 24 * MS_HOUR;
 const MAX_BUCKETS = {
-  hour: 96,
+  hour: 24 * 7 + 1,
   day: 190,
   week: 260,
   month: 120
@@ -91,6 +91,7 @@ const state = {
   collectionRunner: null,
   collectionPage: 1,
   collectionRunId: "",
+  monitorRunFilter: "all",
   collectionLoading: false,
   collectionRefreshTimer: null,
   monitorStatusRefreshTimer: null,
@@ -358,8 +359,6 @@ const els = {
   campaignManualIdInput: document.getElementById("campaignManualIdInput"),
   campaignOptionList: document.getElementById("campaignOptionList"),
   campaignSelectedList: document.getElementById("campaignSelectedList"),
-  campaignMonitorSummary: document.getElementById("campaignMonitorSummary"),
-  campaignResolvedList: document.getElementById("campaignResolvedList"),
   adMonitorEnabled: document.getElementById("adMonitorEnabled"),
   adIntervalInput: document.getElementById("adIntervalInput"),
   adResultActionInput: document.getElementById("adResultActionInput"),
@@ -376,7 +375,7 @@ const els = {
   adManualIdInput: document.getElementById("adManualIdInput"),
   adOptionList: document.getElementById("adOptionList"),
   adSelectedList: document.getElementById("adSelectedList"),
-  adMonitorSummary: document.getElementById("adMonitorSummary"),
+  recentRunsFilter: document.getElementById("recentRunsFilter"),
   recentRunsBody: document.getElementById("recentRunsBody")
 };
 
@@ -881,10 +880,6 @@ function normalizeSamplingSettings(settings = {}) {
       hourly: activeCampaigns.hourly !== false
     }
   };
-}
-
-function summaryChips(items) {
-  return items.filter(Boolean).map((item) => `<span>${item}</span>`).join("");
 }
 
 function escapeHtml(value) {
@@ -1565,22 +1560,10 @@ function renderMonitorStatus() {
     </article>
   `).join("");
 
-  const activeCampaigns = state.resourceCatalog?.campaigns?.length ? state.resourceCatalog.campaigns : (overview?.activeCampaigns || []);
-  els.campaignResolvedList.innerHTML = activeCampaigns.length
-    ? `
-      <div class="resolved-head">
-        <strong>解析出的 ACTIVE 广告系列</strong>
-        <span>${activeCampaigns.length} / 候选列表</span>
-      </div>
-      <div class="resolved-items">
-        ${activeCampaigns.slice(0, 12).map((campaign) => `
-          <span title="${escapeHtml(campaign.campaign_id || campaign.id)}">${escapeHtml(nameIdLabel(campaign.name, campaign.campaign_id || campaign.id))}</span>
-        `).join("")}
-      </div>
-    `
-    : `<div class="empty-inline">资源维表还没有 ACTIVE 广告系列，运行 Tool 2 或 monitor-bootstrap 后显示</div>`;
-
-  const runs = overview?.recentRuns || [];
+  const allRuns = overview?.recentRuns || [];
+  const runFilter = ["campaigns", "ads"].includes(state.monitorRunFilter) ? state.monitorRunFilter : "all";
+  els.recentRunsFilter.value = runFilter;
+  const runs = runFilter === "all" ? allRuns : allRuns.filter((run) => run.list_type === runFilter);
   els.recentRunsBody.innerHTML = runs.length
     ? runs.map((run) => `
       <tr>
@@ -1591,10 +1574,10 @@ function renderMonitorStatus() {
         <td>${Number(run.success_count || 0)} / ${Number(run.failed_count || 0)}</td>
         <td>${Number(run.retry_count || 0)}</td>
         <td>${formatDuration(run.duration_ms)}</td>
-        <td class="error-cell">${escapeHtml(run.error_summary || historyLabel(run))}</td>
+        <td class="error-cell ${run.error_summary ? "has-error" : ""}">${escapeHtml(run.error_summary || historyLabel(run))}</td>
       </tr>
     `).join("")
-    : `<tr><td colspan="8">还没有监控批次，运行 monitor-run 后显示。</td></tr>`;
+    : `<tr><td colspan="8">${runFilter === "all" ? "还没有监控批次，运行 monitor-run 后显示。" : "当前筛选下还没有监控批次。"}</td></tr>`;
 }
 
 function collectionStatusText(status) {
@@ -1870,8 +1853,6 @@ function renderSamplingSettings() {
   const settings = state.samplingSettings;
   const campaign = settings.campaignMonitor;
   const ad = settings.adMonitor;
-  const campaignStale = selectedResourceRows("campaigns").filter((row) => row.stale).length;
-  const adStale = selectedResourceRows("ads").filter((row) => row.stale).length;
 
   els.campaignMonitorEnabled.checked = campaign.enabled;
   els.campaignIntervalInput.value = campaign.intervalMinutes;
@@ -1881,15 +1862,6 @@ function renderSamplingSettings() {
   els.campaignTimeoutInput.value = campaign.requestTimeoutMs;
   els.campaignMaxAttemptsInput.value = campaign.maxAttempts;
   els.campaignAutoActiveInput.checked = campaign.autoActiveCampaigns;
-  els.campaignMonitorSummary.innerHTML = summaryChips([
-    campaign.enabled ? "启用" : "停用",
-    `${campaign.intervalMinutes} 分钟`,
-    "勾选列表",
-    `${campaign.campaignIds.length} 个广告系列`,
-    campaignStale ? `${campaignStale} 个不在 ACTIVE 候选` : "",
-    `${campaign.concurrency} 并发`,
-    `${campaign.qps}/s`
-  ]);
 
   els.adMonitorEnabled.checked = ad.enabled;
   els.adIntervalInput.value = ad.intervalMinutes;
@@ -1898,14 +1870,6 @@ function renderSamplingSettings() {
   els.adQpsInput.value = ad.qps;
   els.adTimeoutInput.value = ad.requestTimeoutMs;
   els.adMaxAttemptsInput.value = ad.maxAttempts;
-  els.adMonitorSummary.innerHTML = summaryChips([
-    ad.enabled ? "启用" : "停用",
-    `${ad.intervalMinutes} 分钟`,
-    `${ad.adIds.length} 个 ad`,
-    adStale ? `${adStale} 个不在 ACTIVE 候选` : "",
-    `${ad.concurrency} 并发`,
-    `${ad.qps}/s`
-  ]);
   renderSettingsCaption();
   renderResourcePickers();
   renderMonitorStatus();
@@ -3990,6 +3954,11 @@ function bindEvents() {
 
   els.saveSettingsButton.addEventListener("click", () => {
     saveSettings();
+  });
+
+  els.recentRunsFilter.addEventListener("change", () => {
+    state.monitorRunFilter = els.recentRunsFilter.value;
+    renderMonitorStatus();
   });
 
   els.campaignPickerToggle.addEventListener("click", () => {
