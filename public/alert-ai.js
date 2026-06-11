@@ -74,7 +74,14 @@
       visibleMarkdown: "",
       pendingMarkdown: "",
       typing: false,
-      error: null
+      error: null,
+      history: {
+        loading: false,
+        items: [],
+        query: "",
+        level: "all",
+        provider: "all"
+      }
     }
   };
   const selectPickerState = new WeakMap();
@@ -385,6 +392,38 @@
               </div>
             </div>
           </section>
+
+          <section class="panel alert-panel report-history-panel">
+            <div class="panel-head alert-panel-head">
+              <div>
+                <h2>历史报告生成结果</h2>
+                <span id="reportHistoryCaption">等待读取</span>
+              </div>
+              <button class="secondary-button" id="refreshReportHistoryButton" type="button">
+                <i data-lucide="refresh-cw"></i>
+                <span>刷新</span>
+              </button>
+            </div>
+            <div class="report-history-filter">
+              <div class="control-group">
+                <label for="reportHistorySearch">搜索报告</label>
+                <input id="reportHistorySearch" type="search" placeholder="搜索分析目标、范围或模型">
+              </div>
+              <div class="control-group">
+                <label for="reportHistoryLevelFilter">分析层级</label>
+                <select id="reportHistoryLevelFilter"></select>
+              </div>
+              <div class="control-group">
+                <label for="reportHistoryProviderFilter">生成来源</label>
+                <select id="reportHistoryProviderFilter">
+                  <option value="all">全部来源</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="local">本地规则</option>
+                </select>
+              </div>
+            </div>
+            <div class="report-history-list" id="reportHistoryList"></div>
+          </section>
         </div>
       </section>
 
@@ -531,6 +570,10 @@
         <span>${escapeHtml(level.label)}</span>
       </label>
     `).join("");
+    $("#reportHistoryLevelFilter").innerHTML = `
+      <option value="all">全部层级</option>
+      ${metadata.report.levels.map((level) => `<option value="${level.id}">${escapeHtml(level.label)}</option>`).join("")}
+    `;
     $("#reportPresetGrid").innerHTML = reportPresets.map((preset) => `
       <button class="preset-card" type="button" data-report-input data-preset-id="${preset.id}">
         <strong>${escapeHtml(preset.title)}</strong>
@@ -649,6 +692,14 @@
       hour: "2-digit",
       minute: "2-digit"
     });
+  }
+
+  function reportLevelLabel(value) {
+    return state.metadata.report.levels.find((level) => level.id === value)?.label || value || "-";
+  }
+
+  function reportProviderLabel(report) {
+    return report?.provider === "deepseek" ? `DeepSeek ${report.model || ""}`.trim() : "本地规则";
   }
 
   function formatRemaining(value) {
@@ -1690,15 +1741,107 @@
     renderMarkdownNow();
   }
 
-  function renderReportFinal(report) {
+  function filteredReportHistory() {
+    const query = state.report.history.query.trim().toLowerCase();
+    return state.report.history.items.filter((report) => {
+      if (state.report.history.level !== "all" && report.request?.level !== state.report.history.level) {
+        return false;
+      }
+      if (state.report.history.provider !== "all" && report.provider !== state.report.history.provider) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      return [
+        report.request?.prompt,
+        report.request?.since,
+        report.request?.until,
+        report.request?.level,
+        report.provider,
+        report.model,
+        report.ai_status
+      ].some((value) => String(value || "").toLowerCase().includes(query));
+    });
+  }
+
+  function renderReportHistory() {
+    const caption = $("#reportHistoryCaption");
+    const list = $("#reportHistoryList");
+    if (!caption || !list) return;
+    const filtered = filteredReportHistory();
+    caption.textContent = state.report.history.loading
+      ? "读取中"
+      : `${filtered.length} / ${state.report.history.items.length} 份报告`;
+
+    if (state.report.history.loading) {
+      list.innerHTML = `<div class="report-history-empty">正在读取历史报告</div>`;
+      return;
+    }
+    if (!state.report.history.items.length) {
+      list.innerHTML = `<div class="report-history-empty">暂无历史报告</div>`;
+      return;
+    }
+    if (!filtered.length) {
+      list.innerHTML = `<div class="report-history-empty">当前筛选下没有报告</div>`;
+      return;
+    }
+
+    list.innerHTML = filtered.map((report) => {
+      const request = report.request || {};
+      const entityCount = Array.isArray(request.entityIds) ? request.entityIds.length : 0;
+      const prompt = String(request.prompt || "未命名分析目标").trim();
+      const statusText = report.ai_status && report.ai_status !== "success" ? ` · ${report.ai_message || report.ai_status}` : "";
+      return `
+        <article class="report-history-item" data-report-history-id="${escapeHtml(report.id)}">
+          <div>
+            <strong>${escapeHtml(prompt)}</strong>
+            <span>${escapeHtml(formatDateTime(report.generated_at))} · ${escapeHtml(reportLevelLabel(request.level))} · ${escapeHtml(request.since || "-")} 至 ${escapeHtml(request.until || "-")}</span>
+            <small>${escapeHtml(reportProviderLabel(report))}${statusText ? escapeHtml(statusText) : ""} · ${Number(report.rowsAnalyzed || 0).toLocaleString("en-US")} 行 · ${entityCount} 个对象</small>
+          </div>
+          <button class="secondary-button" type="button" data-report-history-view="${escapeHtml(report.id)}">
+            <i data-lucide="eye"></i>
+            <span>查看</span>
+          </button>
+        </article>
+      `;
+    }).join("");
+    refreshIcons();
+  }
+
+  async function loadReportHistory() {
+    state.report.history.loading = true;
+    renderReportHistory();
+    try {
+      const payload = await apiJson("/api/alert-ai/reports?limit=60");
+      state.report.history.items = Array.isArray(payload.reports) ? payload.reports : [];
+    } catch (error) {
+      state.report.history.items = [];
+      toast(error.message || "历史报告读取失败", "error");
+    } finally {
+      state.report.history.loading = false;
+      renderReportHistory();
+    }
+  }
+
+  function showHistoryReport(reportId) {
+    const report = state.report.history.items.find((item) => item.id === reportId);
+    if (!report) return;
+    resetReportOutput();
+    renderReportFinal(report, { fromHistory: true });
+    $("#reportOutput").scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+
+  function renderReportFinal(report, options = {}) {
     state.report.final = report;
     flushMarkdown(report.markdown);
     $("#reportActions").hidden = false;
-    const providerText = report.provider === "deepseek" ? `DeepSeek ${report.model || ""}`.trim() : "本地规则";
-    $("#reportStatusText").textContent = `生成完成 · ${providerText} · ${report.rowsAnalyzed} 行`;
+    const providerText = reportProviderLabel(report);
+    $("#reportStatusText").textContent = `${options.fromHistory ? "历史报告" : "生成完成"} · ${providerText} · ${report.rowsAnalyzed} 行`;
     const board = $("#reportBoard");
-    board.hidden = false;
-    board.innerHTML = report.board.map((card) => `
+    const boardCards = Array.isArray(report.board) ? report.board : [];
+    board.hidden = boardCards.length === 0;
+    board.innerHTML = boardCards.map((card) => `
       <article class="report-metric-card ${card.anomalyLevel}">
         <span>${escapeHtml(card.label)}</span>
         <strong>${escapeHtml(card.formattedValue)}</strong>
@@ -1709,10 +1852,11 @@
       </article>
     `).join("");
     const list = $("#reportActionList");
-    list.hidden = false;
+    const actions = Array.isArray(report.actions) ? report.actions : [];
+    list.hidden = actions.length === 0;
     list.innerHTML = `
       <h3>行动项</h3>
-      ${report.actions.map((action) => `
+      ${actions.map((action) => `
         <article class="action-card ${action.priority}">
           <div>
             <strong>${escapeHtml(action.title)}</strong>
@@ -1833,6 +1977,7 @@
     }
     if (event === "final") {
       renderReportFinal(payload.report);
+      loadReportHistory();
     }
     if (event === "error") {
       throw new Error(payload.message || "报告生成失败");
@@ -1953,6 +2098,19 @@
       if (state.report.final) copyText(state.report.final.markdown, "报告 Markdown 已复制");
     });
     $("#exportReportButton").addEventListener("click", exportReport);
+    $("#refreshReportHistoryButton").addEventListener("click", loadReportHistory);
+    $("#reportHistorySearch").addEventListener("input", (event) => {
+      state.report.history.query = event.target.value;
+      renderReportHistory();
+    });
+    $("#reportHistoryLevelFilter").addEventListener("change", (event) => {
+      state.report.history.level = event.target.value;
+      renderReportHistory();
+    });
+    $("#reportHistoryProviderFilter").addEventListener("change", (event) => {
+      state.report.history.provider = event.target.value;
+      renderReportHistory();
+    });
 
     root.addEventListener("click", (event) => {
       if (!event.target.closest(".searchable-select-picker")) {
@@ -2051,6 +2209,11 @@
         generateReport(state.report.lastRequest);
         return;
       }
+      const historyViewButton = event.target.closest("[data-report-history-view]");
+      if (historyViewButton) {
+        showHistoryReport(historyViewButton.dataset.reportHistoryView);
+        return;
+      }
       if (!event.target.closest(".entity-picker")) {
         closeSearchableSelects();
         state.entities.open = false;
@@ -2102,7 +2265,7 @@
       setReportDefaults();
       bindEvents();
       renderAlertHistory();
-      await Promise.all([loadTemplates(), loadEntities(), loadAlertHistory()]);
+      await Promise.all([loadTemplates(), loadEntities(), loadAlertHistory(), loadReportHistory()]);
       refreshIcons();
     } catch (error) {
       root.innerHTML = `
@@ -2122,6 +2285,9 @@
     activate(tab = "templates") {
       init().then(() => {
         setActiveTab(tab);
+        if (tab === "report" && !state.report.history.items.length) {
+          loadReportHistory();
+        }
         refreshIcons();
       });
     }
