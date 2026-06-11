@@ -734,11 +734,27 @@ export class SyncService {
     const results = [];
     const workerPrefix = `pid-${process.pid}-${Date.now()}`;
 
+    const waitForPendingRetry = async () => {
+      if (!runId) return false;
+      const stats = readCollectionRunFinalStats({ runId, queueName });
+      if (!stats || Number(stats.pending || 0) <= 0) return false;
+      const nextAttemptMs = Date.parse(stats.nextAttemptAt || '');
+      const waitMs = Number.isFinite(nextAttemptMs)
+        ? nextAttemptMs - Date.now()
+        : 500;
+      await sleep(Math.min(5000, Math.max(250, waitMs)));
+      return true;
+    };
+
     const workerLoop = async (index) => {
       const workerId = `${workerPrefix}-${index + 1}`;
       while (true) {
         const job = claimCollectionJob({ queueName, runId, workerId });
-        if (!job) break;
+        if (!job) {
+          const shouldContinue = await waitForPendingRetry();
+          if (shouldContinue) continue;
+          break;
+        }
         const startedAt = new Date().toISOString();
         const startedMs = Date.now();
         try {
@@ -851,6 +867,7 @@ export class SyncService {
         failed,
         pending,
         retries,
+        failureSummary: finalStats?.failureSummary || '',
         workerConcurrency: workerCount
       },
       taskRecords: scopedRecords,

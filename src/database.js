@@ -162,6 +162,90 @@ function readLatestInsightData({ databaseFile, limit = 50_000, accountTimeZones 
   }
 }
 
+function readCollectionStatsForMonitorRuns(db, runIds = []) {
+  const uniqueRunIds = [...new Set(runIds.map((id) => String(id || "").trim()).filter(Boolean))];
+  if (!uniqueRunIds.length || !tableExists(db, "collection_jobs")) {
+    return new Map();
+  }
+  const placeholders = uniqueRunIds.map(() => "?").join(", ");
+  const rows = db.prepare(`
+    SELECT
+      run_id,
+      COUNT(*) AS total,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status = 'retry' THEN 1 ELSE 0 END) AS retry,
+      SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+      SUM(CASE WHEN status = 'waiting' THEN 1 ELSE 0 END) AS waiting,
+      SUM(CASE WHEN attempts > 1 THEN attempts - 1 ELSE 0 END) AS retries,
+      MAX(updated_at) AS updated_at
+    FROM collection_jobs
+    WHERE run_id IN (${placeholders})
+    GROUP BY run_id
+  `).all(...uniqueRunIds);
+  return new Map(rows.map((row) => {
+    const waiting = Number(row.waiting || 0);
+    const retry = Number(row.retry || 0);
+    const running = Number(row.running || 0);
+    return [row.run_id, {
+      total: Number(row.total || 0),
+      completed: Number(row.completed || 0),
+      failed: Number(row.failed || 0),
+      pending: waiting + retry + running,
+      retries: Number(row.retries || 0),
+      updatedAt: row.updated_at || ""
+    }];
+  }));
+}
+
+function normalizeMonitorRunWithCollectionStats(run, collectionStatsByRunId) {
+  const runId = run?.metadata?.runId || "";
+  const stats = collectionStatsByRunId.get(runId);
+  if (!stats?.total) return run;
+  const status = stats.pending > 0
+    ? "partial"
+    : stats.failed > 0
+      ? "partial"
+      : "success";
+  const errorSummary = status === "success"
+    ? ""
+    : run.error_summary || (stats.pending ? `${stats.pending} 个任务仍待重试` : "");
+  return {
+    ...run,
+    status,
+    success_count: stats.completed,
+    failed_count: stats.failed,
+    retry_count: stats.retries,
+    error_summary: errorSummary,
+    collection_finalized_at: stats.updatedAt
+  };
+}
+
+function normalizeMonitorStateWithRecentRuns(state, recentRuns) {
+  const latestByListType = new Map();
+  recentRuns.forEach((run) => {
+    if (!latestByListType.has(run.list_type)) {
+      latestByListType.set(run.list_type, run);
+    }
+  });
+  return state.map((item) => {
+    const latestRun = latestByListType.get(item.list_type);
+    if (!latestRun) return item;
+    return {
+      ...item,
+      last_run_at: latestRun.completed_at || latestRun.started_at || item.last_run_at,
+      next_run_at: latestRun.next_run_at || item.next_run_at,
+      last_status: latestRun.status,
+      success_count: latestRun.success_count,
+      failed_count: latestRun.failed_count,
+      retry_count: latestRun.retry_count,
+      duration_ms: latestRun.duration_ms,
+      error_summary: latestRun.error_summary,
+      metadata: latestRun.metadata || item.metadata
+    };
+  });
+}
+
 function readMonitorOverview({ databaseFile, runLimit = 8 } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return {
@@ -199,7 +283,7 @@ function readMonitorOverview({ databaseFile, runLimit = 8 } = {}) {
       };
     }
 
-    const state = db.prepare(`
+    const stateRows = db.prepare(`
       SELECT *
       FROM monitor_state
       ORDER BY list_type
@@ -207,7 +291,7 @@ function readMonitorOverview({ databaseFile, runLimit = 8 } = {}) {
       ...row,
       metadata: parseJson(row.metadata_json, {})
     }));
-    const recentRuns = db.prepare(`
+    const recentRunRows = db.prepare(`
       SELECT *
       FROM monitor_runs
       ORDER BY started_at DESC
@@ -216,6 +300,12 @@ function readMonitorOverview({ databaseFile, runLimit = 8 } = {}) {
       ...row,
       metadata: parseJson(row.metadata_json, {})
     }));
+    const collectionStatsByRunId = readCollectionStatsForMonitorRuns(
+      db,
+      recentRunRows.map((run) => run.metadata?.runId)
+    );
+    const recentRuns = recentRunRows.map((run) => normalizeMonitorRunWithCollectionStats(run, collectionStatsByRunId));
+    const state = normalizeMonitorStateWithRecentRuns(stateRows, recentRuns);
     const taskSummary = db.prepare(`
       SELECT
         run_id,

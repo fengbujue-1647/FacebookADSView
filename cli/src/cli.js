@@ -260,7 +260,8 @@ async function runAdMonitorCycle({ service, settings, options = {} }) {
     });
     if (result.queue.stats.failed > 0 || result.queue.stats.pending > 0) {
       status = 'partial';
-      errorSummary = summarizeErrors(result.queue.taskRecords)
+      errorSummary = result.queue.stats.failureSummary
+        || summarizeErrors(result.queue.taskRecords)
         || (result.queue.stats.pending ? `仍有 ${result.queue.stats.pending} 个任务等待重试` : '');
     }
   } catch (error) {
@@ -349,7 +350,8 @@ async function runCampaignMonitorCycle({ service, settings, options = {} }) {
     });
     if (result.queue.stats.failed > 0 || result.queue.stats.pending > 0) {
       status = 'partial';
-      errorSummary = summarizeErrors(result.queue.taskRecords)
+      errorSummary = result.queue.stats.failureSummary
+        || summarizeErrors(result.queue.taskRecords)
         || (result.queue.stats.pending ? `仍有 ${result.queue.stats.pending} 个任务等待重试` : '');
     }
   } catch (error) {

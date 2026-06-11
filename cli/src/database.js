@@ -1522,6 +1522,7 @@ export function readCollectionRunFinalStats({
   const normalizedRunId = String(runId || '').trim();
   if (!normalizedRunId) return null;
   return withDatabase((db) => {
+    const now = new Date().toISOString();
     const row = db.prepare(`
       SELECT
         COUNT(*) AS total,
@@ -1530,16 +1531,32 @@ export function readCollectionRunFinalStats({
         SUM(CASE WHEN status = 'retry' THEN 1 ELSE 0 END) AS retry,
         SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
         SUM(CASE WHEN status = 'waiting' THEN 1 ELSE 0 END) AS waiting,
+        SUM(CASE WHEN status IN ('waiting', 'retry') AND (next_attempt_at = '' OR next_attempt_at <= ?) THEN 1 ELSE 0 END) AS due,
+        MIN(CASE WHEN status IN ('waiting', 'retry') AND next_attempt_at <> '' THEN next_attempt_at ELSE NULL END) AS next_attempt_at,
         SUM(CASE WHEN attempts > 1 THEN attempts - 1 ELSE 0 END) AS retries,
         SUM(row_count) AS rows,
         SUM(raw_row_count) AS raw_rows
       FROM collection_jobs
       WHERE queue_name = ?
         AND run_id = ?
-    `).get(queueName, normalizedRunId);
+    `).get(now, queueName, normalizedRunId);
+    const failedJobs = db.prepare(`
+      SELECT object_ids_json, error
+      FROM collection_jobs
+      WHERE queue_name = ?
+        AND run_id = ?
+        AND status = 'failed'
+        AND error <> ''
+      ORDER BY updated_at DESC
+      LIMIT 3
+    `).all(queueName, normalizedRunId);
     const waiting = Number(row?.waiting || 0);
     const retry = Number(row?.retry || 0);
     const running = Number(row?.running || 0);
+    const failureSummary = failedJobs.map((job) => {
+      const ids = parseJson(job.object_ids_json, []).join(',');
+      return `${ids || '-'}:${job.error}`;
+    }).join(' | ');
     return {
       total: Number(row?.total || 0),
       completed: Number(row?.completed || 0),
@@ -1548,9 +1565,12 @@ export function readCollectionRunFinalStats({
       waiting,
       retry,
       running,
+      due: Number(row?.due || 0),
+      nextAttemptAt: row?.next_attempt_at || '',
       retries: Number(row?.retries || 0),
       rows: Number(row?.rows || 0),
-      rawRows: Number(row?.raw_rows || 0)
+      rawRows: Number(row?.raw_rows || 0),
+      failureSummary
     };
   }, databaseFile);
 }
