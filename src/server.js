@@ -2405,22 +2405,40 @@ async function callDeepSeekAnalysis(report) {
   }
 
   const model = deepSeekModelName();
-  const result = await postJsonWithTimeout(`${deepSeekBaseUrl().replace(/\/+$/, "")}/chat/completions`, {
-    model,
-    messages: [
-      {
-        role: "system",
-        content: "你是严谨的广告数据分析师，只基于用户提供的数据做判断，使用中文输出 Markdown。"
-      },
-      {
-        role: "user",
-        content: buildDeepSeekPrompt(report)
-      }
-    ],
-    stream: false
-  }, 45_000, 0, {
-    Authorization: `Bearer ${apiKey}`
-  });
+  let result;
+  try {
+    result = await postJsonWithTimeout(`${deepSeekBaseUrl().replace(/\/+$/, "")}/chat/completions`, {
+      model,
+      messages: [
+        {
+          role: "system",
+          content: "你是严谨的广告数据分析师，只基于用户提供的数据做判断，使用中文输出 Markdown。"
+        },
+        {
+          role: "user",
+          content: buildDeepSeekPrompt(report)
+        }
+      ],
+      stream: false
+    }, 45_000, 0, {
+      Authorization: `Bearer ${apiKey}`
+    });
+  } catch (error) {
+    return {
+      ...report,
+      provider: "local",
+      model,
+      ai_status: "request_error",
+      ai_message: `DeepSeek 调用异常：${error.message || "请求失败"}，已返回本地规则分析。`,
+      markdown: [
+        "# Agent 智能分析报告",
+        "",
+        `> DeepSeek 调用异常：${error.message || "请求失败"}。以下为本地规则分析结果。`,
+        "",
+        report.markdown
+      ].join("\n")
+    };
+  }
 
   if (!result.ok) {
     return {
@@ -2439,7 +2457,25 @@ async function callDeepSeekAnalysis(report) {
     };
   }
 
-  const payload = JSON.parse(result.body || "{}");
+  let payload = {};
+  try {
+    payload = JSON.parse(result.body || "{}");
+  } catch {
+    return {
+      ...report,
+      provider: "local",
+      model,
+      ai_status: "invalid_response",
+      ai_message: "DeepSeek 返回格式异常，已返回本地规则分析。",
+      markdown: [
+        "# Agent 智能分析报告",
+        "",
+        "> DeepSeek 返回格式异常。以下为本地规则分析结果。",
+        "",
+        report.markdown
+      ].join("\n")
+    };
+  }
   const content = payload.choices?.[0]?.message?.content || "";
   if (!content.trim()) {
     return {
