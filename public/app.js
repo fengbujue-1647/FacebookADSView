@@ -1405,10 +1405,36 @@ function schedulerStatusMeta(scheduler = {}) {
 }
 
 function historyLabel(run) {
-  const slices = run?.metadata?.slices || [];
-  if (slices.length >= 7) return `补全 ${slices.length} 天`;
-  if (slices.length > 1) return `${slices.length} 天增量`;
-  if (slices.length === 1) return "增量覆盖";
+  const slices = Array.isArray(run?.metadata?.slices) ? run.metadata.slices : [];
+  if (slices.length) {
+    const reasonSet = new Set(slices.map((slice) => slice.reason).filter(Boolean));
+    const uniqueObjects = new Set(slices.map((slice) => String(slice.objectId || "")).filter(Boolean));
+    const objectLabel = uniqueObjects.size
+      ? uniqueObjects.size === slices.length
+        ? `${uniqueObjects.size} 个对象`
+        : `${uniqueObjects.size} 个对象 / ${slices.length} 个窗口`
+      : `${slices.length} 个窗口`;
+    const missingBuckets = slices.reduce((sum, slice) => sum + Math.max(0, Number(slice.missingBucketCount || 0)), 0);
+    const rowCount = Number(run?.metadata?.rowCount);
+    const baseLabel = reasonSet.has("initial-7d-backfill")
+      ? "首次回补"
+      : reasonSet.has("manual-range")
+        ? "手动范围"
+        : missingBuckets > 0
+          ? "增量采集"
+          : "增量检查";
+    const parts = [
+      baseLabel,
+      objectLabel,
+      missingBuckets > 0 ? `缺失 ${missingBuckets} 个小时桶` : "无缺失小时桶"
+    ];
+    if (Number.isFinite(rowCount)) {
+      parts.push(`写入 ${rowCount} 行`);
+    }
+    return parts.join(" · ");
+  }
+  const requestedCount = Number(run?.requested_count || 0);
+  if (requestedCount > 0) return `本轮采集 · ${requestedCount} 个对象`;
   return "等待运行";
 }
 
@@ -1565,18 +1591,21 @@ function renderMonitorStatus() {
   els.recentRunsFilter.value = runFilter;
   const runs = runFilter === "all" ? allRuns : allRuns.filter((run) => run.list_type === runFilter);
   els.recentRunsBody.innerHTML = runs.length
-    ? runs.map((run) => `
-      <tr>
-        <td>${run.list_type === "ads" ? "List 2" : "List 1"}</td>
-        <td><span class="run-badge ${escapeHtml(run.status)}">${statusLabel(run.status)}</span></td>
-        <td>${formatIso(run.completed_at || run.started_at)}</td>
-        <td>${formatIso(run.next_run_at)}</td>
-        <td>${Number(run.success_count || 0)} / ${Number(run.failed_count || 0)}</td>
-        <td>${Number(run.retry_count || 0)}</td>
-        <td>${formatDuration(run.duration_ms)}</td>
-        <td class="error-cell ${run.error_summary ? "has-error" : ""}">${escapeHtml(run.error_summary || historyLabel(run))}</td>
-      </tr>
-    `).join("")
+    ? runs.map((run) => {
+      const note = run.error_summary || historyLabel(run);
+      return `
+        <tr>
+          <td>${run.list_type === "ads" ? "List 2" : "List 1"}</td>
+          <td><span class="run-badge ${escapeHtml(run.status)}">${statusLabel(run.status)}</span></td>
+          <td>${formatIso(run.completed_at || run.started_at)}</td>
+          <td>${formatIso(run.next_run_at)}</td>
+          <td>${Number(run.success_count || 0)} / ${Number(run.failed_count || 0)}</td>
+          <td>${Number(run.retry_count || 0)}</td>
+          <td>${formatDuration(run.duration_ms)}</td>
+          <td class="error-cell ${run.error_summary ? "has-error" : ""}" title="${escapeHtml(note)}">${escapeHtml(note)}</td>
+        </tr>
+      `;
+    }).join("")
     : `<tr><td colspan="8">${runFilter === "all" ? "还没有监控批次，运行 monitor-run 后显示。" : "当前筛选下还没有监控批次。"}</td></tr>`;
 }
 
