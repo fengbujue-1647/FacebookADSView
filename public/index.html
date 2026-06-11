@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FB 广告数据看板</title>
-  <link rel="stylesheet" href="/styles.css?v=20260611-3">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=20260611-4">
+  <link rel="alternate icon" type="image/png" href="/favicon.png?v=20260611-4">
+  <link rel="stylesheet" href="/styles.css?v=20260611-4">
   <link rel="stylesheet" href="/alert-ai.css?v=20260611-3">
   <script defer src="/vendor/echarts.min.js?v=20260611-3"></script>
 </head>
@@ -12,7 +14,9 @@
   <div class="app-shell">
     <aside class="sidebar" aria-label="模块导航">
       <div class="brand">
-        <div class="brand-mark">FB</div>
+        <div class="brand-mark" aria-label="ZAI 工作室">
+          <img src="/favicon.svg?v=20260611-4" alt="">
+        </div>
         <div>
           <strong>广告看板</strong>
           <span>Meta Insights</span>
@@ -46,10 +50,15 @@
         </button>
       </nav>
 
-      <div class="side-note">
-        <span>数据源</span>
-        <strong id="dataSourceName">Demo Insights</strong>
-        <small id="dataSourceMeta">待接入采集数据</small>
+      <div class="sidebar-footer">
+        <div class="studio-lockup" aria-label="ZAI 工作室">
+          <img src="/favicon.svg?v=20260611-4" alt="">
+        </div>
+        <div class="side-note">
+          <span>数据源</span>
+          <strong id="dataSourceName">Demo Insights</strong>
+          <small id="dataSourceMeta">待接入采集数据</small>
+        </div>
       </div>
     </aside>
 

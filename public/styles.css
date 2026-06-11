@@ -83,7 +83,7 @@ textarea:focus-visible {
 
 .brand {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-columns: 68px minmax(0, 1fr);
   gap: 12px;
   align-items: center;
   padding: 4px 6px 16px;
@@ -91,14 +91,20 @@ textarea:focus-visible {
 }
 
 .brand-mark {
-  width: 44px;
-  height: 44px;
+  width: 68px;
+  height: 42px;
   display: grid;
   place-items: center;
   border-radius: var(--radius);
-  background: #e8f0ff;
-  color: var(--blue);
-  font-weight: 900;
+  background: #f8fbff;
+  padding: 8px 9px;
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .brand strong,
@@ -145,8 +151,30 @@ button svg,
   border-color: rgba(255, 255, 255, 0.12);
 }
 
-.side-note {
+.sidebar-footer {
   margin-top: auto;
+  display: grid;
+  gap: 12px;
+}
+
+.studio-lockup {
+  height: 54px;
+  display: grid;
+  place-items: center;
+  padding: 12px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius);
+  background: #f8fbff;
+}
+
+.studio-lockup img {
+  display: block;
+  width: min(168px, 100%);
+  height: 30px;
+  object-fit: contain;
+}
+
+.side-note {
   padding: 13px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius);
@@ -2429,7 +2457,7 @@ td {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
-  .side-note {
+  .sidebar-footer {
     display: none;
   }
 
