@@ -519,6 +519,267 @@ function parseCollectionBatch(row) {
   };
 }
 
+function collectionJobObjectIds(row) {
+  return parseJson(row?.object_ids_json, [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+}
+
+function collectionIdColumn(objectType) {
+  if (objectType === "campaigns") return "campaign_id";
+  if (objectType === "adsets") return "adset_id";
+  return "ad_id";
+}
+
+function rowCountsForCollectionJob(db, job) {
+  const objectIds = collectionJobObjectIds(job);
+  if (!objectIds.length || !job?.bucket_key || !tableExists(db, "insight_rows")) return {};
+  const idColumn = collectionIdColumn(job.object_type);
+  const rows = db.prepare(`
+    SELECT ${idColumn} AS object_id, COUNT(*) AS row_count
+    FROM insight_rows
+    WHERE ${idColumn} IN (${placeholders(objectIds)})
+      AND hour_start = ?
+    GROUP BY ${idColumn}
+  `).all(...objectIds, job.bucket_key);
+  return Object.fromEntries(rows.map((row) => [String(row.object_id), Number(row.row_count || 0)]));
+}
+
+function markCollectionJobCompletedFromSuccessBatch(db, job, batch, completedAt) {
+  const finalCompletedAt = completedAt || batch.completed_at || new Date().toISOString();
+  const rowCountByObject = rowCountsForCollectionJob(db, job);
+  const metadata = parseJson(job.metadata_json, {});
+  db.prepare(`
+    UPDATE collection_jobs
+    SET status = 'completed',
+      completed_at = ?,
+      duration_ms = ?,
+      row_count = ?,
+      raw_row_count = ?,
+      rate_limited = 0,
+      quota_limited = 0,
+      locked_at = '',
+      locked_by = '',
+      next_attempt_at = '',
+      error = '',
+      metadata_json = ?,
+      updated_at = ?
+    WHERE id = ?
+  `).run(
+    finalCompletedAt,
+    Number(batch.duration_ms || 0),
+    Number(batch.row_count || 0),
+    Number(batch.raw_row_count || 0),
+    JSON.stringify({
+      ...metadata,
+      successBatchId: batch.id,
+      watchdogRecoveredAt: finalCompletedAt
+    }),
+    finalCompletedAt,
+    job.id
+  );
+
+  const completedBucket = db.prepare(`
+    INSERT INTO collection_completed_buckets (
+      object_type,
+      object_id,
+      account_id,
+      account_timezone,
+      bucket_key,
+      date_start,
+      hourly_range,
+      completed_at,
+      row_count,
+      job_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (object_type, object_id, bucket_key)
+    DO UPDATE SET
+      account_id = excluded.account_id,
+      account_timezone = excluded.account_timezone,
+      date_start = excluded.date_start,
+      hourly_range = excluded.hourly_range,
+      completed_at = excluded.completed_at,
+      row_count = excluded.row_count,
+      job_id = excluded.job_id
+  `);
+  const watermark = db.prepare(`
+    INSERT INTO collection_watermarks (
+      object_type,
+      object_id,
+      account_id,
+      account_timezone,
+      last_completed_bucket,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT (object_type, object_id)
+    DO UPDATE SET
+      account_id = excluded.account_id,
+      account_timezone = excluded.account_timezone,
+      last_completed_bucket = CASE
+        WHEN excluded.last_completed_bucket > collection_watermarks.last_completed_bucket
+        THEN excluded.last_completed_bucket
+        ELSE collection_watermarks.last_completed_bucket
+      END,
+      updated_at = excluded.updated_at
+  `);
+
+  collectionJobObjectIds(job).forEach((objectId) => {
+    const objectRowCount = Number(rowCountByObject[String(objectId)] || 0);
+    completedBucket.run(
+      job.object_type,
+      objectId,
+      job.account_id,
+      job.account_timezone,
+      job.bucket_key,
+      job.date_start,
+      job.hourly_range,
+      finalCompletedAt,
+      objectRowCount,
+      job.id
+    );
+    watermark.run(
+      job.object_type,
+      objectId,
+      job.account_id,
+      job.account_timezone,
+      job.bucket_key,
+      finalCompletedAt
+    );
+  });
+
+  return {
+    jobId: job.id,
+    action: "completed_from_success_batch",
+    batchId: batch.id,
+    completedAt: finalCompletedAt
+  };
+}
+
+function recoverStaleCollectionJobs({
+  databaseFile,
+  queueName = "insights",
+  runId = "",
+  staleAfterMs = 5 * 60 * 1000,
+  dryRun = false
+} = {}) {
+  const normalizedRunId = String(runId || "").trim();
+  const result = {
+    queueName,
+    runId: normalizedRunId,
+    dryRun: Boolean(dryRun),
+    staleAfterMs,
+    threshold: new Date(Date.now() - staleAfterMs).toISOString(),
+    scanned: 0,
+    completedFromSuccess: 0,
+    retried: 0,
+    jobs: []
+  };
+  if (!databaseFile || !fs.existsSync(databaseFile)) {
+    return result;
+  }
+
+  const db = new DatabaseSync(databaseFile);
+  try {
+    if (!tableExists(db, "collection_jobs")) {
+      return result;
+    }
+    const staleTimestamp = "COALESCE(NULLIF(updated_at, ''), NULLIF(locked_at, ''), NULLIF(started_at, ''), NULLIF(created_at, ''))";
+    const params = [queueName, result.threshold];
+    const runClause = normalizedRunId ? "AND run_id = ?" : "";
+    if (normalizedRunId) {
+      params.push(normalizedRunId);
+    }
+    const staleJobs = db.prepare(`
+      SELECT *
+      FROM collection_jobs
+      WHERE queue_name = ?
+        AND status = 'running'
+        AND ${staleTimestamp} IS NOT NULL
+        AND ${staleTimestamp} < ?
+        ${runClause}
+      ORDER BY ${staleTimestamp}
+    `).all(...params);
+    result.scanned = staleJobs.length;
+    if (!staleJobs.length) {
+      return result;
+    }
+
+    const canReadBatches = tableExists(db, "collection_job_batches");
+    const planned = staleJobs.map((job) => {
+      const successBatch = canReadBatches
+        ? db.prepare(`
+          SELECT *
+          FROM collection_job_batches
+          WHERE job_id = ?
+            AND status = 'success'
+            AND completed_at <> ''
+          ORDER BY completed_at DESC, started_at DESC
+          LIMIT 1
+        `).get(job.id)
+        : null;
+      return {
+        job,
+        successBatch,
+        action: successBatch ? "completed_from_success_batch" : "retry"
+      };
+    });
+
+    if (!dryRun) {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        planned.forEach((item) => {
+          if (item.successBatch) {
+            markCollectionJobCompletedFromSuccessBatch(db, item.job, item.successBatch, item.successBatch.completed_at || new Date().toISOString());
+          } else {
+            const now = new Date().toISOString();
+            db.prepare(`
+              UPDATE collection_jobs
+              SET status = 'retry',
+                next_attempt_at = ?,
+                locked_at = '',
+                locked_by = '',
+                error = CASE WHEN error = '' THEN 'watchdog recovered stale running job for retry' ELSE error END,
+                updated_at = ?
+              WHERE id = ?
+            `).run(now, now, item.job.id);
+          }
+        });
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+
+    planned.forEach((item) => {
+      if (item.successBatch) {
+        result.completedFromSuccess += 1;
+      } else {
+        result.retried += 1;
+      }
+      result.jobs.push({
+        jobId: item.job.id,
+        runId: item.job.run_id,
+        action: item.action,
+        batchId: item.successBatch?.id || "",
+        lockedAt: item.job.locked_at || "",
+        updatedAt: item.job.updated_at || "",
+        objectType: item.job.object_type || "",
+        dateStart: item.job.date_start || "",
+        bucketKey: item.job.bucket_key || ""
+      });
+    });
+    return result;
+  } catch (error) {
+    return {
+      ...result,
+      error: error.message
+    };
+  } finally {
+    db.close();
+  }
+}
+
 function readCollectionQueueOverview({ databaseFile, queueName = "insights", runId = "", limit = 50, offset = 0, page = 1, pageSize = 50 } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return emptyCollectionQueueOverview(queueName);
@@ -1266,6 +1527,7 @@ module.exports = {
   readLatestInsightData,
   readMonitorOverview,
   readCollectionQueueOverview,
+  recoverStaleCollectionJobs,
   deleteCollectionRun,
   readActiveResourceCandidates,
   readAnalysisEntityOptions,

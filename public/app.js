@@ -89,6 +89,9 @@ const state = {
   monitorStatus: null,
   collectionQueue: null,
   collectionRunner: null,
+  collectionWatchdog: null,
+  collectionWatchdogManual: false,
+  collectionWatchdogManualUntil: 0,
   collectionPage: 1,
   collectionRunId: "",
   monitorRunFilter: "all",
@@ -261,7 +264,8 @@ const iconPaths = {
   "sparkles": ["M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z", "M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z", "M5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14z"],
   "file-text": ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M8 13h8", "M8 17h8", "M8 9h2"],
   "triangle-alert": ["M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z", "M12 9v4", "M12 17h.01"],
-  "trash-2": ["M3 6h18", "M8 6V4h8v2", "M6 6l1 16h10l1-16", "M10 11v6", "M14 11v6"]
+  "trash-2": ["M3 6h18", "M8 6V4h8v2", "M6 6l1 16h10l1-16", "M10 11v6", "M14 11v6"],
+  "wrench": ["M14.7 6.3a4 4 0 0 0-5 5L3 18v3h3l6.7-6.7a4 4 0 0 0 5-5l-3 3-3-3 3-3z"]
 };
 
 const els = {
@@ -332,6 +336,7 @@ const els = {
   collectionPageInfo: document.getElementById("collectionPageInfo"),
   collectionRunModeSelect: document.getElementById("collectionRunModeSelect"),
   refreshCollectionQueueButton: document.getElementById("refreshCollectionQueueButton"),
+  recoverCollectionQueueButton: document.getElementById("recoverCollectionQueueButton"),
   runCollectionQueueButton: document.getElementById("runCollectionQueueButton"),
   envConfigCaption: document.getElementById("envConfigCaption"),
   envFileStatus: document.getElementById("envFileStatus"),
@@ -1416,13 +1421,15 @@ function historyLabel(run) {
       : `${slices.length} 个窗口`;
     const missingBuckets = slices.reduce((sum, slice) => sum + Math.max(0, Number(slice.missingBucketCount || 0)), 0);
     const rowCount = Number(run?.metadata?.rowCount);
-    const baseLabel = reasonSet.has("initial-7d-backfill")
-      ? "首次回补"
-      : reasonSet.has("manual-range")
-        ? "手动范围"
-        : missingBuckets > 0
-          ? "增量采集"
-          : "增量检查";
+    const baseLabel = reasonSet.has("initial-90d-backfill") || reasonSet.has("expanded-90d-backfill")
+      ? "90天回补"
+      : reasonSet.has("initial-7d-backfill")
+        ? "首次回补"
+        : reasonSet.has("manual-range")
+          ? "手动范围"
+          : missingBuckets > 0
+            ? "增量采集"
+            : "增量检查";
     const parts = [
       baseLabel,
       objectLabel,
@@ -1731,6 +1738,11 @@ function collectionJobMeta(job) {
   ].filter(Boolean).join(" · ");
 }
 
+function collectionWatchdogText(watchdog, { includeEmpty = false } = {}) {
+  if (!watchdog || (!includeEmpty && Number(watchdog.scanned || 0) <= 0)) return "";
+  return `watchdog 扫描 ${Number(watchdog.scanned || 0)} · 补完成 ${Number(watchdog.completedFromSuccess || 0)} · 转重试 ${Number(watchdog.retried || 0)}`;
+}
+
 function renderCollectionJobCard(job) {
   const tone = collectionJobTone(job);
   const percent = collectionJobProgress(job);
@@ -1800,6 +1812,12 @@ function renderCollectionConsole() {
   els.collectionQueueCaption.textContent = queue?.generatedAt
     ? `${runnerLabel} · 自动刷新 ${COLLECTION_REFRESH_INTERVAL_MS / 1000}s · ${formatIsoWithSeconds(queue.generatedAt)}`
     : runnerLabel;
+  const watchdogLabel = collectionWatchdogText(state.collectionWatchdog, {
+    includeEmpty: state.collectionWatchdogManual && Date.now() < state.collectionWatchdogManualUntil
+  });
+  if (queue?.generatedAt && watchdogLabel) {
+    els.collectionQueueCaption.textContent = [runnerLabel, watchdogLabel, `自动刷新 ${COLLECTION_REFRESH_INTERVAL_MS / 1000}s`, formatIsoWithSeconds(queue.generatedAt)].join(" · ");
+  }
   if (els.collectionCurrentCaption) {
     els.collectionCurrentCaption.textContent = currentRun
       ? `${collectionRunStatusText(currentRun.status)} · ${collectionRunTitle(currentRun)} · ${formatIso(currentRun.createdAt)}`
@@ -2020,6 +2038,15 @@ async function loadCollectionQueueStatus(page = state.collectionPage, runId = st
     const payload = await response.json();
     state.collectionQueue = payload.ok ? payload.queue : null;
     state.collectionRunner = payload.ok ? payload.runner : null;
+    const nextWatchdog = payload.ok ? payload.watchdog || null : null;
+    const keepManualWatchdog = state.collectionWatchdogManual
+      && Date.now() < state.collectionWatchdogManualUntil
+      && Number(nextWatchdog?.scanned || 0) <= 0;
+    if (!keepManualWatchdog) {
+      state.collectionWatchdog = nextWatchdog;
+      state.collectionWatchdogManual = false;
+      state.collectionWatchdogManualUntil = 0;
+    }
     if (!selectedRunId && state.collectionQueue?.currentRun?.runId) {
       state.collectionRunId = state.collectionQueue.currentRun.runId;
     }
@@ -2030,6 +2057,9 @@ async function loadCollectionQueueStatus(page = state.collectionPage, runId = st
   } catch {
     state.collectionQueue = null;
     state.collectionRunner = null;
+    state.collectionWatchdog = null;
+    state.collectionWatchdogManual = false;
+    state.collectionWatchdogManualUntil = 0;
   } finally {
     state.collectionLoading = false;
   }
@@ -2059,6 +2089,39 @@ async function runCollectionQueue() {
     els.collectionQueueCaption.textContent = error.message || "采集任务启动失败";
   } finally {
     els.runCollectionQueueButton.disabled = false;
+  }
+}
+
+async function recoverCollectionQueue() {
+  if (!els.recoverCollectionQueueButton) return;
+  els.recoverCollectionQueueButton.disabled = true;
+  els.collectionQueueCaption.textContent = "正在诊断卡住任务";
+  try {
+    const response = await fetch("/api/collection/queue/recover", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        run_id: state.collectionRunId || state.collectionQueue?.currentRun?.runId || ""
+      })
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || payload.watchdog?.error || "队列诊断恢复失败");
+    }
+    state.collectionWatchdog = payload.watchdog || null;
+    state.collectionWatchdogManual = true;
+    state.collectionWatchdogManualUntil = Date.now() + 10_000;
+    state.collectionQueue = payload.queue || state.collectionQueue;
+    state.collectionRunner = payload.runner || state.collectionRunner;
+    const watchdog = state.collectionWatchdog || {};
+    els.collectionQueueCaption.textContent = `诊断完成：扫描 ${Number(watchdog.scanned || 0)}，补完成 ${Number(watchdog.completedFromSuccess || 0)}，转重试 ${Number(watchdog.retried || 0)}`;
+    renderCollectionConsole();
+  } catch (error) {
+    els.collectionQueueCaption.textContent = error.message || "队列诊断恢复失败";
+  } finally {
+    els.recoverCollectionQueueButton.disabled = false;
   }
 }
 
@@ -3945,6 +4008,10 @@ function bindEvents() {
 
   els.refreshCollectionQueueButton.addEventListener("click", () => {
     loadCollectionQueueStatus(state.collectionPage, state.collectionRunId);
+  });
+
+  els.recoverCollectionQueueButton?.addEventListener("click", () => {
+    recoverCollectionQueue();
   });
 
   els.runCollectionQueueButton.addEventListener("click", () => {

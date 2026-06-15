@@ -133,14 +133,19 @@ export function addDaysToDateString(dateString, amount) {
   return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
 }
 
-export function recentSevenDays(timeZone = API_FALLBACK_TIME_ZONE, now = new Date()) {
+export function recentDays(timeZone = API_FALLBACK_TIME_ZONE, days = 7, now = new Date()) {
   const normalized = normalizeTimeZone(timeZone);
+  const dayCount = Math.max(1, Number.parseInt(days, 10) || 7);
   const until = formatDateInTimeZone(now, normalized);
   return {
-    since: addDaysToDateString(until, -6),
+    since: addDaysToDateString(until, -(dayCount - 1)),
     until,
     sourceTimeZone: normalized
   };
+}
+
+export function recentSevenDays(timeZone = API_FALLBACK_TIME_ZONE, now = new Date()) {
+  return recentDays(timeZone, 7, now);
 }
 
 export function dateRangeDays(since, until) {

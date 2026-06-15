@@ -7,7 +7,7 @@ import { normalizeInsight, insightColumns } from './normalizer.js';
 import { outputFile, outputJsonFile, rawFile, writeCsv, writeJson } from './storage.js';
 import {
   claimCollectionJob,
-  completeCollectionJob,
+  completeCollectionJobWithSuccessBatch,
   enqueueCollectionJobs,
   failCollectionJob,
   getInsightCoverage,
@@ -15,7 +15,7 @@ import {
   readCollectionWatermarks,
   readCollectionRunFinalStats,
   readResources,
-  recoverStaleCollectionJobs,
+  recoverStaleCollectionJobsWithSuccessBatches,
   writeApiTaskRuns,
   writeCollectionJobBatch,
   writeInsightBatch,
@@ -29,6 +29,7 @@ import {
   hourFromHourlyRange,
   latestSettledHourBucket,
   normalizeTimeZone,
+  recentDays,
   recentSevenDays
 } from './time.js';
 
@@ -82,6 +83,9 @@ const INFO_FIELDS = [
 
 const HOURLY_BREAKDOWN = 'hourly_stats_aggregated_by_advertiser_time_zone';
 const META_BATCH_ID_LIMIT = 50;
+const COLLECTION_BACKFILL_DAYS = 90;
+const INITIAL_COLLECTION_BACKFILL_REASON = `initial-${COLLECTION_BACKFILL_DAYS}d-backfill`;
+const EXPANDED_COLLECTION_BACKFILL_REASON = `expanded-${COLLECTION_BACKFILL_DAYS}d-backfill`;
 
 function chunks(items, size) {
   const result = [];
@@ -493,38 +497,89 @@ export class SyncService {
     const watermarks = readCollectionWatermarks({ objectType: resourceType, ids });
     const groups = new Map();
     const plannedSlices = [];
+    const planningRows = [];
+    const allBucketKeys = new Set();
+    const settledByTimeZone = new Map();
+    const recentByTimeZone = new Map();
+    const bucketsByWindow = new Map();
 
     for (const resource of sourceRows) {
       const objectId = String(resource.id || '').trim();
       if (!objectId) continue;
       const sourceTimeZone = sourceTimeZoneFor(resource, accountMap);
-      const latestSettled = latestSettledHourBucket(sourceTimeZone);
-      const recent = recentSevenDays(sourceTimeZone);
+      if (!settledByTimeZone.has(sourceTimeZone)) {
+        settledByTimeZone.set(sourceTimeZone, latestSettledHourBucket(sourceTimeZone));
+      }
+      if (!recentByTimeZone.has(sourceTimeZone)) {
+        recentByTimeZone.set(sourceTimeZone, recentDays(sourceTimeZone, COLLECTION_BACKFILL_DAYS));
+      }
+      const latestSettled = settledByTimeZone.get(sourceTimeZone);
+      const recent = recentByTimeZone.get(sourceTimeZone);
       const watermark = watermarks.get(objectId)?.last_completed_bucket || '';
-      const planSince = since || (watermark ? watermark.slice(0, 10) : recent.since);
+      const watermarkDate = watermark ? watermark.slice(0, 10) : '';
+      const planSince = since || (watermarkDate && watermarkDate < recent.since ? watermarkDate : recent.since);
       const planUntil = until || latestSettled.dateStart;
-      const buckets = enumerateSettledHourBuckets({
-        since: planSince,
-        until: planUntil,
-        timeZone: sourceTimeZone
+      const bucketWindowKey = `${sourceTimeZone}|${planSince}|${planUntil}`;
+      if (!bucketsByWindow.has(bucketWindowKey)) {
+        bucketsByWindow.set(bucketWindowKey, enumerateSettledHourBuckets({
+          since: planSince,
+          until: planUntil,
+          timeZone: sourceTimeZone
+        }));
+      }
+      const buckets = bucketsByWindow.get(bucketWindowKey);
+      for (const bucket of buckets) {
+        allBucketKeys.add(bucket.bucketKey);
+      }
+      planningRows.push({
+        resource,
+        objectId,
+        sourceTimeZone,
+        latestSettled,
+        recent,
+        watermark,
+        watermarkDate,
+        planSince,
+        planUntil,
+        buckets
       });
-      const coverage = readCompletedBucketCoverage({
-        objectType: resourceType,
-        ids: [objectId],
-        bucketKeys: buckets.map((bucket) => bucket.bucketKey)
-      });
+    }
+
+    const coverage = readCompletedBucketCoverage({
+      objectType: resourceType,
+      ids,
+      bucketKeys: [...allBucketKeys],
+      includeInsightRows: false
+    });
+
+    for (const plan of planningRows) {
+      const {
+        resource,
+        objectId,
+        sourceTimeZone,
+        latestSettled,
+        recent,
+        watermark,
+        watermarkDate,
+        planSince,
+        planUntil,
+        buckets
+      } = plan;
       const covered = coverage.get(objectId) || new Set();
       const missingBuckets = buckets.filter((bucket) => !covered.has(bucket.bucketKey));
       const planReason = since && until
         ? 'manual-range'
-        : watermark
-          ? 'incremental'
-          : 'initial-7d-backfill';
+        : !watermark
+          ? INITIAL_COLLECTION_BACKFILL_REASON
+          : planSince === recent.since && watermarkDate > recent.since
+            ? EXPANDED_COLLECTION_BACKFILL_REASON
+            : 'incremental';
 
       plannedSlices.push({
         objectId,
         sourceTimeZone,
         reason: planReason,
+        backfillDays: COLLECTION_BACKFILL_DAYS,
         since: planSince,
         until: planUntil,
         latestSettledBucket: latestSettled.bucketKey,
@@ -669,15 +724,12 @@ export class SyncService {
     });
     const completedAt = new Date().toISOString();
     const durationMs = Date.now() - startedMs;
-    writeCollectionJobBatch({
+    completeCollectionJobWithSuccessBatch({
       jobId: job.id,
       runId: job.run_id,
       kind: 'insights',
-      status: 'success',
       requestIds: stats.requestIds || [],
       idCount: objectIds.length,
-      itemSuccessCount: objectIds.length,
-      itemFailedCount: 0,
       rowCount: normalizedRows.length,
       rawRowCount: rawRows.length,
       pages: stats.pages || 0,
@@ -687,17 +739,11 @@ export class SyncService {
       durationMs,
       startedAt,
       completedAt,
-      metadata: {
+      batchMetadata: {
         bucketKey: job.bucket_key,
         dateStart: job.date_start,
         hourlyRange: job.hourly_range
-      }
-    });
-    completeCollectionJob({
-      jobId: job.id,
-      rowCount: normalizedRows.length,
-      rawRowCount: rawRows.length,
-      durationMs,
+      },
       rowCountByObject,
       metadata: {
         batchId: db.batchId
@@ -725,9 +771,9 @@ export class SyncService {
     concurrency = 20,
     qps = 5,
     timeoutMs = 7000,
-    recoverStaleAfterMs = 30 * 60 * 1000
+    recoverStaleAfterMs = 5 * 60 * 1000
   } = {}) {
-    recoverStaleCollectionJobs({ queueName, runId, staleAfterMs: recoverStaleAfterMs });
+    recoverStaleCollectionJobsWithSuccessBatches({ queueName, runId, staleAfterMs: recoverStaleAfterMs });
     const workerCount = Math.max(1, Number.parseInt(concurrency, 10) || 1);
     const waitForStartSlot = createRequestStartLimiter(qps);
     const records = [];

@@ -981,6 +981,128 @@ function collectionIdColumn(objectType) {
   return 'ad_id';
 }
 
+function rowCountsForCollectionJob(db, job) {
+  const objectIds = jobObjectIds(job);
+  if (!objectIds.length || !job?.bucket_key) return {};
+  const idColumn = collectionIdColumn(job.object_type);
+  const rows = db.prepare(`
+    SELECT ${idColumn} AS object_id, COUNT(*) AS row_count
+    FROM insight_rows
+    WHERE ${idColumn} IN (${placeholders(objectIds)})
+      AND hour_start = ?
+    GROUP BY ${idColumn}
+  `).all(...objectIds, job.bucket_key);
+  return Object.fromEntries(rows.map((row) => [String(row.object_id), Number(row.row_count || 0)]));
+}
+
+function markCollectionJobCompletedFromBatch(db, job, batch, completedAt = new Date().toISOString()) {
+  const rowCountByObject = rowCountsForCollectionJob(db, job);
+  db.prepare(`
+    UPDATE collection_jobs
+    SET status = 'completed',
+      completed_at = ?,
+      duration_ms = ?,
+      row_count = ?,
+      raw_row_count = ?,
+      rate_limited = 0,
+      quota_limited = 0,
+      locked_at = '',
+      locked_by = '',
+      next_attempt_at = '',
+      error = '',
+      metadata_json = ?,
+      updated_at = ?
+    WHERE id = ?
+  `).run(
+    completedAt,
+    toNumber(batch.duration_ms),
+    toNumber(batch.row_count),
+    toNumber(batch.raw_row_count),
+    JSON.stringify({
+      ...(job.metadata || {}),
+      successBatchId: batch.id,
+      watchdogRecoveredAt: completedAt
+    }),
+    completedAt,
+    job.id
+  );
+
+  const completedBucket = db.prepare(`
+    INSERT INTO collection_completed_buckets (
+      object_type,
+      object_id,
+      account_id,
+      account_timezone,
+      bucket_key,
+      date_start,
+      hourly_range,
+      completed_at,
+      row_count,
+      job_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (object_type, object_id, bucket_key)
+    DO UPDATE SET
+      account_id = excluded.account_id,
+      account_timezone = excluded.account_timezone,
+      date_start = excluded.date_start,
+      hourly_range = excluded.hourly_range,
+      completed_at = excluded.completed_at,
+      row_count = excluded.row_count,
+      job_id = excluded.job_id
+  `);
+  const watermark = db.prepare(`
+    INSERT INTO collection_watermarks (
+      object_type,
+      object_id,
+      account_id,
+      account_timezone,
+      last_completed_bucket,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT (object_type, object_id)
+    DO UPDATE SET
+      account_id = excluded.account_id,
+      account_timezone = excluded.account_timezone,
+      last_completed_bucket = CASE
+        WHEN excluded.last_completed_bucket > collection_watermarks.last_completed_bucket
+        THEN excluded.last_completed_bucket
+        ELSE collection_watermarks.last_completed_bucket
+      END,
+      updated_at = excluded.updated_at
+  `);
+
+  for (const objectId of jobObjectIds(job)) {
+    const objectRowCount = Number(rowCountByObject[String(objectId)] || 0);
+    completedBucket.run(
+      job.object_type,
+      objectId,
+      job.account_id,
+      job.account_timezone,
+      job.bucket_key,
+      job.date_start,
+      job.hourly_range,
+      completedAt,
+      objectRowCount,
+      job.id
+    );
+    watermark.run(
+      job.object_type,
+      objectId,
+      job.account_id,
+      job.account_timezone,
+      job.bucket_key,
+      completedAt
+    );
+  }
+
+  return {
+    jobId: job.id,
+    action: 'completed_from_success_batch',
+    batchId: batch.id,
+    completedAt
+  };
+}
+
 export function enqueueCollectionJobs({
   jobs = [],
   databaseFile = config.databaseFile
@@ -1113,6 +1235,85 @@ export function recoverStaleCollectionJobs({
   }, databaseFile);
 }
 
+export function recoverStaleCollectionJobsWithSuccessBatches({
+  queueName = 'insights',
+  runId = '',
+  staleAfterMs = 5 * 60 * 1000,
+  databaseFile = config.databaseFile
+} = {}) {
+  const threshold = new Date(Date.now() - staleAfterMs).toISOString();
+  const now = new Date().toISOString();
+  return withDatabase((db) => {
+    const staleTimestamp = "COALESCE(NULLIF(updated_at, ''), NULLIF(locked_at, ''), NULLIF(started_at, ''), NULLIF(created_at, ''))";
+    const params = [queueName, threshold];
+    const runClause = runId ? 'AND run_id = ?' : '';
+    if (runId) {
+      params.push(runId);
+    }
+    const staleJobs = db.prepare(`
+      SELECT *
+      FROM collection_jobs
+      WHERE queue_name = ?
+        AND status = 'running'
+        AND ${staleTimestamp} IS NOT NULL
+        AND ${staleTimestamp} < ?
+        ${runClause}
+      ORDER BY ${staleTimestamp}
+    `).all(...params).map(collectionJobFromRow);
+    let completedFromSuccess = 0;
+    let retried = 0;
+    const jobs = [];
+
+    runInTransaction(db, () => {
+      for (const job of staleJobs) {
+        const successBatch = db.prepare(`
+          SELECT *
+          FROM collection_job_batches
+          WHERE job_id = ?
+            AND status = 'success'
+            AND completed_at <> ''
+          ORDER BY completed_at DESC, started_at DESC
+          LIMIT 1
+        `).get(job.id);
+        if (successBatch) {
+          const completed = markCollectionJobCompletedFromBatch(db, job, successBatch, successBatch.completed_at || now);
+          completedFromSuccess += 1;
+          jobs.push(completed);
+          continue;
+        }
+
+        db.prepare(`
+          UPDATE collection_jobs
+          SET status = 'retry',
+            next_attempt_at = ?,
+            locked_at = '',
+            locked_by = '',
+            error = CASE WHEN error = '' THEN 'watchdog recovered stale running job for retry' ELSE error END,
+            updated_at = ?
+          WHERE id = ?
+        `).run(now, now, job.id);
+        retried += 1;
+        jobs.push({
+          jobId: job.id,
+          action: 'retry',
+          completedAt: ''
+        });
+      }
+    });
+
+    return {
+      recovered: completedFromSuccess + retried,
+      completedFromSuccess,
+      retried,
+      scanned: staleJobs.length,
+      threshold,
+      staleAfterMs,
+      jobs,
+      databaseFile
+    };
+  }, databaseFile);
+}
+
 export function claimCollectionJob({
   queueName = 'insights',
   runId = '',
@@ -1192,7 +1393,58 @@ export function writeCollectionJobBatch({
     throw new Error('写入批处理指标缺少 jobId');
   }
   return withDatabase((db) => {
-    db.prepare(`
+    const batchId = insertCollectionJobBatch(db, {
+      jobId,
+      runId,
+      kind,
+      status,
+      requestIds,
+      idCount,
+      itemSuccessCount,
+      itemFailedCount,
+      rowCount,
+      rawRowCount,
+      pages,
+      httpStatus,
+      apiCode,
+      bodySize,
+      durationMs,
+      rateLimited,
+      quotaLimited,
+      error,
+      startedAt,
+      completedAt,
+      metadata
+    });
+    return { databaseFile, batchId };
+  }, databaseFile);
+}
+
+function insertCollectionJobBatch(db, {
+  jobId,
+  runId = '',
+  kind = 'insights',
+  status = '',
+  requestIds = [],
+  idCount = 0,
+  itemSuccessCount = 0,
+  itemFailedCount = 0,
+  rowCount = 0,
+  rawRowCount = 0,
+  pages = 0,
+  httpStatus = '',
+  apiCode = '',
+  bodySize = 0,
+  durationMs = 0,
+  rateLimited = false,
+  quotaLimited = false,
+  error = '',
+  startedAt = '',
+  completedAt = '',
+  metadata = {}
+} = {}) {
+  const batchId = randomUUID();
+  db.prepare(`
       INSERT INTO collection_job_batches (
         id,
         job_id,
@@ -1218,7 +1470,7 @@ export function writeCollectionJobBatch({
         metadata_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      randomUUID(),
+      batchId,
       jobId,
       toText(runId),
       toText(kind),
@@ -1241,8 +1493,7 @@ export function writeCollectionJobBatch({
       toText(completedAt),
       JSON.stringify(metadata || {})
     );
-    return { databaseFile };
-  }, databaseFile);
+  return batchId;
 }
 
 export function completeCollectionJob({
@@ -1365,6 +1616,165 @@ export function completeCollectionJob({
   }), databaseFile);
 }
 
+export function completeCollectionJobWithSuccessBatch({
+  jobId,
+  runId = '',
+  kind = 'insights',
+  requestIds = [],
+  idCount = 0,
+  rowCount = 0,
+  rawRowCount = 0,
+  pages = 0,
+  httpStatus = '',
+  apiCode = '',
+  bodySize = 0,
+  durationMs = 0,
+  startedAt = '',
+  completedAt = '',
+  batchMetadata = {},
+  rowCountByObject = {},
+  metadata = {},
+  databaseFile = config.databaseFile
+} = {}) {
+  if (!jobId) {
+    throw new Error('completeCollectionJobWithSuccessBatch requires jobId');
+  }
+  const finalCompletedAt = completedAt || new Date().toISOString();
+  return withDatabase((db) => runInTransaction(db, () => {
+    const batchId = insertCollectionJobBatch(db, {
+      jobId,
+      runId,
+      kind,
+      status: 'success',
+      requestIds,
+      idCount,
+      itemSuccessCount: idCount,
+      itemFailedCount: 0,
+      rowCount,
+      rawRowCount,
+      pages,
+      httpStatus,
+      apiCode,
+      bodySize,
+      durationMs,
+      startedAt,
+      completedAt: finalCompletedAt,
+      metadata: batchMetadata
+    });
+    const job = collectionJobFromRow(db.prepare('SELECT * FROM collection_jobs WHERE id = ?').get(jobId));
+    if (!job) {
+      throw new Error(`collection job not found: ${jobId}`);
+    }
+
+    db.prepare(`
+      UPDATE collection_jobs
+      SET status = 'completed',
+        completed_at = ?,
+        duration_ms = ?,
+        row_count = ?,
+        raw_row_count = ?,
+        rate_limited = 0,
+        quota_limited = 0,
+        locked_at = '',
+        locked_by = '',
+        next_attempt_at = '',
+        error = '',
+        metadata_json = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      finalCompletedAt,
+      toNumber(durationMs),
+      toNumber(rowCount),
+      toNumber(rawRowCount),
+      JSON.stringify({
+        ...(job.metadata || {}),
+        ...(metadata || {}),
+        successBatchId: batchId
+      }),
+      finalCompletedAt,
+      jobId
+    );
+
+    const completedBucket = db.prepare(`
+      INSERT INTO collection_completed_buckets (
+        object_type,
+        object_id,
+        account_id,
+        account_timezone,
+        bucket_key,
+        date_start,
+        hourly_range,
+        completed_at,
+        row_count,
+        job_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (object_type, object_id, bucket_key)
+      DO UPDATE SET
+        account_id = excluded.account_id,
+        account_timezone = excluded.account_timezone,
+        date_start = excluded.date_start,
+        hourly_range = excluded.hourly_range,
+        completed_at = excluded.completed_at,
+        row_count = excluded.row_count,
+        job_id = excluded.job_id
+    `);
+    const watermark = db.prepare(`
+      INSERT INTO collection_watermarks (
+        object_type,
+        object_id,
+        account_id,
+        account_timezone,
+        last_completed_bucket,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (object_type, object_id)
+      DO UPDATE SET
+        account_id = excluded.account_id,
+        account_timezone = excluded.account_timezone,
+        last_completed_bucket = CASE
+          WHEN excluded.last_completed_bucket > collection_watermarks.last_completed_bucket
+          THEN excluded.last_completed_bucket
+          ELSE collection_watermarks.last_completed_bucket
+        END,
+        updated_at = excluded.updated_at
+    `);
+
+    for (const objectId of jobObjectIds(job)) {
+      const objectRowCount = Number(rowCountByObject[String(objectId)] || 0);
+      completedBucket.run(
+        job.object_type,
+        objectId,
+        job.account_id,
+        job.account_timezone,
+        job.bucket_key,
+        job.date_start,
+        job.hourly_range,
+        finalCompletedAt,
+        objectRowCount,
+        jobId
+      );
+      watermark.run(
+        job.object_type,
+        objectId,
+        job.account_id,
+        job.account_timezone,
+        job.bucket_key,
+        finalCompletedAt
+      );
+    }
+
+    return {
+      jobId,
+      status: 'completed',
+      rowCount,
+      completedAt: finalCompletedAt,
+      batchId,
+      databaseFile
+    };
+  }), databaseFile);
+}
+
 export function failCollectionJob({
   jobId,
   error = '',
@@ -1448,6 +1858,7 @@ export function readCompletedBucketCoverage({
   objectType = 'ads',
   ids = [],
   bucketKeys = [],
+  includeInsightRows = true,
   databaseFile = config.databaseFile
 } = {}) {
   const normalizedIds = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
@@ -1470,17 +1881,19 @@ export function readCompletedBucketCoverage({
         coverage.get(String(row.object_id))?.add(String(row.bucket_key));
       }
 
-      const insightRows = db.prepare(`
-        SELECT ${idColumn} AS object_id, hour_start AS bucket_key
-        FROM insight_rows
-        WHERE ${idColumn} IN (${placeholders(normalizedIds)})
-          AND hour_start IN (${placeholders(bucketChunk)})
-          AND hour_start <> ''
-        GROUP BY ${idColumn}, hour_start
-      `).all(...normalizedIds, ...bucketChunk);
+      if (includeInsightRows) {
+        const insightRows = db.prepare(`
+          SELECT ${idColumn} AS object_id, hour_start AS bucket_key
+          FROM insight_rows
+          WHERE ${idColumn} IN (${placeholders(normalizedIds)})
+            AND hour_start IN (${placeholders(bucketChunk)})
+            AND hour_start <> ''
+          GROUP BY ${idColumn}, hour_start
+        `).all(...normalizedIds, ...bucketChunk);
 
-      for (const row of insightRows) {
-        coverage.get(String(row.object_id))?.add(String(row.bucket_key));
+        for (const row of insightRows) {
+          coverage.get(String(row.object_id))?.add(String(row.bucket_key));
+        }
       }
     }
 

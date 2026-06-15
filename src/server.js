@@ -9,6 +9,7 @@ const {
   readLatestInsightData,
   readMonitorOverview,
   readCollectionQueueOverview,
+  recoverStaleCollectionJobs,
   deleteCollectionRun,
   readActiveResourceCandidates,
   readAnalysisEntityOptions,
@@ -79,6 +80,7 @@ const displayTimeZone = DISPLAY_TIME_ZONE;
 const activeResourceAccountId = process.env.ACTIVE_RESOURCE_ACCOUNT_ID || "8462513793771963";
 const activeResourceRefreshIntervalMs = 120 * 60 * 1000;
 const monitorSchedulerIntervalMs = 30 * 1000;
+const collectionQueueWatchdogMs = 5 * 60 * 1000;
 const alertReportMaxDays = 90;
 const alertReportPromptMaxLength = 1600;
 let activeReportGeneration = false;
@@ -3126,11 +3128,52 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (url.pathname === "/api/collection/queue/recover" && req.method === "POST") {
+    readRequestBody(req)
+      .then((body) => {
+        const payload = body ? JSON.parse(body) : {};
+        const runId = String(payload.run_id || payload.runId || "").trim();
+        const staleAfterMs = clampInteger(payload.stale_after_ms || payload.staleAfterMs, collectionQueueWatchdogMs, 60_000, 30 * 60_000);
+        const watchdog = recoverStaleCollectionJobs({
+          databaseFile,
+          runId,
+          staleAfterMs,
+          dryRun: Boolean(payload.dry_run || payload.dryRun)
+        });
+        writeJson(res, watchdog.error ? 500 : 200, {
+          ok: !watchdog.error,
+          watchdog,
+          queue: readCollectionQueueOverview({
+            databaseFile,
+            runId,
+            limit: 50,
+            page: 1,
+            pageSize: 50
+          }),
+          runner: collectionRunStatus,
+          display_time_zone: displayTimeZone
+        });
+      })
+      .catch((error) => {
+        writeJson(res, error.message === "request_body_too_large" ? 413 : 400, {
+          ok: false,
+          error: "recover_collection_queue_failed",
+          message: error.message
+        });
+      });
+    return;
+  }
+
   if (url.pathname === "/api/collection/queue/status" && req.method === "GET") {
     try {
       const pageSize = clampInteger(url.searchParams.get("page_size"), 50, 1, 100);
       const page = clampInteger(url.searchParams.get("page"), 1, 1, 100000);
       const runId = String(url.searchParams.get("run_id") || "").trim();
+      const watchdog = recoverStaleCollectionJobs({
+        databaseFile,
+        runId,
+        staleAfterMs: collectionQueueWatchdogMs
+      });
       const resume = ensureCollectionQueueResume({ runId, reason: "status" });
       writeJson(res, 200, {
         ok: true,
@@ -3143,6 +3186,7 @@ const server = http.createServer((req, res) => {
           pageSize
         }),
         runner: collectionRunStatus,
+        watchdog,
         resume,
         display_time_zone: displayTimeZone
       });
