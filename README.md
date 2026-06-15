@@ -44,6 +44,13 @@ cli/.env.example -> cli/.env
 | `YINO_REQUEST_TIMEOUT_MS` | 否 | `30000` | CLI 默认请求超时。 |
 | `ACTIVE_RESOURCE_ACCOUNT_ID` | 否 | `8462513793771963` | 设置页刷新 ACTIVE 广告系列、广告组和广告候选的默认账户。 |
 | `FEISHU_ALERT_WEBHOOK_URL` | 否 | 空 | 预警模板未单独填写飞书地址时使用的默认群机器人 Webhook。 |
+| `SENTINEL_WEBHOOK_URL` | 否 | `FEISHU_ALERT_WEBHOOK_URL` | 哨兵达到每日崩溃重启上限时推送报告；为空时回退到飞书预警 Webhook。 |
+| `SENTINEL_MAX_DAILY_RESTARTS` | 否 | `3` | 哨兵按北京时间自然日允许的错误崩溃重启次数。 |
+| `SENTINEL_BACKOFF_INITIAL_MS` | 否 | `5000` | 第一次错误重启前等待时间，后续指数退避。 |
+| `SENTINEL_BACKOFF_MAX_MS` | 否 | `300000` | 指数退避最大等待时间。 |
+| `SENTINEL_HEALTH_URL` | 否 | `http://127.0.0.1:{PORT}/api/health` | 哨兵健康检查地址。 |
+| `SENTINEL_HEALTH_INTERVAL_MS` | 否 | `30000` | 哨兵健康检查间隔。 |
+| `SENTINEL_HEALTH_FAILURES_BEFORE_RESTART` | 否 | `3` | 连续健康检查失败多少次后终止并重启服务。 |
 | `DEEPSEEK_API_KEY` | 否 | 空 | AI 分析页调用 DeepSeek；为空时使用本地规则分析。 |
 | `DEEPSEEK_BASE_URL` | 否 | `https://api.deepseek.com` | DeepSeek 兼容 Chat Completions 接口地址。 |
 | `DEEPSEEK_MODEL` | 否 | `deepseek-v4-flash` | AI 分析页使用的模型。 |
@@ -73,6 +80,32 @@ http://127.0.0.1:3100/
 
 ```powershell
 $env:PORT=3101; npm start
+```
+
+启动哨兵托管 Web 看板：
+
+```bash
+npm run sentinel:start
+```
+
+哨兵会启动 `src/server.js`，并通过 `/api/health` 监控进程。进程退出或健康检查连续失败时，按 `SENTINEL_BACKOFF_INITIAL_MS`、`2x`、`4x` 指数退避重启；每个北京时间自然日最多重启 `SENTINEL_MAX_DAILY_RESTARTS` 次，达到上限后向 `SENTINEL_WEBHOOK_URL` 推送报告，未配置时回退 `FEISHU_ALERT_WEBHOOK_URL`。哨兵状态保存在 `data/sentinel/state.json`，日志保存在 `logs/sentinel.log`、`logs/server-sentinel.*.log`，均不提交。
+
+检查哨兵配置：
+
+```bash
+npm run sentinel:check
+```
+
+安装为 Windows 服务需要管理员 PowerShell：
+
+```powershell
+npm run service:install
+```
+
+该脚本会编译本地 Windows Service wrapper 到 `data/sentinel/FbAdsDashboardSentinelService.exe`，创建自动启动服务 `FbAdsDashboardSentinel`，并启动哨兵。卸载服务：
+
+```powershell
+npm run service:uninstall
 ```
 
 首次采集前检查配置并初始化数据库：
@@ -157,6 +190,7 @@ npm run cli:sampling-loop -- --mode all --max-cycles 1
 
 ```bash
 node --check src/server.js
+node --check ops/sentinel.js
 node --check public/app.js
 node --check public/alert-ai.js
 ```
@@ -168,6 +202,7 @@ npm start
 Invoke-RestMethod http://127.0.0.1:3100/api/health
 Invoke-RestMethod http://127.0.0.1:3100/api/settings/environment
 Invoke-RestMethod "http://127.0.0.1:3100/api/fb-ads/latest?shape=dashboard"
+npm run sentinel:check
 ```
 
 CLI 检查：

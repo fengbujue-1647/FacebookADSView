@@ -6,6 +6,10 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/server.js",
     "dev": "node --disable-warning=ExperimentalWarning src/server.js",
+    "sentinel:start": "node ops/sentinel.js",
+    "sentinel:check": "node ops/sentinel.js --check-config",
+    "service:install": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/install-windows-service.ps1 -Start",
+    "service:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/uninstall-windows-service.ps1",
     "cli:install": "npm --prefix cli install",
     "cli:doctor": "npm --prefix cli run doctor",
     "cli:token": "npm --prefix cli run token",

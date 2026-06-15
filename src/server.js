@@ -226,6 +226,75 @@ const environmentGroups = [
         usedBy: "AI 分析"
       }
     ]
+  },
+  {
+    id: "sentinel",
+    title: "服务哨兵",
+    items: [
+      {
+        key: "SENTINEL_SERVICE_NAME",
+        label: "哨兵服务名",
+        description: "哨兵报告中展示的服务名称。",
+        defaultValue: "fb-ads-dashboard",
+        usedBy: "服务哨兵"
+      },
+      {
+        key: "SENTINEL_WEBHOOK_URL",
+        label: "哨兵报告 Webhook",
+        description: "达到每日崩溃重启上限时推送报告；未配置时回退 FEISHU_ALERT_WEBHOOK_URL。",
+        sensitive: true,
+        usedBy: "服务哨兵"
+      },
+      {
+        key: "SENTINEL_MAX_DAILY_RESTARTS",
+        label: "每日重启上限",
+        description: "按北京时间自然日统计的错误崩溃重启次数上限。",
+        defaultValue: "3",
+        usedBy: "服务哨兵"
+      },
+      {
+        key: "SENTINEL_BACKOFF_INITIAL_MS",
+        label: "初始退避毫秒",
+        description: "第一次错误重启前等待时间，后续按指数退避递增。",
+        defaultValue: "5000",
+        usedBy: "服务哨兵"
+      },
+      {
+        key: "SENTINEL_BACKOFF_MAX_MS",
+        label: "最大退避毫秒",
+        description: "指数退避的最大等待时间。",
+        defaultValue: "300000",
+        usedBy: "服务哨兵"
+      },
+      {
+        key: "SENTINEL_HEALTH_URL",
+        label: "健康检查地址",
+        description: "哨兵用于判断 Web 看板是否可用的健康检查地址。",
+        defaultValue: `http://127.0.0.1:${port}/api/health`,
+        usedBy: "服务哨兵"
+      },
+      {
+        key: "SENTINEL_HEALTH_INTERVAL_MS",
+        label: "健康检查间隔",
+        description: "哨兵两次健康检查之间的等待毫秒数。",
+        defaultValue: "30000",
+        usedBy: "服务哨兵"
+      },
+      {
+        key: "SENTINEL_HEALTH_TIMEOUT_MS",
+        label: "健康检查超时",
+        description: "单次健康检查请求超时毫秒数。",
+        defaultValue: "5000",
+        usedBy: "服务哨兵"
+      },
+      {
+        key: "SENTINEL_HEALTH_FAILURES_BEFORE_RESTART",
+        label: "失败重启阈值",
+        description: "连续健康检查失败达到该次数后终止并重启 Web 看板。",
+        defaultValue: "3",
+        usedBy: "服务哨兵"
+      }
+    ]
   }
 ];
 
@@ -486,10 +555,15 @@ function readRequestBody(req) {
 }
 
 function resolvePublicPath(pathname) {
-  const cleanPath = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
+  let cleanPath = "";
+  try {
+    cleanPath = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
+  } catch {
+    return { filePath: null, error: "malformed_uri" };
+  }
   const resolved = path.resolve(publicDir, `.${cleanPath}`);
   const insidePublic = resolved === publicDir || resolved.startsWith(`${publicDir}${path.sep}`);
-  return insidePublic ? resolved : null;
+  return insidePublic ? { filePath: resolved, error: "" } : { filePath: null, error: "forbidden" };
 }
 
 function normalizeAccounts(accounts = []) {
@@ -3382,13 +3456,17 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  const filePath = resolvePublicPath(url.pathname);
-  if (!filePath) {
-    writeJson(res, 403, { ok: false, error: "forbidden" });
+  const publicPath = resolvePublicPath(url.pathname);
+  if (!publicPath.filePath) {
+    const isMalformed = publicPath.error === "malformed_uri";
+    writeJson(res, isMalformed ? 400 : 403, {
+      ok: false,
+      error: publicPath.error || "forbidden"
+    });
     return;
   }
 
-  sendFile(res, filePath);
+  sendFile(res, publicPath.filePath);
 });
 
 server.listen(port, host, () => {
