@@ -350,8 +350,7 @@
 }
 
 .alert-form-grid .wide,
-.quick-report-group,
-.report-level-group,
+.report-metric-group,
 .entity-field {
   grid-column: 1 / -1;
 }
@@ -426,14 +425,16 @@
 }
 
 .channel-grid,
-.report-levels {
+.report-levels,
+.report-metric-options {
   display: flex;
   flex-wrap: wrap;
   gap: 9px;
 }
 
 .channel-option,
-.level-option {
+.level-option,
+.report-metric-option {
   min-height: 38px;
   display: inline-flex;
   align-items: center;
@@ -448,15 +449,42 @@
 }
 
 .channel-option input,
-.level-option input {
+.level-option input,
+.report-metric-option input {
   accent-color: var(--teal);
 }
 
 .channel-option:has(input:checked),
-.level-option:has(input:checked) {
+.level-option:has(input:checked),
+.report-metric-option:has(input:checked) {
   border-color: #9bd5cc;
   background: var(--teal-soft);
   color: var(--teal);
+}
+
+.report-metric-group > label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.report-metric-group > label span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.report-metric-options {
+  align-items: center;
+}
+
+.report-metric-option i {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--metric-color, var(--teal));
 }
 
 .recipient-box {

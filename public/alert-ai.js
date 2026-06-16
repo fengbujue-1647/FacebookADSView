@@ -4,6 +4,14 @@
 
   const promptMaxLength = 1600;
   const templatePageSize = 8;
+  const defaultReportMetricIds = ["roas", "cost_per_result", "ctr_all", "purchases"];
+  const fallbackReportMetrics = [
+    { id: "spend", label: "已花费金额", unit: "money", color: "#b45309" },
+    { id: "roas", label: "广告花费回报(ROAS)", unit: "ratio", color: "#0d9488" },
+    { id: "cost_per_result", label: "单次成效费用", unit: "money", color: "#be123c" },
+    { id: "ctr_all", label: "点击率(全部)", unit: "percent", color: "#1d4ed8" },
+    { id: "purchases", label: "购买次数", unit: "count", color: "#dc2626" }
+  ];
   const reportPresets = [
     {
       id: "efficiency",
@@ -75,6 +83,8 @@
       pendingMarkdown: "",
       typing: false,
       error: null,
+      selectedMetricIds: new Set(defaultReportMetricIds),
+      metricPromptLine: "",
       history: {
         loading: false,
         items: [],
@@ -315,12 +325,16 @@
                     <button type="button" data-report-input data-report-range="30">近 30 天</button>
                   </div>
                 </div>
+                <div class="control-group report-level-group">
+                  <label>分析层级</label>
+                  <div class="report-levels" id="reportLevelGroup"></div>
+                  <span class="field-error" data-error-for="level"></span>
+                </div>
               </div>
 
-              <div class="control-group report-level-group">
-                <label>分析层级</label>
-                <div class="report-levels" id="reportLevelGroup"></div>
-                <span class="field-error" data-error-for="level"></span>
+              <div class="control-group report-metric-group">
+                <label>图表指标 <span id="reportMetricSummary">已选 0 项</span></label>
+                <div class="report-metric-options" id="reportMetricGroup"></div>
               </div>
 
               <div class="control-group entity-field">
@@ -545,6 +559,86 @@
     `;
   }
 
+  function reportMetricOptions() {
+    const dashboardMetrics = Array.isArray(window.fbDashboardMetricFields)
+      ? window.fbDashboardMetricFields
+      : [];
+    const source = dashboardMetrics.length ? dashboardMetrics : fallbackReportMetrics;
+    const seen = new Set();
+    return source.filter((metric) => {
+      const id = String(metric.id || "").trim();
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  }
+
+  function reportMetricLabel(id) {
+    return reportMetricOptions().find((metric) => metric.id === id)?.label || id;
+  }
+
+  function selectedReportMetricLabels() {
+    const selectedIds = state.report.selectedMetricIds;
+    return reportMetricOptions()
+      .filter((metric) => selectedIds.has(metric.id))
+      .map((metric) => metric.label);
+  }
+
+  function buildMetricPromptLine() {
+    const labels = selectedReportMetricLabels();
+    return labels.length ? `重点关注指标：${labels.join("、")}。` : "";
+  }
+
+  function stripMetricPromptLine(value) {
+    const text = String(value || "");
+    return text
+      .split("\n")
+      .filter((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return true;
+        if (state.report.metricPromptLine && trimmed === state.report.metricPromptLine) return false;
+        return !/^重点关注指标：.+。?$/.test(trimmed);
+      })
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  function syncMetricPromptLine() {
+    const prompt = $("#reportPrompt");
+    const base = stripMetricPromptLine(prompt.value);
+    const metricLine = buildMetricPromptLine();
+    prompt.value = [base, metricLine].filter(Boolean).join("\n\n");
+    state.report.metricPromptLine = metricLine;
+    updatePromptCount();
+  }
+
+  function renderReportMetricOptions() {
+    const metrics = reportMetricOptions();
+    const selected = state.report.selectedMetricIds;
+    $("#reportMetricSummary").textContent = `已选 ${selected.size} 项`;
+    $("#reportMetricGroup").innerHTML = metrics.map((metric) => `
+      <label class="channel-option report-metric-option">
+        <input data-report-input type="checkbox" data-report-metric-id="${escapeHtml(metric.id)}" ${selected.has(metric.id) ? "checked" : ""}>
+        <i style="--metric-color: ${escapeHtml(metric.color || "#0f766e")}"></i>
+        <span>${escapeHtml(metric.label)}</span>
+      </label>
+    `).join("");
+  }
+
+  function toggleReportMetric(metricId, checked) {
+    const id = String(metricId || "");
+    if (!id) return;
+    if (checked) {
+      state.report.selectedMetricIds.add(id);
+    } else {
+      state.report.selectedMetricIds.delete(id);
+    }
+    renderReportMetricOptions();
+    syncMetricPromptLine();
+    clearFieldErrors(root);
+  }
+
   function renderMetadataControls() {
     const metadata = state.metadata;
     const categorySelect = $("#alertMetricCategoryFilter");
@@ -570,6 +664,7 @@
         <span>${escapeHtml(level.label)}</span>
       </label>
     `).join("");
+    renderReportMetricOptions();
     $("#reportHistoryLevelFilter").innerHTML = `
       <option value="all">全部层级</option>
       ${metadata.report.levels.map((level) => `<option value="${level.id}">${escapeHtml(level.label)}</option>`).join("")}
@@ -1555,7 +1650,7 @@
     $("#reportUntil").value = today;
     $("#reportSince").value = addDays(today, -6);
     $("#reportPrompt").value = reportPresets[0].prompt;
-    updatePromptCount();
+    syncMetricPromptLine();
     updateReportProgress([]);
   }
 
@@ -2177,7 +2272,7 @@
         if (found) {
           $("#reportPrompt").value = found.prompt;
           $$(".preset-card").forEach((card) => card.classList.toggle("active", card === preset));
-          updatePromptCount();
+          syncMetricPromptLine();
         }
         return;
       }
@@ -2232,6 +2327,11 @@
       const entityInput = event.target.closest("[data-entity-id]");
       if (entityInput) {
         toggleEntity(entityInput.dataset.entityId, entityInput.checked);
+        return;
+      }
+      const reportMetricInput = event.target.closest("[data-report-metric-id]");
+      if (reportMetricInput) {
+        toggleReportMetric(reportMetricInput.dataset.reportMetricId, reportMetricInput.checked);
         return;
       }
       const templateTargetInput = event.target.closest("[data-template-target-id]");

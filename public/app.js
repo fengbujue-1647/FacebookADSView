@@ -58,6 +58,7 @@ const FIELDS = [
 const fieldById = new Map(FIELDS.map((field) => [field.id, field]));
 const metricFields = FIELDS.filter((field) => field.type === "metric");
 const metricFieldIds = metricFields.map((field) => field.id);
+window.fbDashboardMetricFields = metricFields.map(({ id, label, unit, color }) => ({ id, label, unit, color }));
 const defaultFields = ["spend", "roas", "ctr_all", "clicks_all", "add_to_cart", "initiate_checkout", "purchases"];
 const coreFields = ["spend", "roas", "ctr_all", "clicks_all", "results", "cost_per_result"];
 const sumKeys = ["budget", "spend", "impressions", "clicks_all", "reach", "add_to_cart", "initiate_checkout", "purchases", "revenue", "results", "actions"];
@@ -94,6 +95,7 @@ const state = {
   collectionWatchdogManualUntil: 0,
   collectionPage: 1,
   collectionRunId: "",
+  collectionRunPreviewResolver: null,
   monitorRunFilter: "all",
   collectionLoading: false,
   collectionRefreshTimer: null,
@@ -338,6 +340,11 @@ const els = {
   refreshCollectionQueueButton: document.getElementById("refreshCollectionQueueButton"),
   recoverCollectionQueueButton: document.getElementById("recoverCollectionQueueButton"),
   runCollectionQueueButton: document.getElementById("runCollectionQueueButton"),
+  collectionRunPreviewModal: document.getElementById("collectionRunPreviewModal"),
+  collectionRunPreviewBody: document.getElementById("collectionRunPreviewBody"),
+  collectionRunPreviewCloseButton: document.getElementById("collectionRunPreviewCloseButton"),
+  collectionRunPreviewCancelButton: document.getElementById("collectionRunPreviewCancelButton"),
+  collectionRunPreviewConfirmButton: document.getElementById("collectionRunPreviewConfirmButton"),
   envConfigCaption: document.getElementById("envConfigCaption"),
   envFileStatus: document.getElementById("envFileStatus"),
   envConfigGrid: document.getElementById("envConfigGrid"),
@@ -915,6 +922,11 @@ function formatDuration(ms) {
   if (value < 1000) return `${value}ms`;
   if (value < 60_000) return `${(value / 1000).toFixed(1)}s`;
   return `${(value / 60_000).toFixed(1)}m`;
+}
+
+function formatPreviewSeconds(seconds) {
+  const value = Math.max(0, Number(seconds || 0));
+  return value ? formatDuration(value * 1000) : "-";
 }
 
 function resourceKindConfig(kind) {
@@ -2066,7 +2078,7 @@ async function loadCollectionQueueStatus(page = state.collectionPage, runId = st
   renderCollectionConsole();
 }
 
-async function runCollectionQueue() {
+async function runCollectionQueueLegacy() {
   els.runCollectionQueueButton.disabled = true;
   els.collectionQueueCaption.textContent = "正在投递";
   try {
@@ -2091,6 +2103,129 @@ async function runCollectionQueue() {
     els.runCollectionQueueButton.disabled = false;
   }
 }
+
+function closeCollectionRunPreview(confirmed = false) {
+  if (els.collectionRunPreviewModal) {
+    els.collectionRunPreviewModal.hidden = true;
+  }
+  if (state.collectionRunPreviewResolver) {
+    state.collectionRunPreviewResolver(Boolean(confirmed));
+    state.collectionRunPreviewResolver = null;
+  }
+}
+
+function renderCollectionRunPreviewItem(item = {}) {
+  const range = item.range || {};
+  const warning = item.warning
+    ? `<div class="confirm-modal-warning">${escapeHtml(item.warning)}</div>`
+    : "";
+  return `
+    <article class="confirm-modal-item">
+      <div>
+        <h4>${escapeHtml(item.label || item.objectType || "采集项")}</h4>
+        <small>${escapeHtml(range.since || "-")} 至 ${escapeHtml(range.until || "-")} · ${Number(item.backfillDays || 0)} 天回补窗口</small>
+      </div>
+      <div class="confirm-modal-item-grid">
+        <div><small>对象数</small><strong>${Number(item.objectCount || 0).toLocaleString("en-US")}</strong></div>
+        <div><small>待取 Job</small><strong>${Number(item.plannedJobs || 0).toLocaleString("en-US")}</strong></div>
+        <div><small>缺口小时桶</small><strong>${Number(item.missingBuckets || 0).toLocaleString("en-US")}</strong></div>
+        <div><small>预计耗时</small><strong>${formatPreviewSeconds(item.estimatedSeconds)}</strong></div>
+        <div><small>已覆盖小时桶</small><strong>${Number(item.coveredBuckets || 0).toLocaleString("en-US")}</strong></div>
+        <div><small>并发 / QPS</small><strong>${Number(item.concurrency || 0)} / ${Number(item.qps || 0)}</strong></div>
+        <div><small>请求超时</small><strong>${formatDuration(item.timeoutMs || 0)}</strong></div>
+        <div><small>资源缓存</small><strong>${Number(item.resourceCount || 0).toLocaleString("en-US")}</strong></div>
+      </div>
+      ${warning}
+    </article>
+  `;
+}
+
+function renderCollectionRunPreview(preview = {}) {
+  const items = preview.items || [];
+  const warnings = preview.warnings || [];
+  const disabled = Boolean(preview.runnerBusy) || Number(preview.totalJobs || 0) <= 0 || preview.canRun === false;
+  if (els.collectionRunPreviewConfirmButton) {
+    els.collectionRunPreviewConfirmButton.disabled = disabled;
+  }
+  const warningHtml = [
+    preview.runnerBusy ? "当前已有采集进程运行中，不能重复投递。" : "",
+    preview.canRun === false && Number(preview.totalJobs || 0) > 0 && !preview.runnerBusy
+      ? "当前选择包含不可执行的采集项，请调整模式或配置后再投递。"
+      : "",
+    ...warnings
+  ].filter(Boolean).map((text) => (
+    `<div class="confirm-modal-warning">${escapeHtml(text)}</div>`
+  )).join("");
+  els.collectionRunPreviewBody.innerHTML = `
+    <div class="confirm-modal-summary">
+      <div class="confirm-modal-metric"><span>总待取 Job</span><strong>${Number(preview.totalJobs || 0).toLocaleString("en-US")}</strong></div>
+      <div class="confirm-modal-metric"><span>对象数</span><strong>${Number(preview.totalObjects || 0).toLocaleString("en-US")}</strong></div>
+      <div class="confirm-modal-metric"><span>预计耗时</span><strong>${formatPreviewSeconds(preview.estimatedSeconds)}</strong></div>
+    </div>
+    ${warningHtml}
+    ${items.length ? items.map(renderCollectionRunPreviewItem).join("") : '<div class="empty-inline">没有可投递的采集项。</div>'}
+  `;
+}
+
+function confirmCollectionRunPreview(preview = {}) {
+  if (!els.collectionRunPreviewModal || !els.collectionRunPreviewBody) {
+    if (preview.canRun === false) {
+      return Promise.resolve(false);
+    }
+    return Promise.resolve(window.confirm(`预计投递 ${Number(preview.totalJobs || 0).toLocaleString("en-US")} 个 Job，预计耗时 ${formatPreviewSeconds(preview.estimatedSeconds)}。确认继续？`));
+  }
+  renderCollectionRunPreview(preview);
+  els.collectionRunPreviewModal.hidden = false;
+  if (window.lucide) {
+    window.lucide.createIcons();
+  }
+  return new Promise((resolve) => {
+    state.collectionRunPreviewResolver = resolve;
+  });
+}
+
+const runCollectionQueue = async function runCollectionQueueWithPreview() {
+  els.runCollectionQueueButton.disabled = true;
+  els.collectionQueueCaption.textContent = "正在生成投递预估";
+  try {
+    const mode = els.collectionRunModeSelect.value || "all";
+    const previewResponse = await fetch("/api/collection/queue/preview", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ mode })
+    });
+    const previewPayload = await previewResponse.json();
+    if (!previewResponse.ok || !previewPayload.ok) {
+      throw new Error(previewPayload.message || "采集任务预估失败");
+    }
+    const confirmed = await confirmCollectionRunPreview(previewPayload.preview || {});
+    if (!confirmed) {
+      els.collectionQueueCaption.textContent = "已取消投递";
+      return;
+    }
+    els.collectionQueueCaption.textContent = "正在投递";
+    const response = await fetch("/api/collection/queue/run", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ mode })
+    });
+    const payload = await response.json();
+    state.collectionRunner = payload.run || state.collectionRunner;
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || "采集任务启动失败");
+    }
+    state.collectionRunId = "";
+    await loadCollectionQueueStatus(1);
+  } catch (error) {
+    els.collectionQueueCaption.textContent = error.message || "采集任务启动失败";
+  } finally {
+    els.runCollectionQueueButton.disabled = false;
+  }
+};
 
 async function recoverCollectionQueue() {
   if (!els.recoverCollectionQueueButton) return;
@@ -4016,6 +4151,24 @@ function bindEvents() {
 
   els.runCollectionQueueButton.addEventListener("click", () => {
     runCollectionQueue();
+  });
+
+  els.collectionRunPreviewCloseButton?.addEventListener("click", () => {
+    closeCollectionRunPreview(false);
+  });
+
+  els.collectionRunPreviewCancelButton?.addEventListener("click", () => {
+    closeCollectionRunPreview(false);
+  });
+
+  els.collectionRunPreviewConfirmButton?.addEventListener("click", () => {
+    closeCollectionRunPreview(true);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && els.collectionRunPreviewModal && !els.collectionRunPreviewModal.hidden) {
+      closeCollectionRunPreview(false);
+    }
   });
 
   document.querySelectorAll("[data-collection-page]").forEach((button) => {

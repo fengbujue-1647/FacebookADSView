@@ -598,6 +598,28 @@
     </main>
   </div>
 
+  <div class="modal-backdrop" id="collectionRunPreviewModal" hidden>
+    <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="collectionRunPreviewTitle">
+      <div class="confirm-modal-head">
+        <div>
+          <span class="monitor-kicker">COLLECTION PREVIEW</span>
+          <h3 id="collectionRunPreviewTitle">确认投递采集任务</h3>
+        </div>
+        <button class="icon-button" id="collectionRunPreviewCloseButton" type="button" aria-label="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="confirm-modal-body" id="collectionRunPreviewBody"></div>
+      <div class="confirm-modal-actions">
+        <button class="secondary-button" id="collectionRunPreviewCancelButton" type="button">取消</button>
+        <button class="primary-button" id="collectionRunPreviewConfirmButton" type="button">
+          <i data-lucide="database-zap"></i>
+          <span>确认投递</span>
+        </button>
+      </div>
+    </section>
+  </div>
+
   <script defer src="/app.js?v=20260611-3"></script>
   <script defer src="/alert-ai.js?v=20260611-3"></script>
 </body>

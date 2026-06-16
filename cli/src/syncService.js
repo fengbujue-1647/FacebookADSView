@@ -11,6 +11,7 @@ import {
   enqueueCollectionJobs,
   failCollectionJob,
   getInsightCoverage,
+  isSqliteBusyError,
   readCompletedBucketCoverage,
   readCollectionWatermarks,
   readCollectionRunFinalStats,
@@ -655,7 +656,7 @@ export class SyncService {
     };
   }
 
-  async executeCollectionJob(job, { timeoutMs = 7000 } = {}) {
+  async executeCollectionJob(job, { timeoutMs = 7000, writeDatabase = (operation) => operation() } = {}) {
     const objectIds = job.objectIds || [];
     const bucket = {
       dateStart: job.date_start,
@@ -705,7 +706,7 @@ export class SyncService {
       rowCountByObject[objectId] = (rowCountByObject[objectId] || 0) + 1;
     }
 
-    const db = writeInsightBatch({
+    const db = await writeDatabase(() => writeInsightBatch({
       source: job.trigger_source || metadata.tool || `queue:${job.object_type}`,
       level: job.object_type,
       accountIds: [job.account_id].filter(Boolean),
@@ -721,10 +722,10 @@ export class SyncService {
         hourly: true,
         rawRowCount: rawRows.length
       }
-    });
+    }));
     const completedAt = new Date().toISOString();
     const durationMs = Date.now() - startedMs;
-    completeCollectionJobWithSuccessBatch({
+    await writeDatabase(() => completeCollectionJobWithSuccessBatch({
       jobId: job.id,
       runId: job.run_id,
       kind: 'insights',
@@ -748,7 +749,7 @@ export class SyncService {
       metadata: {
         batchId: db.batchId
       }
-    });
+    }));
 
     return {
       jobId: job.id,
@@ -776,6 +777,8 @@ export class SyncService {
     recoverStaleCollectionJobsWithSuccessBatches({ queueName, runId, staleAfterMs: recoverStaleAfterMs });
     const workerCount = Math.max(1, Number.parseInt(concurrency, 10) || 1);
     const waitForStartSlot = createRequestStartLimiter(qps);
+    const writeDatabaseLimit = pLimit(1);
+    const writeDatabase = (operation) => writeDatabaseLimit(async () => operation());
     const records = [];
     const results = [];
     const workerPrefix = `pid-${process.pid}-${Date.now()}`;
@@ -795,7 +798,15 @@ export class SyncService {
     const workerLoop = async (index) => {
       const workerId = `${workerPrefix}-${index + 1}`;
       while (true) {
-        const job = claimCollectionJob({ queueName, runId, workerId });
+        let job = null;
+        try {
+          job = await writeDatabase(() => claimCollectionJob({ queueName, runId, workerId }));
+        } catch (error) {
+          const delayMs = isSqliteBusyError(error) ? 1000 : 3000;
+          warn(`采集 worker ${index + 1} 领取 Job 失败：${error.message}，${delayMs}ms 后重试`);
+          await sleep(delayMs);
+          continue;
+        }
         if (!job) {
           const shouldContinue = await waitForPendingRetry();
           if (shouldContinue) continue;
@@ -805,7 +816,7 @@ export class SyncService {
         const startedMs = Date.now();
         try {
           await waitForStartSlot();
-          const result = await this.executeCollectionJob(job, { timeoutMs });
+          const result = await this.executeCollectionJob(job, { timeoutMs, writeDatabase });
           results.push(result);
           records.push({
             taskId: job.id,
@@ -831,43 +842,54 @@ export class SyncService {
           const durationMs = Date.now() - startedMs;
           const flags = rateLimitFlags(error);
           const completedAt = new Date().toISOString();
-          writeCollectionJobBatch({
-            jobId: job.id,
-            runId: job.run_id,
-            kind: 'insights',
-            status: 'failed',
-            idCount: job.objectIds?.length || 0,
-            itemSuccessCount: 0,
-            itemFailedCount: job.objectIds?.length || 0,
-            rowCount: 0,
-            rawRowCount: 0,
-            httpStatus: error.httpStatus || '',
-            apiCode: error.code || '',
-            bodySize: error.bodySize || 0,
-            durationMs,
-            rateLimited: flags.rateLimited,
-            quotaLimited: flags.quotaLimited,
-            error: error.message,
-            startedAt,
-            completedAt,
-            metadata: {
-              bucketKey: job.bucket_key,
-              itemErrors: error.itemErrors || []
-            }
-          });
-          const failed = failCollectionJob({
-            jobId: job.id,
-            error: error.message,
-            durationMs,
-            rateLimited: flags.rateLimited,
-            quotaLimited: flags.quotaLimited,
-            retry: isRetryableJobError(error),
-            backoffMs: backoffForAttempt(job.attempts),
-            metadata: {
-              lastCode: error.code || '',
-              lastHttpStatus: error.httpStatus || ''
-            }
-          });
+          let failed = {
+            status: isRetryableJobError(error) ? 'retry' : 'failed',
+            nextAttemptAt: ''
+          };
+          try {
+            await writeDatabase(() => {
+              writeCollectionJobBatch({
+                jobId: job.id,
+                runId: job.run_id,
+                kind: 'insights',
+                status: 'failed',
+                idCount: job.objectIds?.length || 0,
+                itemSuccessCount: 0,
+                itemFailedCount: job.objectIds?.length || 0,
+                rowCount: 0,
+                rawRowCount: 0,
+                httpStatus: error.httpStatus || '',
+                apiCode: error.code || '',
+                bodySize: error.bodySize || 0,
+                durationMs,
+                rateLimited: flags.rateLimited,
+                quotaLimited: flags.quotaLimited,
+                error: error.message,
+                startedAt,
+                completedAt,
+                metadata: {
+                  bucketKey: job.bucket_key,
+                  itemErrors: error.itemErrors || []
+                }
+              });
+              failed = failCollectionJob({
+                jobId: job.id,
+                error: error.message,
+                durationMs,
+                rateLimited: flags.rateLimited,
+                quotaLimited: flags.quotaLimited,
+                retry: isRetryableJobError(error),
+                backoffMs: backoffForAttempt(job.attempts),
+                metadata: {
+                  lastCode: error.code || '',
+                  lastHttpStatus: error.httpStatus || ''
+                }
+              });
+              return failed;
+            });
+          } catch (recordError) {
+            warn(`采集 Job ${job.id} 失败状态写入失败：${recordError.message}；watchdog 会在超时后恢复该 Job`);
+          }
           records.push({
             taskId: job.id,
             runId: job.run_id,

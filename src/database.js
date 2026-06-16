@@ -2,6 +2,11 @@ const fs = require("node:fs");
 const { DatabaseSync } = require("node:sqlite");
 const { enrichInsightRowsWithTimeZone } = require("./time");
 
+const sqliteBusyTimeoutMs = Math.max(1000, Number.parseInt(process.env.SQLITE_BUSY_TIMEOUT_MS || "10000", 10) || 10000);
+const sqliteRetryAttempts = Math.max(1, Number.parseInt(process.env.SQLITE_RETRY_ATTEMPTS || "6", 10) || 6);
+const sqliteRetryBaseMs = Math.max(25, Number.parseInt(process.env.SQLITE_RETRY_BASE_MS || "80", 10) || 80);
+const walReadyDatabases = new Set();
+
 const insightDbColumns = [
   "date_start",
   "date_start_beijing",
@@ -43,6 +48,58 @@ function parseJson(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function openDatabase(databaseFile) {
+  const db = new DatabaseSync(databaseFile);
+  db.exec(`
+    PRAGMA busy_timeout = ${sqliteBusyTimeoutMs};
+    PRAGMA synchronous = NORMAL;
+    PRAGMA foreign_keys = ON;
+  `);
+  const key = require("node:path").resolve(databaseFile);
+  if (!walReadyDatabases.has(key)) {
+    db.exec("PRAGMA journal_mode = WAL;");
+    walReadyDatabases.add(key);
+  }
+  return db;
+}
+
+function isSqliteBusyError(error) {
+  const text = `${error?.code || ""} ${error?.message || ""}`.toLowerCase();
+  return text.includes("sqlite_busy")
+    || text.includes("sqlite_locked")
+    || text.includes("database is locked")
+    || text.includes("database table is locked")
+    || text.includes("busy");
+}
+
+function sleepSync(ms) {
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, Math.max(1, Math.round(ms)));
+}
+
+function retryDelayMs(attempt) {
+  const backoff = sqliteRetryBaseMs * (2 ** Math.max(0, attempt - 1));
+  const jitter = Math.floor(Math.random() * sqliteRetryBaseMs);
+  return Math.min(2000, backoff + jitter);
+}
+
+function withDatabaseRetry(operation) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= sqliteRetryAttempts; attempt += 1) {
+    try {
+      return operation();
+    } catch (error) {
+      lastError = error;
+      if (!isSqliteBusyError(error) || attempt >= sqliteRetryAttempts) {
+        throw error;
+      }
+      sleepSync(retryDelayMs(attempt));
+    }
+  }
+  throw lastError;
 }
 
 function selectableColumns(db, tableName, columns) {
@@ -103,7 +160,7 @@ function readLatestInsightData({ databaseFile, limit = 50_000, accountTimeZones 
     return null;
   }
 
-  const db = new DatabaseSync(databaseFile);
+  const db = openDatabase(databaseFile);
   try {
     const batch = db.prepare(`
       SELECT id, source, level, account_ids, row_count, started_at, completed_at, metadata_json
@@ -261,7 +318,7 @@ function readMonitorOverview({ databaseFile, runLimit = 8 } = {}) {
     };
   }
 
-  const db = new DatabaseSync(databaseFile);
+  const db = openDatabase(databaseFile);
   try {
     const tableExists = db.prepare(`
       SELECT name
@@ -678,8 +735,9 @@ function recoverStaleCollectionJobs({
     return result;
   }
 
-  const db = new DatabaseSync(databaseFile);
-  try {
+  return withDatabaseRetry(() => {
+    const db = openDatabase(databaseFile);
+    try {
     if (!tableExists(db, "collection_jobs")) {
       return result;
     }
@@ -770,14 +828,18 @@ function recoverStaleCollectionJobs({
       });
     });
     return result;
-  } catch (error) {
-    return {
-      ...result,
-      error: error.message
-    };
-  } finally {
-    db.close();
-  }
+    } catch (error) {
+      if (isSqliteBusyError(error)) {
+        throw error;
+      }
+      return {
+        ...result,
+        error: error.message
+      };
+    } finally {
+      db.close();
+    }
+  });
 }
 
 function readCollectionQueueOverview({ databaseFile, queueName = "insights", runId = "", limit = 50, offset = 0, page = 1, pageSize = 50 } = {}) {
@@ -785,7 +847,7 @@ function readCollectionQueueOverview({ databaseFile, queueName = "insights", run
     return emptyCollectionQueueOverview(queueName);
   }
 
-  const db = new DatabaseSync(databaseFile);
+  const db = openDatabase(databaseFile);
   try {
     if (!tableExists(db, "collection_jobs")) {
       return emptyCollectionQueueOverview(queueName);
@@ -974,8 +1036,9 @@ function deleteCollectionRun({ databaseFile, runId, queueName = "insights" } = {
     };
   }
 
-  const db = new DatabaseSync(databaseFile);
-  try {
+  return withDatabaseRetry(() => {
+    const db = openDatabase(databaseFile);
+    try {
     if (!tableExists(db, "collection_jobs")) {
       return {
         runId: normalizedRunId,
@@ -1023,9 +1086,10 @@ function deleteCollectionRun({ databaseFile, runId, queueName = "insights" } = {
       db.exec("ROLLBACK");
       throw error;
     }
-  } finally {
-    db.close();
-  }
+    } finally {
+      db.close();
+    }
+  });
 }
 
 function activeStatusSql(alias) {
@@ -1151,7 +1215,7 @@ function readActiveResourceCandidates({
     return empty;
   }
 
-  const db = new DatabaseSync(databaseFile);
+  const db = openDatabase(databaseFile);
   try {
     const campaignSyncedAt = maxSyncedAt(db, "resource_campaigns");
     const adsetSyncedAt = maxSyncedAt(db, "resource_adsets");
@@ -1350,7 +1414,7 @@ function readAnalysisEntityOptions({
   const normalizedLimit = Math.min(300, Math.max(1, Number.parseInt(limit, 10) || 80));
   const query = String(search || "").trim();
   const like = `%${query}%`;
-  const db = new DatabaseSync(databaseFile);
+  const db = openDatabase(databaseFile);
   try {
     if (normalizedLevel === "account") {
       return readEntitiesFromInsightRows(db, { level: normalizedLevel, search: query, limit: normalizedLimit });
@@ -1473,7 +1537,7 @@ function readInsightRowsForAnalysis({
   const ids = [...new Set((Array.isArray(entityIds) ? entityIds : [])
     .map((id) => String(id || "").trim())
     .filter(Boolean))];
-  const db = new DatabaseSync(databaseFile);
+  const db = openDatabase(databaseFile);
   try {
     if (!tableExists(db, "insight_rows")) {
       return [];

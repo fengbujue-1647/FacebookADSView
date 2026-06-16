@@ -73,6 +73,12 @@ const insightColumnMigrations = {
   account_timezone: "TEXT NOT NULL DEFAULT ''"
 };
 
+const schemaReadyDatabases = new Set();
+const walReadyDatabases = new Set();
+const sqliteBusyTimeoutMs = Math.max(1000, Number.parseInt(process.env.SQLITE_BUSY_TIMEOUT_MS || '10000', 10) || 10000);
+const sqliteRetryAttempts = Math.max(1, Number.parseInt(process.env.SQLITE_RETRY_ATTEMPTS || '6', 10) || 6);
+const sqliteRetryBaseMs = Math.max(25, Number.parseInt(process.env.SQLITE_RETRY_BASE_MS || '80', 10) || 80);
+
 function ensureDatabaseDir(databaseFile = config.databaseFile) {
   fs.mkdirSync(path.dirname(databaseFile), { recursive: true });
 }
@@ -81,10 +87,15 @@ function openDatabase(databaseFile = config.databaseFile) {
   ensureDatabaseDir(databaseFile);
   const db = new DatabaseSync(databaseFile);
   db.exec(`
-    PRAGMA journal_mode = WAL;
+    PRAGMA busy_timeout = ${sqliteBusyTimeoutMs};
     PRAGMA synchronous = NORMAL;
     PRAGMA foreign_keys = ON;
   `);
+  const key = path.resolve(databaseFile);
+  if (!walReadyDatabases.has(key)) {
+    db.exec('PRAGMA journal_mode = WAL;');
+    walReadyDatabases.add(key);
+  }
   return db;
 }
 
@@ -379,14 +390,52 @@ function migrateInsightColumns(db) {
   }
 }
 
+export function isSqliteBusyError(error) {
+  const text = `${error?.code || ''} ${error?.message || ''}`.toLowerCase();
+  return text.includes('sqlite_busy')
+    || text.includes('sqlite_locked')
+    || text.includes('database is locked')
+    || text.includes('database table is locked')
+    || text.includes('busy');
+}
+
+function sleepSync(ms) {
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, Math.max(1, Math.round(ms)));
+}
+
+function retryDelayMs(attempt) {
+  const backoff = sqliteRetryBaseMs * (2 ** Math.max(0, attempt - 1));
+  const jitter = Math.floor(Math.random() * sqliteRetryBaseMs);
+  return Math.min(2000, backoff + jitter);
+}
+
+function ensureSchemaOnce(db, databaseFile) {
+  const key = path.resolve(databaseFile);
+  if (schemaReadyDatabases.has(key)) return;
+  createSchema(db);
+  schemaReadyDatabases.add(key);
+}
+
 function withDatabase(callback, databaseFile = config.databaseFile) {
-  const db = openDatabase(databaseFile);
-  try {
-    createSchema(db);
-    return callback(db);
-  } finally {
-    db.close();
+  let lastError = null;
+  for (let attempt = 1; attempt <= sqliteRetryAttempts; attempt += 1) {
+    const db = openDatabase(databaseFile);
+    try {
+      ensureSchemaOnce(db, databaseFile);
+      return callback(db);
+    } catch (error) {
+      lastError = error;
+      if (!isSqliteBusyError(error) || attempt >= sqliteRetryAttempts) {
+        throw error;
+      }
+      sleepSync(retryDelayMs(attempt));
+    } finally {
+      db.close();
+    }
   }
+  throw lastError;
 }
 
 function runInTransaction(db, callback) {
@@ -396,7 +445,11 @@ function runInTransaction(db, callback) {
     db.exec('COMMIT');
     return result;
   } catch (error) {
-    db.exec('ROLLBACK');
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // Preserve the original transaction error.
+    }
     throw error;
   }
 }

@@ -1300,6 +1300,130 @@ h2 {
   transition: width 180ms ease;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(12, 18, 28, 0.44);
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.confirm-modal {
+  width: min(720px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid #d7e1ef;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.26);
+}
+
+.confirm-modal-head,
+.confirm-modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+}
+
+.confirm-modal-head {
+  border-bottom: 1px solid #e4eaf3;
+}
+
+.confirm-modal-head h3 {
+  margin: 2px 0 0;
+  color: #17202a;
+  font-size: 18px;
+}
+
+.confirm-modal-body {
+  display: grid;
+  gap: 12px;
+  overflow: auto;
+  padding: 16px 18px;
+}
+
+.confirm-modal-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.confirm-modal-metric,
+.confirm-modal-item,
+.confirm-modal-warning {
+  border: 1px solid #dde6f1;
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.confirm-modal-metric {
+  padding: 12px;
+}
+
+.confirm-modal-metric span,
+.confirm-modal-item small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.confirm-modal-metric strong {
+  display: block;
+  margin-top: 4px;
+  color: #17202a;
+  font-size: 20px;
+  line-height: 1.1;
+}
+
+.confirm-modal-item {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+}
+
+.confirm-modal-item h4 {
+  margin: 0;
+  color: #17202a;
+  font-size: 14px;
+}
+
+.confirm-modal-item-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.confirm-modal-item-grid strong {
+  display: block;
+  margin-top: 3px;
+  color: #17202a;
+  font-size: 13px;
+}
+
+.confirm-modal-warning {
+  padding: 11px 12px;
+  color: #92400e;
+  background: #fff7ed;
+  border-color: #fed7aa;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.confirm-modal-actions {
+  border-top: 1px solid #e4eaf3;
+}
+
 .task-progress-list {
   display: grid;
   gap: 10px;
@@ -2511,7 +2635,9 @@ td {
   }
 
   .overall-task-progress,
-  .task-progress-row {
+  .task-progress-row,
+  .confirm-modal-summary,
+  .confirm-modal-item-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2605,5 +2731,20 @@ td {
 
   .primary-button span {
     display: none;
+  }
+
+  .modal-backdrop {
+    align-items: stretch;
+    padding: 12px;
+  }
+
+  .confirm-modal {
+    max-height: calc(100vh - 24px);
+  }
+
+  .confirm-modal-head,
+  .confirm-modal-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

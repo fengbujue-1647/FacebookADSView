@@ -1299,6 +1299,205 @@ function normalizeCollectionRunMode(value) {
   return ["all", "campaigns", "ads"].includes(value) ? value : "all";
 }
 
+async function loadCliSyncService() {
+  const moduleUrl = pathToFileURL(path.join(repoRoot, "cli", "src", "syncService.js")).href;
+  const module = await import(moduleUrl);
+  return module.SyncService;
+}
+
+function previewAccountRows() {
+  return readMonitoredAccounts().map((account) => ({
+    account_id: account.id,
+    name: account.name || account.id
+  }));
+}
+
+function resourceById(rows = []) {
+  return new Map(rows.map((row) => [String(row.id || row.ad_id || row.campaign_id || ""), row]));
+}
+
+function mergeActiveResourceCandidates(accounts = []) {
+  const accountIds = [...new Set(accounts.map((account) => String(account.account_id || "").trim()).filter(Boolean))];
+  if (!accountIds.length && activeResourceAccountId) {
+    accountIds.push(activeResourceAccountId);
+  }
+
+  const campaigns = new Map();
+  const ads = new Map();
+  const warnings = [];
+
+  for (const accountId of accountIds) {
+    const candidates = readActiveResourceCandidates({
+      databaseFile,
+      accountId,
+      limit: 5000,
+      refreshIntervalMs: activeResourceRefreshIntervalMs
+    });
+
+    for (const row of candidates.campaigns || []) {
+      campaigns.set(String(row.id || row.campaign_id || ""), row);
+    }
+    for (const row of candidates.ads || []) {
+      ads.set(String(row.id || row.ad_id || ""), row);
+    }
+    if (candidates.error) {
+      warnings.push(`ACTIVE 资源缓存读取失败：${accountId} ${candidates.error}`);
+    }
+  }
+
+  return {
+    campaigns: [...campaigns.values()],
+    ads: [...ads.values()],
+    warnings
+  };
+}
+
+function rangeFromSlices(slices = []) {
+  const starts = slices.map((slice) => slice.since).filter(Boolean).sort();
+  const ends = slices.map((slice) => slice.until).filter(Boolean).sort();
+  return {
+    since: starts[0] || "",
+    until: ends.at(-1) || ""
+  };
+}
+
+function summarizeCollectionPreviewItem({ label, objectType, ids, resources, config, plan, warning = "", blocking = false }) {
+  const totalBuckets = plan.plannedSlices.reduce((total, item) => total + Number(item.bucketCount || 0), 0);
+  const missingBuckets = plan.plannedSlices.reduce((total, item) => total + Number(item.missingBucketCount || 0), 0);
+  const qps = Math.max(1, Number(config.qps || 1));
+  const estimatedSeconds = Math.ceil(Number(plan.jobs.length || 0) / qps);
+  return {
+    label,
+    objectType,
+    objectCount: ids.length,
+    resourceCount: resources.length,
+    plannedJobs: plan.jobs.length,
+    totalBuckets,
+    missingBuckets,
+    coveredBuckets: Math.max(0, totalBuckets - missingBuckets),
+    range: rangeFromSlices(plan.plannedSlices),
+    backfillDays: Math.max(0, ...plan.plannedSlices.map((item) => Number(item.backfillDays || 0))),
+    concurrency: Number(config.concurrency || 1),
+    qps,
+    timeoutMs: Number(config.requestTimeoutMs || 7000),
+    estimatedSeconds,
+    warning,
+    blocking: Boolean(blocking)
+  };
+}
+
+async function buildCollectionRunPreview({ mode = "all" } = {}) {
+  const normalizedMode = normalizeCollectionRunMode(mode);
+  const settings = readSamplingSettings();
+  const SyncService = await loadCliSyncService();
+  const service = new SyncService();
+  const accounts = previewAccountRows();
+  const accountMap = new Map(accounts.map((account) => [String(account.account_id), account]));
+  const candidates = mergeActiveResourceCandidates(accounts);
+  const campaignCandidates = resourceById(candidates.campaigns || []);
+  const adCandidates = resourceById(candidates.ads || []);
+  const items = [];
+  const warnings = [...(candidates.warnings || [])];
+
+  if (normalizedMode === "all" || normalizedMode === "campaigns") {
+    const config = settings.campaignMonitor || {};
+    let ids = [...new Set(config.campaignIds || [])];
+    let warning = "";
+    let blocking = false;
+    if (config.autoActiveCampaigns) {
+      if (!accounts.length) {
+        warning = "List 1 启用自动 ACTIVE 广告系列，但当前没有监控账户；真实运行时 List 1 会失败，请先配置监控账户或关闭自动 ACTIVE。";
+        warnings.push(warning);
+        blocking = true;
+        ids = [];
+      } else {
+        ids = [...new Set([...campaignCandidates.keys(), ...ids])];
+      }
+    }
+    const resources = ids.map((id) => ({
+      ...(campaignCandidates.get(String(id)) || {}),
+      id: String(id),
+      campaign_id: String(id),
+      account_id: campaignCandidates.get(String(id))?.account_id || activeResourceAccountId
+    }));
+    const plan = ids.length
+      ? service.planHourlyCollectionJobs({
+        sourceRows: resources,
+        resourceType: "campaigns",
+        accountMap,
+        runId: "preview",
+        resultAction: config.resultAction || "",
+        source: "preview:campaigns",
+        tool: "preview-campaigns",
+        outputName: "preview",
+        maxAttempts: config.maxAttempts || 8
+      })
+      : { jobs: [], plannedSlices: [] };
+    items.push(summarizeCollectionPreviewItem({
+      label: "List 1 广告系列",
+      objectType: "campaigns",
+      ids,
+      resources,
+      config,
+      plan,
+      warning,
+      blocking
+    }));
+  }
+
+  if (normalizedMode === "all" || normalizedMode === "ads") {
+    const config = settings.adMonitor || {};
+    const ids = [...new Set(config.adIds || [])];
+    const resources = ids.map((id) => ({
+      ...(adCandidates.get(String(id)) || {}),
+      id: String(id),
+      ad_id: String(id),
+      account_id: adCandidates.get(String(id))?.account_id || activeResourceAccountId
+    }));
+    const plan = ids.length
+      ? service.planHourlyCollectionJobs({
+        sourceRows: resources,
+        resourceType: "ads",
+        accountMap,
+        runId: "preview",
+        resultAction: config.resultAction || "",
+        source: "preview:ads",
+        tool: "preview-ads",
+        outputName: "preview",
+        maxAttempts: config.maxAttempts || 8
+      })
+      : { jobs: [], plannedSlices: [] };
+    items.push(summarizeCollectionPreviewItem({
+      label: "List 2 广告",
+      objectType: "ads",
+      ids,
+      resources,
+      config,
+      plan
+    }));
+  }
+
+  const totalJobs = items.reduce((total, item) => total + Number(item.plannedJobs || 0), 0);
+  const totalObjects = items.reduce((total, item) => total + Number(item.objectCount || 0), 0);
+  const estimatedSeconds = items.reduce((total, item) => total + Number(item.estimatedSeconds || 0), 0);
+  const runnerBusy = Boolean(collectionRunProcess);
+  const blocking = items.some((item) => item.blocking);
+
+  return {
+    mode: normalizedMode,
+    generatedAt: new Date().toISOString(),
+    runnerBusy,
+    canRun: !runnerBusy && totalJobs > 0 && !blocking,
+    blocking,
+    runner: collectionRunStatus,
+    totalJobs,
+    totalObjects,
+    estimatedSeconds,
+    items,
+    warnings
+  };
+}
+
 function startCollectionRun({ mode = "all", triggerSource = "manual" } = {}) {
   if (collectionRunProcess) {
     return {
@@ -3271,6 +3470,28 @@ const server = http.createServer((req, res) => {
         message: error.message
       });
     }
+    return;
+  }
+
+  if (url.pathname === "/api/collection/queue/preview" && req.method === "POST") {
+    readRequestBody(req)
+      .then((body) => {
+        const payload = JSON.parse(body || "{}");
+        return buildCollectionRunPreview({ mode: payload.mode });
+      })
+      .then((preview) => {
+        writeJson(res, 200, {
+          ok: true,
+          preview
+        });
+      })
+      .catch((error) => {
+        writeJson(res, error.message === "request_body_too_large" ? 413 : 400, {
+          ok: false,
+          error: "preview_collection_queue_failed",
+          message: error.message
+        });
+      });
     return;
   }
 
