@@ -302,6 +302,23 @@ main {
   border-bottom: 0.5px solid var(--line-soft);
 }
 
+.hero-index.is-visible .hero-index-item {
+  animation: heroIndexIn 640ms var(--ease) both;
+  animation-delay: calc(var(--index-order, 0) * 90ms + 160ms);
+}
+
+.hero-index-item:nth-child(1) {
+  --index-order: 0;
+}
+
+.hero-index-item:nth-child(2) {
+  --index-order: 1;
+}
+
+.hero-index-item:nth-child(3) {
+  --index-order: 2;
+}
+
 .hero-index span,
 .architecture-step > span,
 .capability-card > span,
@@ -375,6 +392,49 @@ h3 {
   transform: translateX(-0.06em);
 }
 
+.hero-stage {
+  opacity: 0;
+  transform: var(--hero-transform-from, translateY(18px));
+  will-change: opacity, transform;
+}
+
+.hero-copy .eyebrow {
+  --hero-delay: 80ms;
+}
+
+.hero-logo-mark {
+  --hero-delay: 170ms;
+  --hero-transform-from: translateX(-22px) translateY(18px);
+  --hero-transform-to: translateX(-22px) translateY(0);
+}
+
+.hero-brand {
+  --hero-delay: 300ms;
+  --hero-transform-from: translateX(-0.06em) translateY(18px);
+  --hero-transform-to: translateX(-0.06em) translateY(0);
+}
+
+.hero-lede {
+  --hero-delay: 430ms;
+}
+
+.hero-typewriter {
+  --hero-delay: 560ms;
+}
+
+.hero-actions {
+  --hero-delay: 760ms;
+}
+
+.trust-copy {
+  --hero-delay: 860ms;
+}
+
+body.home-page.is-home-ready .hero-stage {
+  animation: heroStageIn 760ms var(--ease) forwards;
+  animation-delay: var(--hero-delay, 0ms);
+}
+
 .hero-lede {
   margin: 32px 0 0;
   max-width: 680px;
@@ -390,6 +450,39 @@ h3 {
   color: var(--text);
   font-size: 16px;
   line-height: 1.9;
+}
+
+.hero-typewriter {
+  position: relative;
+}
+
+.hero-typewriter::before {
+  content: attr(data-typewriter-text);
+  display: block;
+  visibility: hidden;
+}
+
+.hero-typewriter [data-typewriter-output] {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.hero-typewriter [data-typewriter-output]::after {
+  content: "";
+  display: inline-block;
+  width: 1px;
+  height: 1.08em;
+  margin-left: 3px;
+  background: var(--blue);
+  transform: translateY(0.18em);
+  animation: typeCaret 880ms step-end infinite;
+}
+
+.hero-typewriter.is-typewriter-complete [data-typewriter-output]::after {
+  opacity: 0;
+  animation: none;
+  transition: opacity 220ms var(--ease);
 }
 
 .hero-actions {
@@ -894,6 +987,39 @@ pre {
   }
 }
 
+@keyframes heroStageIn {
+  from {
+    opacity: 0;
+    transform: var(--hero-transform-from, translateY(18px));
+  }
+  to {
+    opacity: 1;
+    transform: var(--hero-transform-to, translateY(0));
+  }
+}
+
+@keyframes typeCaret {
+  0%,
+  46% {
+    opacity: 1;
+  }
+  47%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes heroIndexIn {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (max-width: 1180px) {
   :root {
     --grid-margin: 48px;
@@ -1054,6 +1180,8 @@ pre {
   .hero-logo-mark {
     width: min(250px, 76vw);
     transform: translateX(-14px);
+    --hero-transform-from: translateX(-14px) translateY(18px);
+    --hero-transform-to: translateX(-14px) translateY(0);
   }
 
   .hero-lede {
@@ -1085,6 +1213,8 @@ pre {
   }
 
   .reveal,
+  .hero-stage,
+  .hero-index.is-visible .hero-index-item,
   .primary-cta span,
   .primary-cta,
   .nav-cta,
@@ -1098,6 +1228,28 @@ pre {
   .home-loader {
     transition: none;
     transition-delay: 0ms;
+  }
+
+  .hero-stage {
+    opacity: 1;
+    transform: none;
+    animation: none;
+  }
+
+  .hero-typewriter::before {
+    content: none;
+  }
+
+  .hero-typewriter [data-typewriter-output] {
+    position: static;
+  }
+
+  .hero-typewriter [data-typewriter-output]::after {
+    content: none;
+  }
+
+  .hero-index.is-visible .hero-index-item {
+    animation: none;
   }
 
   .loader-logo {

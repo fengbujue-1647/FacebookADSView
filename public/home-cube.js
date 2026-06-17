@@ -19,10 +19,12 @@ if (mount && !reduceMotion) {
   const group = new THREE.Group();
   scene.add(group);
 
-  const clusterCount = 6;
-  const unitsPerCluster = 27;
-  const cubeCount = clusterCount * unitsPerCluster;
-  const geometry = new THREE.BoxGeometry(0.16, 0.16, 0.16);
+  const blockSide = 6;
+  const cubeCount = blockSide ** 3;
+  const unitSize = 0.19;
+  const targetSpacing = 0.24;
+  const blockExtent = (blockSide - 1) * targetSpacing + unitSize * 1.35;
+  const geometry = new THREE.BoxGeometry(unitSize, unitSize, unitSize);
   const material = new THREE.MeshPhysicalMaterial({
     color: 0xf5f8ff,
     roughness: 0.18,
@@ -30,7 +32,7 @@ if (mount && !reduceMotion) {
     transmission: 0.58,
     thickness: 0.18,
     transparent: true,
-    opacity: 0.62
+    opacity: 0.54
   });
   const mesh = new THREE.InstancedMesh(geometry, material, cubeCount);
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -40,11 +42,34 @@ if (mount && !reduceMotion) {
   const edgeMaterial = new THREE.LineBasicMaterial({
     color: 0x0052d9,
     transparent: true,
-    opacity: 0.22
+    opacity: 0.18
   });
   const edgeMesh = new THREE.InstancedMesh(edgeGeometry, edgeMaterial, cubeCount);
   edgeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   group.add(edgeMesh);
+
+  const shellGeometry = new THREE.BoxGeometry(blockExtent, blockExtent, blockExtent);
+  const shellMaterial = new THREE.MeshPhysicalMaterial({
+    color: 0xf8fbff,
+    roughness: 0.24,
+    metalness: 0,
+    transmission: 0.68,
+    thickness: 0.32,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false
+  });
+  const shellMesh = new THREE.Mesh(shellGeometry, shellMaterial);
+  group.add(shellMesh);
+
+  const shellEdgeGeometry = new THREE.EdgesGeometry(shellGeometry);
+  const shellEdgeMaterial = new THREE.LineBasicMaterial({
+    color: 0x0052d9,
+    transparent: true,
+    opacity: 0
+  });
+  const shellEdges = new THREE.LineSegments(shellEdgeGeometry, shellEdgeMaterial);
+  group.add(shellEdges);
 
   scene.add(new THREE.AmbientLight(0xeaf2ff, 1.9));
   const keyLight = new THREE.DirectionalLight(0xffffff, 1.1);
@@ -60,43 +85,33 @@ if (mount && !reduceMotion) {
   const color = new THREE.Color();
   const colorA = new THREE.Color(0xffffff);
   const colorB = new THREE.Color(0xdde8ff);
-  const gridCenters = [
-    [-1.5, 1.0, 0],
-    [0, 1.0, 0],
-    [1.5, 1.0, 0],
-    [-1.5, -0.52, 0],
-    [0, -0.52, 0],
-    [1.5, -0.52, 0]
-  ];
+  const targetOffset = (blockSide - 1) / 2;
 
-  for (let cluster = 0; cluster < clusterCount; cluster += 1) {
-    const [cx, cy, cz] = gridCenters[cluster];
-    for (let local = 0; local < unitsPerCluster; local += 1) {
-      const index = cluster * unitsPerCluster + local;
-      const x = local % 3;
-      const y = Math.floor(local / 3) % 3;
-      const z = Math.floor(local / 9);
-      const target = new THREE.Vector3(
-        cx + (x - 1) * 0.22,
-        cy + (y - 1) * 0.22,
-        cz + (z - 1) * 0.22
-      );
-      const angle = index * 0.62;
-      const radius = 1.35 + (index % 13) * 0.07;
-      const scatter = new THREE.Vector3(
-        Math.cos(angle) * radius + (cluster - 2.5) * 0.18,
-        Math.sin(index * 0.37) * 1.4 + (index % 5) * 0.08,
-        Math.sin(angle) * radius * 0.7 + Math.cos(index * 0.19) * 0.8
-      );
-      points.push({
-        scatter,
-        target,
-        current: scatter.clone(),
-        rotationSeed: index * 0.131,
-        scale: 0.72 + (index % 5) * 0.035
-      });
-      mesh.setColorAt(index, color.copy(colorA).lerp(colorB, (index % 9) / 8));
-    }
+  for (let index = 0; index < cubeCount; index += 1) {
+    const x = index % blockSide;
+    const y = Math.floor(index / blockSide) % blockSide;
+    const z = Math.floor(index / (blockSide * blockSide));
+    const target = new THREE.Vector3(
+      (x - targetOffset) * targetSpacing,
+      (y - targetOffset) * targetSpacing,
+      (z - targetOffset) * targetSpacing
+    );
+    const angle = index * 0.56;
+    const radius = 1.25 + (index % 17) * 0.055;
+    const band = (index / cubeCount - 0.5) * 2.4;
+    const scatter = new THREE.Vector3(
+      Math.cos(angle) * radius + band,
+      Math.sin(index * 0.37) * 1.36 + ((index % 11) - 5) * 0.055,
+      Math.sin(angle) * radius * 0.72 + Math.cos(index * 0.19) * 0.82
+    );
+    points.push({
+      scatter,
+      target,
+      current: scatter.clone(),
+      rotationSeed: index * 0.131,
+      scale: 0.68 + (index % 7) * 0.028
+    });
+    mesh.setColorAt(index, color.copy(colorA).lerp(colorB, (x + y + z) / ((blockSide - 1) * 3)));
   }
   mesh.instanceColor.needsUpdate = true;
 
@@ -171,11 +186,16 @@ if (mount && !reduceMotion) {
 
     mesh.instanceMatrix.needsUpdate = true;
     edgeMesh.instanceMatrix.needsUpdate = true;
+    const blockPresence = clamp((t - 0.14) / 0.86, 0, 1);
+    material.opacity = 0.38 + blockPresence * 0.12;
+    edgeMaterial.opacity = 0.12 + blockPresence * 0.06;
+    shellMaterial.opacity = blockPresence * 0.08;
+    shellEdgeMaterial.opacity = blockPresence * 0.18;
     group.rotation.y = -0.24 + pointerX * 0.05 + (1 - t) * Math.sin(time * 0.14) * 0.08;
     group.rotation.x = -0.08 + pointerY * 0.04 + t * 0.05;
-    group.position.x = width < 760 ? 0.02 : 1.95 - t * 1.75;
+    group.position.x = width < 760 ? 0.02 : 1.95 - t * 0.78;
     group.position.y = width < 760 ? -0.58 + t * 0.42 : -0.18 + t * 0.1;
-    group.scale.setScalar(width < 760 ? 0.86 : 1);
+    group.scale.setScalar(width < 760 ? 0.88 : 1.08);
 
     renderer.render(scene, camera);
     frameId = window.requestAnimationFrame(animate);
@@ -225,6 +245,10 @@ if (mount && !reduceMotion) {
     material.dispose();
     edgeGeometry.dispose();
     edgeMaterial.dispose();
+    shellGeometry.dispose();
+    shellMaterial.dispose();
+    shellEdgeGeometry.dispose();
+    shellEdgeMaterial.dispose();
   }, { once: true });
 } else if (mount) {
   mount.dataset.cubeProgress = "1.000";

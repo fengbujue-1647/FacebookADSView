@@ -88,14 +88,105 @@ function initReveal() {
 
 function initLoader() {
   const loader = document.querySelector("[data-loader]");
-  if (!loader) return;
-  const hide = () => loader.classList.add("is-hidden");
+  const markReady = () => document.body.classList.add("is-home-ready");
+  if (!loader) {
+    markReady();
+    return;
+  }
+  const hide = () => {
+    loader.classList.add("is-hidden");
+    markReady();
+  };
   if (prefersReducedMotion) {
     hide();
     return;
   }
   window.setTimeout(hide, 680);
   window.addEventListener("load", hide, { once: true });
+}
+
+function initHeroTypewriter() {
+  const typewriter = document.querySelector("[data-typewriter]");
+  const output = typewriter?.querySelector("[data-typewriter-output]");
+  const text = typewriter?.dataset.typewriterText || output?.textContent || "";
+  if (!typewriter || !output || !text) return;
+
+  typewriter.setAttribute("aria-label", text);
+  if (prefersReducedMotion) {
+    output.textContent = text;
+    typewriter.classList.add("is-typewriter-complete");
+    return;
+  }
+  output.textContent = "";
+
+  const chars = Array.from(text);
+  const charTimes = [];
+  chars.forEach((_, index) => {
+    const previous = index > 0 ? charTimes[index - 1] : 0;
+    const pause = "，。、/".includes(chars[index - 1] || "") ? 90 : 0;
+    charTimes.push(previous + 32 + pause);
+  });
+  let startedAt = 0;
+  let visibleCount = 0;
+  let timerId = 0;
+  let started = false;
+  const startDelayMs = 1320;
+
+  const complete = () => {
+    output.textContent = text;
+    typewriter.classList.add("is-typewriter-complete");
+    if (timerId) {
+      window.clearTimeout(timerId);
+      timerId = 0;
+    }
+  };
+
+  const typeNext = () => {
+    const elapsed = Date.now() - startedAt;
+    while (visibleCount < chars.length && charTimes[visibleCount] <= elapsed) {
+      visibleCount += 1;
+    }
+    output.textContent = chars.slice(0, visibleCount).join("");
+    if (visibleCount >= chars.length) {
+      complete();
+      return;
+    }
+    timerId = window.setTimeout(typeNext, 32);
+  };
+
+  const start = () => {
+    if (started) return;
+    started = true;
+    startedAt = Date.now() + startDelayMs;
+    timerId = window.setTimeout(typeNext, startDelayMs);
+  };
+
+  const rect = typewriter.getBoundingClientRect();
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 1;
+  const visibleHeight = Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0);
+  if (visibleHeight > rect.height * 0.2) {
+    start();
+    return;
+  }
+
+  if (!("IntersectionObserver" in window)) {
+    start();
+    return;
+  }
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      start();
+      observer.disconnect();
+    });
+  }, {
+    rootMargin: "0px 0px -10% 0px",
+    threshold: 0.2
+  });
+
+  observer.observe(typewriter);
+  window.addEventListener("pagehide", complete, { once: true });
 }
 
 function initArchitectureProgress() {
@@ -127,4 +218,5 @@ initIcons();
 initHomeNav();
 initReveal();
 initLoader();
+initHeroTypewriter();
 initArchitectureProgress();
