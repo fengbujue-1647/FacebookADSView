@@ -1,0 +1,4 @@
+interface:
+  display_name: "ZAI Homepage Motion"
+  short_description: "Audit and tune the ZAI homepage motion system"
+  default_prompt: "Use $zai-homepage-motion to audit and refine the ZAI AI homepage motion."

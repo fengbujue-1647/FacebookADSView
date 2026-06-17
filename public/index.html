@@ -3,35 +3,318 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FB 广告监控入口</title>
+  <title>智在 AI | 看业务 · 懂技术 · 陪跑</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=20260611-4">
   <link rel="alternate icon" type="image/png" href="/favicon.png?v=20260611-4">
   <link rel="stylesheet" href="/styles.css?v=20260616-admin3">
+  <link rel="stylesheet" href="/home.css?v=20260617-zai-motion1">
 </head>
 <body class="home-page">
-  <main class="home-shell">
-    <section class="home-hero" aria-labelledby="homeTitle">
-      <div class="home-brand">
-        <img src="/favicon.svg?v=20260611-4" alt="">
-        <div>
-          <span>智在AI工作室</span>
-          <strong>FB 广告监控</strong>
+  <div class="home-loader" data-loader aria-hidden="true">
+    <div class="loader-logo">ZAI</div>
+  </div>
+
+  <div class="home-cube-scene" data-home-cube aria-hidden="true"></div>
+
+  <header class="site-nav" aria-label="智在 AI 导航">
+    <a class="site-logo" href="#home" aria-label="智在 AI 首页">
+      <img src="/favicon.svg?v=20260611-4" alt="">
+    </a>
+    <nav class="site-links" aria-label="页面导航">
+      <a href="#capabilities">能力</a>
+      <a href="#architecture">架构</a>
+      <a href="#cases">案例</a>
+      <a href="#models">合作</a>
+      <div class="site-menu" data-home-nav>
+        <button type="button" aria-haspopup="true" aria-expanded="false" data-home-nav-trigger>
+          工作台
+          <i data-lucide="chevron-down"></i>
+        </button>
+        <div class="site-menu-panel" role="menu">
+          <a href="/ads" role="menuitem">FB 广告监控</a>
+          <a href="/admin" role="menuitem">工作台管理</a>
         </div>
       </div>
-      <h1 id="homeTitle">入口首页</h1>
-      <p>选择进入广告数据看板或管理员设置系统。</p>
-      <div class="home-actions">
-        <a class="primary-button home-link" href="/ads">
-          <i data-lucide="area-chart"></i>
-          <span>进入广告看板</span>
-        </a>
-        <a class="secondary-button home-link" href="/admin">
-          <i data-lucide="shield-check"></i>
-          <span>进入管理员系统</span>
-        </a>
+    </nav>
+    <a class="nav-cta" href="#contact">启动样机验证</a>
+  </header>
+
+  <main id="home">
+    <section class="hero-section section-grid" aria-labelledby="heroTitle">
+      <div class="hero-copy reveal">
+        <p class="eyebrow">Enterprise AI Workflow Consultant</p>
+        <img class="hero-logo-mark" src="/favicon.svg?v=20260611-4" alt="ZAI">
+        <h1 id="heroTitle">
+          <span class="hero-brand">智在 AI</span>
+          <span>看业务 · 懂技术 · 陪跑。</span>
+        </h1>
+        <p class="hero-lede">先听真实工作场景，不把问题硬塞进概念里。</p>
+        <p class="hero-note">智在 AI 从业务现场出发，拆解资料、数据、流程、权限与部署边界，先跑通一个可验证样机，再决定 SaaS、本地化或混合架构。</p>
+        <div class="hero-actions">
+          <a class="primary-cta" href="#contact"><span>启动样机验证</span></a>
+          <a class="secondary-link" href="#architecture">查看交付架构</a>
+        </div>
+        <p class="trust-copy">交付后一个月内免费稳定运行维护及模块化迭代支持。</p>
+      </div>
+      <div class="hero-index reveal" aria-label="交付理念">
+        <div>
+          <span>01</span>
+          <strong>看业务</strong>
+          <p>先听真实工作场景，不把问题硬塞进概念里。</p>
+        </div>
+        <div>
+          <span>02</span>
+          <strong>懂技术</strong>
+          <p>判断工具、配置、部署和定制的边界。</p>
+        </div>
+        <div>
+          <span>03</span>
+          <strong>陪跑</strong>
+          <p>从小单元问题开始，后续按需继续咨询。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="pillars-section section-grid" aria-labelledby="pillarsTitle">
+      <div class="section-heading reveal">
+        <p class="eyebrow">The 3 Pillars</p>
+        <h2 id="pillarsTitle">服务逻辑不是卖概念，而是把业务跑通。</h2>
+      </div>
+      <div class="pillars-grid">
+        <article class="pillar-card reveal">
+          <span>看业务</span>
+          <h3>真实场景先于工具形态</h3>
+          <p>访谈、流程梳理、验收指标先行，避免把业务问题包装成泛 AI 叙事。</p>
+        </article>
+        <article class="pillar-card reveal">
+          <span>懂技术</span>
+          <h3>明确系统边界和部署约束</h3>
+          <p>评估 API、数据权限、任务队列、模型调用和本地化部署的可行性。</p>
+        </article>
+        <article class="pillar-card reveal">
+          <span>陪跑</span>
+          <h3>从小样机到长期迭代</h3>
+          <p>先验证一个流程，再扩展资料库、后台、审核、报表和自动化输出。</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="capabilities-section section-grid" id="capabilities" aria-labelledby="capabilitiesTitle">
+      <div class="section-heading reveal">
+        <p class="eyebrow">Core Capability Matrix</p>
+        <h2 id="capabilitiesTitle">6 大核心能力矩阵</h2>
+      </div>
+      <div class="capability-grid" data-cube-target>
+        <article class="capability-card reveal">
+          <span>01</span>
+          <h3>专属资料库</h3>
+          <p>将产品资料、FAQ、规章等整理为 AI 可检索的业务知识。</p>
+        </article>
+        <article class="capability-card reveal">
+          <span>02</span>
+          <h3>数据采集监控</h3>
+          <p>自动爬取竞品、素材、舆情等数据，完成清洗、归档与日报生成。</p>
+        </article>
+        <article class="capability-card reveal">
+          <span>03</span>
+          <h3>后台服务开发</h3>
+          <p>基于 Golang / Java / Python 开发接口、任务队列与稳定业务后台。</p>
+        </article>
+        <article class="capability-card reveal">
+          <span>04</span>
+          <h3>业务输出模板</h3>
+          <p>按客户原有格式自动输出报价单、日报、脚本、邮件等。</p>
+        </article>
+        <article class="capability-card reveal">
+          <span>05</span>
+          <h3>内部 AI 助手</h3>
+          <p>接入公司私有规则，辅助员工完成查询、生成、归档与提醒。</p>
+        </article>
+        <article class="capability-card reveal">
+          <span>06</span>
+          <h3>审核与留痕</h3>
+          <p>设定自动发 / 人审规则，记录来源与版本，管控业务风险。</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="architecture-section section-grid" id="architecture" aria-labelledby="architectureTitle">
+      <div class="section-heading reveal">
+        <p class="eyebrow">The 9-Layer Architecture</p>
+        <h2 id="architectureTitle">9 层交付架构</h2>
+      </div>
+      <div class="architecture-wrap">
+        <svg class="architecture-line" viewBox="0 0 24 980" aria-hidden="true">
+          <path data-architecture-path d="M12 0 V980"></path>
+        </svg>
+        <ol class="architecture-list">
+          <li class="architecture-step reveal" data-boundary="业务访谈、流程梳理、验收指标。">
+            <span>01</span>
+            <div><h3>需求调研层</h3><p>业务访谈、流程梳理、验收指标。</p></div>
+          </li>
+          <li class="architecture-step reveal" data-boundary="系统边界、API 可用性、部署约束。">
+            <span>02</span>
+            <div><h3>技术评估层</h3><p>系统边界、API 可用性、部署约束。</p></div>
+          </li>
+          <li class="architecture-step reveal" data-boundary="结构化标签、版本管理、权限分级。">
+            <span>03</span>
+            <div><h3>数据治理层</h3><p>结构化标签、版本管理、权限分级。</p></div>
+          </li>
+          <li class="architecture-step reveal" data-boundary="RAG 检索、任务规划、Prompt 模板。">
+            <span>04</span>
+            <div><h3>Agent 编排层</h3><p>RAG 检索、任务规划、Prompt 模板。</p></div>
+          </li>
+          <li class="architecture-step reveal" data-boundary="多线程、异步队列、异常重试。">
+            <span>05</span>
+            <div>
+              <h3>工程执行层</h3>
+              <p><em>[Python]</em> <em>[Golang]</em> <em>[Java]</em> <em>[C++]</em> 多线程、异步队列、异常重试。</p>
+            </div>
+          </li>
+          <li class="architecture-step reveal" data-boundary="人工复核、审计日志、风控策略。">
+            <span>06</span>
+            <div><h3>质量控制层</h3><p>人工复核、审计日志、风控策略。</p></div>
+          </li>
+          <li class="architecture-step reveal" data-boundary="报表看板、审批记录、自动化输出。">
+            <span>07</span>
+            <div><h3>业务输出层</h3><p>报表看板、审批记录、自动化输出。</p></div>
+          </li>
+          <li class="architecture-step reveal" data-boundary="SaaS / 本地化 / 混合架构。">
+            <span>08</span>
+            <div><h3>部署运行层</h3><p>SaaS / 本地化 / 混合架构。</p></div>
+          </li>
+          <li class="architecture-step reveal" data-boundary="Bug 修复、规则优化、功能扩展。">
+            <span>09</span>
+            <div><h3>售后迭代层</h3><p>Bug 修复、规则优化、功能扩展。</p></div>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="cases-section section-grid" id="cases" aria-labelledby="casesTitle">
+      <div class="section-heading reveal">
+        <p class="eyebrow">Case Studies</p>
+        <h2 id="casesTitle">实战案例展示</h2>
+      </div>
+
+      <div class="split-case reveal">
+        <div>
+          <p class="case-label">Customer Site</p>
+          <h3>TikTok 电商内容线</h3>
+          <p>SKU 多、素材散、运营每天重复复制粘贴。</p>
+        </div>
+        <div>
+          <p class="case-label">Delivery Result</p>
+          <pre><code>sku.index()
+  .link_assets()
+  .generate_script()
+  .dispatch_editing_tasks()</code></pre>
+          <p>SKU 表与素材库索引自动化，自动生成脚本与剪辑任务清单。</p>
+        </div>
+      </div>
+
+      <div class="case-grid">
+        <article class="case-card reveal">
+          <span>医疗系统 AI 增强</span>
+          <h3>RAG 知识库与多渠道 API</h3>
+          <p>成功集成 RAG 知识库与多渠道 API。</p>
+        </article>
+        <article class="case-card reveal">
+          <span>全语言客服系统</span>
+          <h3>自动识别意图并本地化回复</h3>
+          <p>100% 自动识别意图并执行本地化回复。</p>
+        </article>
+        <article class="case-card reveal">
+          <span>财务人事报告助手</span>
+          <h3>异常检测报告</h3>
+          <p>自动汇总异构数据，生成异常检测报告。</p>
+        </article>
+        <article class="case-card reveal">
+          <span>服装印花平面化</span>
+          <h3>找图、补图、拼图</h3>
+          <p>自动化完成“找图、补图、拼图”流程。</p>
+        </article>
+      </div>
+
+      <div class="video-case reveal">
+        <div>
+          <p class="case-label">Before</p>
+          <h3>传统样衣拍摄</h3>
+          <p>高成本、长周期、迭代慢。</p>
+        </div>
+        <div>
+          <p class="case-label">After</p>
+          <h3>AI 驱动上身效果</h3>
+          <div class="metric-pills">
+            <span>周期减少 75%</span>
+            <span>预算减少 70%</span>
+            <span>迭代版本提升 300%</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="models-section section-grid" id="models" aria-labelledby="modelsTitle">
+      <div class="section-heading reveal">
+        <p class="eyebrow">Collaboration Models</p>
+        <h2 id="modelsTitle">演示优先，先跑通流程。</h2>
+      </div>
+      <div class="model-grid">
+        <article class="model-card reveal">
+          <span>01</span>
+          <h3>体验版：流程样机</h3>
+          <p>1 个业务流程拆解，1 个可运行 Demo。</p>
+        </article>
+        <article class="model-card reveal">
+          <span>02</span>
+          <h3>项目版：专属系统</h3>
+          <p>资料 / 规则库集成，网页后台，SaaS 或本地化部署。</p>
+        </article>
+        <article class="model-card reveal">
+          <span>03</span>
+          <h3>长期版：AI 改造合伙</h3>
+          <p>多流程持续迭代，新业务场景快速接入，持续版本维护。</p>
+        </article>
+      </div>
+      <div class="conversion-path reveal" aria-label="核心转化路径">
+        <span>选择真实场景</span>
+        <span>提交现有资料</span>
+        <span>样机跑通验证</span>
+        <span>确定部署模式</span>
+      </div>
+    </section>
+
+    <section class="tech-section section-grid" aria-labelledby="techTitle">
+      <div class="section-heading reveal">
+        <p class="eyebrow">Engineering Base</p>
+        <h2 id="techTitle">技术底座与部署模式</h2>
+      </div>
+      <div class="tech-grid">
+        <article class="tech-card reveal"><span>Python</span><p>爬虫、脚本、AI 接口、数据处理</p></article>
+        <article class="tech-card reveal"><span>Golang</span><p>高并发服务、任务调度、接口层</p></article>
+        <article class="tech-card reveal"><span>Java</span><p>业务后台、企业系统、稳定集成</p></article>
+        <article class="tech-card reveal"><span>C++</span><p>本地工具、高性能模块、批处理</p></article>
+        <article class="tech-card reveal"><span>Distributed</span><p>批量采集、队列、异步工作流</p></article>
+        <article class="tech-card reveal"><span>AI Workflow</span><p>知识检索、工具调用、人工复核</p></article>
+      </div>
+      <div class="deploy-grid">
+        <article class="deploy-card reveal"><strong>SaaS 服务</strong><p>开箱即用，快速体验。</p></article>
+        <article class="deploy-card reveal"><strong>本地化部署</strong><p>数据私有，深度绑定。</p></article>
+        <article class="deploy-card reveal"><strong>混合架构</strong><p>前期验证，后期迁移。</p></article>
+      </div>
+    </section>
+
+    <section class="final-cta section-grid" id="contact" aria-labelledby="contactTitle">
+      <div class="reveal">
+        <p class="eyebrow">Start With One Real Scene</p>
+        <h2 id="contactTitle">智在 AI：先跑通流程，再决定部署。</h2>
+        <a class="primary-cta" href="/ads"><span>选择一个场景开始</span></a>
+        <p class="trust-copy">交付后一个月内免费稳定运行维护及模块化迭代支持。</p>
       </div>
     </section>
   </main>
-  <script defer src="/home.js?v=20260616-admin3"></script>
+
+  <script defer src="/home.js?v=20260617-zai-motion1"></script>
+  <script type="module" src="/home-cube.js?v=20260617-zai-motion1"></script>
 </body>
 </html>

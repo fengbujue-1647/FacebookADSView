@@ -4210,6 +4210,16 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === "/vendor/three.module.js") {
+    sendFile(res, path.join(repoRoot, "node_modules", "three", "build", "three.module.js"));
+    return;
+  }
+
+  if (url.pathname === "/vendor/three.core.js") {
+    sendFile(res, path.join(repoRoot, "node_modules", "three", "build", "three.core.js"));
+    return;
+  }
+
   if (url.pathname === "/meta-relationship-map.html") {
     sendFile(res, path.join(repoRoot, "meta-relationship-map.html"));
     return;
