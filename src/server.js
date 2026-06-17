@@ -6,6 +6,28 @@ const zlib = require("node:zlib");
 const { randomUUID } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const {
+  handleAuthRoutes,
+  applyApiPolicy,
+  parseCookies,
+  audit
+} = require("./auth");
+const {
+  pinConfigured,
+  verifyPin,
+  adminPinVerified,
+  setAdminPinCookie,
+  clearAdminPinCookie,
+  pinTtlMs
+} = require("./adminPin");
+const {
+  createUser,
+  updateUser,
+  resetUserPassword,
+  listUsers,
+  listAuditEvents,
+  normalizeAccountIds
+} = require("./authStore");
+const {
   readLatestInsightData,
   readMonitorOverview,
   readCollectionQueueOverview,
@@ -13,7 +35,8 @@ const {
   deleteCollectionRun,
   readActiveResourceCandidates,
   readAnalysisEntityOptions,
-  readInsightRowsForAnalysis
+  readInsightRowsForAnalysis,
+  readAccountIdsForAnalysisEntities
 } = require("./database");
 const { DISPLAY_TIME_ZONE, enrichInsightRowsWithTimeZone } = require("./time");
 
@@ -462,17 +485,35 @@ const mimeTypes = {
   ".ico": "image/x-icon"
 };
 
+function securityHeaders() {
+  return {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+  };
+}
+
+function withSecurityHeaders(headers = {}) {
+  return {
+    ...securityHeaders(),
+    ...headers
+  };
+}
+
 function writeResponse(res, statusCode, headers, body) {
   const buffer = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
+  const responseHeaders = withSecurityHeaders(headers);
   if (res.shouldGzip && buffer.length > 1024 && !headers["Content-Encoding"]) {
     zlib.gzip(buffer, (error, compressed) => {
       if (error) {
-        res.writeHead(statusCode, headers);
+        res.writeHead(statusCode, responseHeaders);
         res.end(buffer);
         return;
       }
       res.writeHead(statusCode, {
-        ...headers,
+        ...responseHeaders,
         "Content-Encoding": "gzip",
         "Content-Length": compressed.length
       });
@@ -482,7 +523,7 @@ function writeResponse(res, statusCode, headers, body) {
   }
 
   res.writeHead(statusCode, {
-    ...headers,
+    ...responseHeaders,
     "Content-Length": buffer.length
   });
   res.end(buffer);
@@ -532,7 +573,7 @@ function sendFile(res, filePath) {
     }
 
     res.writeHead(200, {
-      ...headers,
+      ...withSecurityHeaders(headers),
       "Content-Length": stats.size
     });
     fs.createReadStream(filePath).pipe(res);
@@ -557,7 +598,12 @@ function readRequestBody(req) {
 function resolvePublicPath(pathname) {
   let cleanPath = "";
   try {
-    cleanPath = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
+    const routeMap = new Map([
+      ["/", "/index.html"],
+      ["/ads", "/ads.html"],
+      ["/admin", "/admin.html"]
+    ]);
+    cleanPath = routeMap.get(pathname) || decodeURIComponent(pathname);
   } catch {
     return { filePath: null, error: "malformed_uri" };
   }
@@ -1133,6 +1179,7 @@ function templateListItem(template) {
     ruleDescription: templateRuleDescription(template),
     targetLevel: template.targetLevel || "campaign",
     targetIds: template.targetIds || [],
+    account_ids: Array.isArray(template.account_ids) ? template.account_ids : [],
     logic: template.logic || "and",
     channels: template.channels,
     channelDescription: templateChannelDescription(template),
@@ -1204,6 +1251,21 @@ function uniqueCopiedName(baseName, templates) {
     candidate = `${baseName} 副本 ${index}`;
   }
   return candidate;
+}
+
+function accountIdsForAlertTemplate(template = {}) {
+  const targetIds = Array.isArray(template.targetIds) ? template.targetIds : [];
+  if (!targetIds.length) {
+    return readMonitoredAccounts().map((account) => account.id);
+  }
+  return resolveEntityAccountIds(template.targetLevel || "campaign", targetIds, null);
+}
+
+function withAlertTemplateAccountIds(template = {}) {
+  return {
+    ...template,
+    account_ids: accountIdsForAlertTemplate(template)
+  };
 }
 
 function readResourceCandidates(accountId = activeResourceAccountId) {
@@ -2294,6 +2356,7 @@ function buildAlertMessagesForTemplate(template) {
       id: randomUUID(),
       template_id: template.id,
       template_name: template.name,
+      account_ids: listAccountIdsFromRows(group.rows),
       severity: template.severity,
       target_level: template.targetLevel || "campaign",
       target_level_label: levelLabel,
@@ -2423,6 +2486,7 @@ async function pushAlertMessage(template, message, channel) {
     message_id: message.id,
     template_id: template.id,
     channel,
+    account_ids: Array.isArray(message.account_ids) ? message.account_ids : [],
     target_id: message.target_id,
     created_at: new Date().toISOString(),
     status: "skipped",
@@ -2567,15 +2631,20 @@ function buildMarkdownReport({ request, rows, current, previous, board, topEntit
   ].join("\n");
 }
 
-function buildAnalysisReport(request) {
+function buildAnalysisReport(request, { allowedAccountIds = null } = {}) {
   const rows = readInsightRowsForAnalysis({
     databaseFile,
     since: request.since,
     until: request.until,
     level: request.level,
     entityIds: request.entityIds,
-    accountTimeZones: readRecentAccountTimeZonesCached()
+    accountTimeZones: readRecentAccountTimeZonesCached(),
+    allowedAccountIds
   });
+  const reportAccountIds = listAccountIdsFromRows(rows);
+  if (!reportAccountIds.length && request.entityIds?.length) {
+    reportAccountIds.push(...resolveEntityAccountIds(request.level, request.entityIds, allowedAccountIds));
+  }
   const { previousRows, currentRows } = splitRowsByPeriod(rows, request.since, request.until);
   const current = aggregateInsightRows(currentRows.length ? currentRows : rows);
   const previous = aggregateInsightRows(previousRows);
@@ -2602,7 +2671,11 @@ function buildAnalysisReport(request) {
     generated_at: new Date().toISOString(),
     provider: "local",
     model: "",
-    request,
+    accountIds: [...new Set(reportAccountIds)],
+    request: {
+      ...request,
+      accountIds: [...new Set(reportAccountIds)]
+    },
     rowsAnalyzed: rows.length,
     summary: {
       current,
@@ -2800,10 +2873,23 @@ async function streamReportGeneration(req, res, request) {
       await sleep(180);
     }
 
-    const localReport = buildAnalysisReport(request);
+    const localReport = buildAnalysisReport(request, {
+      allowedAccountIds: allowedAccountIdsForRequest(req)
+    });
     writeSse(res, "stage", { key: "diagnose", label: "生成诊断与行动项" });
     const report = await callDeepSeekAnalysis(localReport);
     writeAnalysisReports([report, ...readAnalysisReports()]);
+    audit(req, "reports.generate", {
+      targetType: "analysis_report",
+      targetId: report.id,
+      metadata: {
+        level: request.level,
+        entityCount: request.entityIds.length,
+        accountCount: report.accountIds?.length || 0,
+        provider: report.provider,
+        rowsAnalyzed: report.rowsAnalyzed
+      }
+    });
     const chunks = report.markdown.match(/[\s\S]{1,72}/g) || [];
     for (const chunk of chunks) {
       if (closed) return;
@@ -3025,10 +3111,39 @@ function toDashboardInsightValueRows(rows = []) {
   return rows.map(toDashboardInsightValues).filter((row) => Number.isFinite(row[0]));
 }
 
-function sendLatestAdsData(res, { dashboardShape = false } = {}) {
+function filterRowsByAllowedAccountIds(rows = [], allowedAccountIds = null) {
+  if (allowedAccountIds === null || allowedAccountIds === undefined) return rows;
+  const allowed = new Set(allowedAccountIds.map((id) => String(id)));
+  if (!allowed.size) return [];
+  return rows.filter((row) => allowed.has(String(row.account_id || row.accountId || "")));
+}
+
+function emptyLatestAdsPayload({ dashboardShape = false, source = "scope:empty" } = {}) {
+  return {
+    ok: true,
+    shape: dashboardShape ? "dashboard_columns" : "raw",
+    columns: dashboardShape ? dashboardInsightColumns : undefined,
+    source,
+    storage: "sqlite",
+    batch: null,
+    updated_at: "",
+    display_time_zone: displayTimeZone,
+    metadata: {
+      time_zone_enriched_fields: 0,
+      granularity: "day"
+    },
+    rows: []
+  };
+}
+
+function sendLatestAdsData(res, { dashboardShape = false, allowedAccountIds = null } = {}) {
+  if (Array.isArray(allowedAccountIds) && allowedAccountIds.length === 0) {
+    writeJson(res, 200, emptyLatestAdsPayload({ dashboardShape }));
+    return;
+  }
   const accountTimeZones = readRecentAccountTimeZonesCached();
   try {
-    const latestFromDb = readLatestInsightData({ databaseFile, accountTimeZones });
+    const latestFromDb = readLatestInsightData({ databaseFile, accountTimeZones, allowedAccountIds });
     if (latestFromDb?.rows?.length) {
       const rows = dashboardShape ? toDashboardInsightValueRows(latestFromDb.rows) : latestFromDb.rows;
       writeJson(res, 200, {
@@ -3060,13 +3175,18 @@ function sendLatestAdsData(res, { dashboardShape = false } = {}) {
 
   const latest = latestAdsDataFile();
   if (!latest) {
+    if (Array.isArray(allowedAccountIds)) {
+      writeJson(res, 200, emptyLatestAdsPayload({ dashboardShape, source: "scope:no_collected_data" }));
+      return;
+    }
     writeJson(res, 404, { ok: false, error: "no_collected_data" });
     return;
   }
 
   try {
     const enriched = enrichInsightRowsWithTimeZone(latest.rows, accountTimeZones);
-    const rows = dashboardShape ? toDashboardInsightValueRows(enriched.rows) : enriched.rows;
+    const scopedRows = filterRowsByAllowedAccountIds(enriched.rows, allowedAccountIds);
+    const rows = dashboardShape ? toDashboardInsightValueRows(scopedRows) : scopedRows;
     writeJson(res, 200, {
       ok: true,
       shape: dashboardShape ? "dashboard_columns" : "raw",
@@ -3077,7 +3197,7 @@ function sendLatestAdsData(res, { dashboardShape = false } = {}) {
       rows,
       metadata: {
         time_zone_enriched_fields: enriched.enrichedCount,
-        granularity: enriched.rows.some((row) => row.hour_start || row.hour_start_beijing) ? "hour" : "day"
+        granularity: scopedRows.some((row) => row.hour_start || row.hour_start_beijing) ? "hour" : "day"
       }
     });
   } catch (readError) {
@@ -3118,6 +3238,7 @@ function handleAlertTemplateRoutes(req, res, url) {
   try {
     if (!templateId && req.method === "GET") {
       const templates = readAlertTemplates()
+        .filter((template) => recordVisibleToRequest(req, template))
         .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
       const filtered = filterAlertTemplates(templates, url.searchParams).map(templateListItem);
       const page = paginate(filtered, url.searchParams);
@@ -3133,8 +3254,13 @@ function handleAlertTemplateRoutes(req, res, url) {
         .then((body) => {
           const payload = JSON.parse(body || "{}");
           const templates = readAlertTemplates();
-          const template = normalizeAlertTemplate(payload);
+          const template = withAlertTemplateAccountIds(normalizeAlertTemplate(payload));
           writeAlertTemplates([...templates, template]);
+          audit(req, "alerts.templates.create", {
+            targetType: "alert_template",
+            targetId: template.id,
+            metadata: { name: template.name, accountCount: template.account_ids.length }
+          });
           writeJson(res, 201, {
             ok: true,
             template
@@ -3147,6 +3273,9 @@ function handleAlertTemplateRoutes(req, res, url) {
     if (templateId && !action && req.method === "GET") {
       const templates = readAlertTemplates();
       const template = findTemplateOrThrow(templates, templateId);
+      if (!recordVisibleToRequest(req, template)) {
+        throw makeValidationError("无权访问该预警模板", {}, 403);
+      }
       writeJson(res, 200, {
         ok: true,
         template
@@ -3163,10 +3292,15 @@ function handleAlertTemplateRoutes(req, res, url) {
           if (index < 0) {
             throw makeValidationError("预警模板不存在", {}, 404);
           }
-          const template = normalizeAlertTemplate(payload, templates[index]);
+          const template = withAlertTemplateAccountIds(normalizeAlertTemplate(payload, templates[index]));
           const nextTemplates = [...templates];
           nextTemplates[index] = template;
           writeAlertTemplates(nextTemplates);
+          audit(req, "alerts.templates.update", {
+            targetType: "alert_template",
+            targetId: template.id,
+            metadata: { name: template.name, accountCount: template.account_ids.length }
+          });
           writeJson(res, 200, {
             ok: true,
             template
@@ -3192,6 +3326,11 @@ function handleAlertTemplateRoutes(req, res, url) {
             updated_at: new Date().toISOString()
           };
           writeAlertTemplates(nextTemplates);
+          audit(req, "alerts.templates.status", {
+            targetType: "alert_template",
+            targetId: templateId,
+            metadata: { enabled: payload.enabled === true }
+          });
           writeJson(res, 200, {
             ok: true,
             template: nextTemplates[index]
@@ -3214,6 +3353,11 @@ function handleAlertTemplateRoutes(req, res, url) {
         updated_at: now
       };
       writeAlertTemplates([...templates, template]);
+      audit(req, "alerts.templates.copy", {
+        targetType: "alert_template",
+        targetId: template.id,
+        metadata: { sourceId: source.id, name: template.name }
+      });
       writeJson(res, 201, {
         ok: true,
         template
@@ -3225,6 +3369,10 @@ function handleAlertTemplateRoutes(req, res, url) {
       const templates = readAlertTemplates();
       findTemplateOrThrow(templates, templateId);
       writeAlertTemplates(templates.filter((template) => template.id !== templateId));
+      audit(req, "alerts.templates.delete", {
+        targetType: "alert_template",
+        targetId: templateId
+      });
       writeJson(res, 200, {
         ok: true
       });
@@ -3255,7 +3403,8 @@ function handleAlertEntityRoutes(req, res, url) {
       databaseFile,
       level,
       search,
-      limit
+      limit,
+      allowedAccountIds: allowedAccountIdsForRequest(req)
     });
     writeJson(res, 200, {
       ok: true,
@@ -3270,17 +3419,19 @@ function handleAlertEntityRoutes(req, res, url) {
 
 function handleAlertMonitorRoutes(req, res, url) {
   if (url.pathname === "/api/alert-ai/alerts/messages" && req.method === "GET") {
+    const messages = readAlertMessages().filter((message) => recordVisibleToRequest(req, message));
     writeJson(res, 200, {
       ok: true,
-      messages: readAlertMessages().slice(0, Number(url.searchParams.get("limit") || 80))
+      messages: messages.slice(0, Number(url.searchParams.get("limit") || 80))
     });
     return true;
   }
 
   if (url.pathname === "/api/alert-ai/alerts/push-records" && req.method === "GET") {
+    const records = readAlertPushRecords().filter((record) => recordVisibleToRequest(req, record));
     writeJson(res, 200, {
       ok: true,
-      records: readAlertPushRecords().slice(0, Number(url.searchParams.get("limit") || 80))
+      records: records.slice(0, Number(url.searchParams.get("limit") || 80))
     });
     return true;
   }
@@ -3301,6 +3452,10 @@ function handleAlertMonitorRoutes(req, res, url) {
         ...result
       }))
       .catch((error) => writeApiError(res, error, "evaluate_alerts_failed"));
+    audit(req, "alerts.evaluate", {
+      targetType: "alert_templates",
+      metadata: { requestedAt: new Date().toISOString() }
+    });
     return true;
   }
 
@@ -3310,9 +3465,10 @@ function handleAlertMonitorRoutes(req, res, url) {
 function handleAlertReportRoutes(req, res, url) {
   if (url.pathname !== "/api/alert-ai/reports/stream" || req.method !== "POST") {
     if (url.pathname === "/api/alert-ai/reports" && req.method === "GET") {
+      const reports = readAnalysisReports().filter((report) => reportVisibleToRequest(req, report));
       writeJson(res, 200, {
         ok: true,
-        reports: readAnalysisReports().slice(0, Number(url.searchParams.get("limit") || 40))
+        reports: reports.slice(0, Number(url.searchParams.get("limit") || 40))
       });
       return true;
     }
@@ -3323,13 +3479,308 @@ function handleAlertReportRoutes(req, res, url) {
     .then((body) => {
       const payload = JSON.parse(body || "{}");
       const reportRequest = normalizeReportRequest(payload);
+      assertEntityScopeForRequest(req, reportRequest);
       return streamReportGeneration(req, res, reportRequest);
     })
     .catch((error) => writeApiError(res, error, "start_report_generation_failed"));
   return true;
 }
 
-const server = http.createServer((req, res) => {
+function apiPolicyFor(method, pathname) {
+  const normalizedMethod = String(method || "GET").toUpperCase();
+  const policies = [
+    { method: "GET", pattern: /^\/api\/fb-ads\/latest$/, permission: "dashboard.read" },
+    { method: "GET", pattern: /^\/api\/monitor\/status$/, permission: "collection.read" },
+    { method: "GET", pattern: /^\/api\/collection\/queue\/status$/, permission: "collection.read" },
+    { method: "POST", pattern: /^\/api\/collection\/queue\/preview$/, permission: "collection.run" },
+    { method: "POST", pattern: /^\/api\/collection\/queue\/run$/, permission: "collection.run" },
+    { method: "POST", pattern: /^\/api\/collection\/queue\/recover$/, permission: "collection.recover" },
+    { method: "DELETE", pattern: /^\/api\/collection\/queue\/runs\/[^/]+$/, permission: "collection.delete" },
+    { method: "GET", pattern: /^\/api\/settings\/environment$/, permission: "env.read" },
+    { method: "POST", pattern: /^\/api\/settings\/environment$/, permission: "env.write" },
+    { method: "GET", pattern: /^\/api\/settings\/accounts$/, permission: "settings.read" },
+    { method: "POST", pattern: /^\/api\/settings\/accounts$/, permission: "settings.write" },
+    { method: "GET", pattern: /^\/api\/settings\/sampling$/, permission: "settings.read" },
+    { method: "POST", pattern: /^\/api\/settings\/sampling$/, permission: "settings.write" },
+    { method: "GET", pattern: /^\/api\/settings\/resources$/, permission: "settings.read" },
+    { method: "POST", pattern: /^\/api\/settings\/resources\/refresh$/, permission: "resources.refresh" },
+    { method: "GET", pattern: /^\/api\/alert-ai\/metadata$/, permission: "alerts.read" },
+    { method: "GET", pattern: /^\/api\/alert-ai\/entities$/, permission: "reports.generate" },
+    { method: "GET", pattern: /^\/api\/alert-ai\/templates(?:\/[^/]+)?$/, permission: "alerts.read" },
+    { method: "POST", pattern: /^\/api\/alert-ai\/templates(?:\/[^/]+\/copy)?$/, permission: "alerts.manage" },
+    { method: "PUT", pattern: /^\/api\/alert-ai\/templates\/[^/]+$/, permission: "alerts.manage" },
+    { method: "PATCH", pattern: /^\/api\/alert-ai\/templates\/[^/]+\/status$/, permission: "alerts.manage" },
+    { method: "DELETE", pattern: /^\/api\/alert-ai\/templates\/[^/]+$/, permission: "alerts.manage" },
+    { method: "GET", pattern: /^\/api\/alert-ai\/alerts\/messages$/, permission: "alerts.read" },
+    { method: "GET", pattern: /^\/api\/alert-ai\/alerts\/push-records$/, permission: "alerts.read" },
+    { method: "POST", pattern: /^\/api\/alert-ai\/alerts\/evaluate$/, permission: "alerts.manage" },
+    { method: "GET", pattern: /^\/api\/alert-ai\/reports$/, permission: "reports.read" },
+    { method: "POST", pattern: /^\/api\/alert-ai\/reports\/stream$/, permission: "reports.generate" },
+    { method: "GET", pattern: /^\/api\/admin\/pin\/status$/, permission: "users.manage" },
+    { method: "POST", pattern: /^\/api\/admin\/pin\/verify$/, permission: "users.manage" },
+    { method: "POST", pattern: /^\/api\/admin\/pin\/clear$/, permission: "users.manage" },
+    { method: "GET", pattern: /^\/api\/admin\/users$/, permission: "users.manage" },
+    { method: "POST", pattern: /^\/api\/admin\/users$/, permission: "users.manage" },
+    { method: "PUT", pattern: /^\/api\/admin\/users\/[^/]+$/, permission: "users.manage" },
+    { method: "POST", pattern: /^\/api\/admin\/users\/[^/]+\/password$/, permission: "users.manage" },
+    { method: "GET", pattern: /^\/api\/admin\/audit-events$/, permission: "audit.read" }
+  ];
+  return policies.find((policy) => policy.method === normalizedMethod && policy.pattern.test(pathname)) || null;
+}
+
+const adminPinProtectedPermissions = new Set([
+  "env.read",
+  "env.write",
+  "settings.read",
+  "settings.write",
+  "resources.refresh",
+  "collection.read",
+  "collection.run",
+  "collection.recover",
+  "collection.delete",
+  "users.manage",
+  "audit.read",
+  "alerts.manage"
+]);
+
+function routeRequiresAdminPin(pathname, policy) {
+  if (/^\/api\/admin\/pin\//.test(pathname)) return false;
+  return adminPinProtectedPermissions.has(policy?.permission);
+}
+
+function isAdminRequest(req) {
+  return req.auth?.user?.role === "admin";
+}
+
+function allowedAccountIdsForRequest(req) {
+  return isAdminRequest(req) ? null : req.auth?.allowedAccountIds || [];
+}
+
+function listAccountIdsFromRows(rows = []) {
+  return [...new Set(rows.map((row) => String(row.account_id || row.accountId || "").trim()).filter(Boolean))];
+}
+
+function reportVisibleToRequest(req, report) {
+  if (isAdminRequest(req)) return true;
+  const allowed = new Set(allowedAccountIdsForRequest(req));
+  if (!allowed.size) return false;
+  const accountIds = Array.isArray(report.accountIds)
+    ? report.accountIds
+    : Array.isArray(report.request?.accountIds) ? report.request.accountIds : [];
+  return accountIds.some((accountId) => allowed.has(String(accountId)));
+}
+
+function recordVisibleToRequest(req, record) {
+  if (isAdminRequest(req)) return true;
+  const allowed = new Set(allowedAccountIdsForRequest(req));
+  if (!allowed.size) return false;
+  const accountIds = Array.isArray(record.account_ids)
+    ? record.account_ids
+    : Array.isArray(record.accountIds) ? record.accountIds : [];
+  return accountIds.some((accountId) => allowed.has(String(accountId)));
+}
+
+function resolveEntityAccountIds(level, entityIds, allowedAccountIds = null) {
+  const accountIdsByEntity = readAccountIdsForAnalysisEntities({
+    databaseFile,
+    level,
+    entityIds,
+    allowedAccountIds
+  });
+  return [...new Set([...accountIdsByEntity.values()].flatMap((ids) => [...ids]))];
+}
+
+function assertEntityScopeForRequest(req, request) {
+  if (isAdminRequest(req)) return;
+  const ids = Array.isArray(request.entityIds) ? request.entityIds : [];
+  if (!ids.length) return;
+  const accountIdsByEntity = readAccountIdsForAnalysisEntities({
+    databaseFile,
+    level: request.level,
+    entityIds: ids,
+    allowedAccountIds: allowedAccountIdsForRequest(req)
+  });
+  const denied = ids.filter((id) => !accountIdsByEntity.get(String(id))?.size);
+  if (denied.length) {
+    const error = new Error("当前账号无权分析所选对象");
+    error.statusCode = 403;
+    error.code = "entity_scope_denied";
+    throw error;
+  }
+}
+
+function normalizeAdminUserPayload(payload = {}) {
+  return {
+    username: String(payload.username || "").trim(),
+    password: String(payload.password || ""),
+    displayName: String(payload.displayName || payload.display_name || "").trim(),
+    role: payload.role === "admin" ? "admin" : "user",
+    status: payload.status === "disabled" ? "disabled" : "active",
+    accountIds: normalizeAccountIds(payload.accountIds || payload.account_ids || [])
+  };
+}
+
+function handleAdminRoutes(req, res, url) {
+  if (url.pathname === "/api/admin/users" && req.method === "GET") {
+    writeJson(res, 200, {
+      ok: true,
+      users: listUsers()
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/admin/users" && req.method === "POST") {
+    readRequestBody(req)
+      .then((body) => {
+        const payload = normalizeAdminUserPayload(JSON.parse(body || "{}"));
+        const user = createUser(payload);
+        audit(req, "users.create", {
+          targetType: "user",
+          targetId: user.id,
+          metadata: {
+            username: user.username,
+            role: user.role,
+            status: user.status,
+            accountCount: user.accountIds.length
+          }
+        });
+        writeJson(res, 201, {
+          ok: true,
+          user
+        });
+      })
+      .catch((error) => writeApiError(res, error, "create_user_failed"));
+    return true;
+  }
+
+  const userMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+  if (userMatch && req.method === "PUT") {
+    readRequestBody(req)
+      .then((body) => {
+        const payload = normalizeAdminUserPayload(JSON.parse(body || "{}"));
+        const user = updateUser(decodeURIComponent(userMatch[1]), {
+          displayName: payload.displayName,
+          role: payload.role,
+          status: payload.status,
+          accountIds: payload.accountIds
+        });
+        audit(req, "users.update", {
+          targetType: "user",
+          targetId: user.id,
+          metadata: {
+            username: user.username,
+            role: user.role,
+            status: user.status,
+            accountCount: user.accountIds.length
+          }
+        });
+        writeJson(res, 200, {
+          ok: true,
+          user
+        });
+      })
+      .catch((error) => writeApiError(res, error, "update_user_failed"));
+    return true;
+  }
+
+  const passwordMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/password$/);
+  if (passwordMatch && req.method === "POST") {
+    readRequestBody(req)
+      .then((body) => {
+        const payload = JSON.parse(body || "{}");
+        const user = resetUserPassword(decodeURIComponent(passwordMatch[1]), String(payload.password || ""));
+        audit(req, "users.reset_password", {
+          targetType: "user",
+          targetId: user.id,
+          metadata: {
+            username: user.username
+          }
+        });
+        writeJson(res, 200, {
+          ok: true,
+          user
+        });
+      })
+      .catch((error) => writeApiError(res, error, "reset_user_password_failed"));
+    return true;
+  }
+
+  if (url.pathname === "/api/admin/audit-events" && req.method === "GET") {
+    const limit = clampInteger(url.searchParams.get("limit"), 100, 1, 500);
+    const offset = clampInteger(url.searchParams.get("offset"), 0, 0, 100_000);
+    writeJson(res, 200, {
+      ok: true,
+      events: listAuditEvents({ limit, offset })
+    });
+    return true;
+  }
+
+  return false;
+}
+
+function handleAdminPinRoutes(req, res, url) {
+  if (url.pathname === "/api/admin/pin/status" && req.method === "GET") {
+    req.cookies = req.cookies || parseCookies(req);
+    writeJson(res, 200, {
+      ok: true,
+      configured: pinConfigured(),
+      verified: adminPinVerified(req, req.auth),
+      ttlMs: pinTtlMs()
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/admin/pin/verify" && req.method === "POST") {
+    readRequestBody(req)
+      .then((body) => {
+        if (!pinConfigured()) {
+          writeJson(res, 503, {
+            ok: false,
+            error: "admin_pin_not_configured",
+            message: "管理员 PIN 未配置"
+          });
+          return;
+        }
+        const payload = JSON.parse(body || "{}");
+        const accepted = verifyPin(payload.pin);
+        audit(req, accepted ? "admin.pin.verify_success" : "admin.pin.verify_failed", {
+          targetType: "admin_pin",
+          metadata: { accepted }
+        });
+        if (!accepted) {
+          writeJson(res, 403, {
+            ok: false,
+            error: "admin_pin_invalid",
+            message: "PIN 不正确"
+          });
+          return;
+        }
+        setAdminPinCookie(req, res, req.auth.user.id);
+        writeJson(res, 200, {
+          ok: true,
+          verified: true,
+          ttlMs: pinTtlMs()
+        });
+      })
+      .catch((error) => writeApiError(res, error, "verify_admin_pin_failed"));
+    return true;
+  }
+
+  if (url.pathname === "/api/admin/pin/clear" && req.method === "POST") {
+    clearAdminPinCookie(req, res);
+    audit(req, "admin.pin.clear", {
+      targetType: "admin_pin"
+    });
+    writeJson(res, 200, {
+      ok: true
+    });
+    return true;
+  }
+
+  return false;
+}
+
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   res.shouldGzip = /\bgzip\b/i.test(String(req.headers["accept-encoding"] || ""));
 
@@ -3337,15 +3788,51 @@ const server = http.createServer((req, res) => {
     writeJson(res, 200, {
       ok: true,
       module: "fb-ads-dashboard",
-      time: new Date().toISOString(),
-      display_time_zone: displayTimeZone
+      time: new Date().toISOString()
     });
+    return;
+  }
+
+  if (await handleAuthRoutes(req, res, url, writeJson)) {
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/")) {
+    const policy = apiPolicyFor(req.method, url.pathname);
+    if (!policy) {
+      writeJson(res, 403, {
+        ok: false,
+        error: "api_route_forbidden",
+        message: "该接口未开放"
+      });
+      return;
+    }
+    if (!applyApiPolicy(req, res, policy, writeJson)) {
+      return;
+    }
+    req.cookies = parseCookies(req);
+    if (routeRequiresAdminPin(url.pathname, policy) && !adminPinVerified(req, req.auth)) {
+      writeJson(res, 403, {
+        ok: false,
+        error: pinConfigured() ? "admin_pin_required" : "admin_pin_not_configured",
+        message: pinConfigured() ? "需要先完成管理员 PIN 校验" : "管理员 PIN 未配置"
+      });
+      return;
+    }
+  }
+
+  if (handleAdminPinRoutes(req, res, url)) {
+    return;
+  }
+
+  if (handleAdminRoutes(req, res, url)) {
     return;
   }
 
   if (url.pathname === "/api/fb-ads/latest") {
     sendLatestAdsData(res, {
-      dashboardShape: url.searchParams.get("shape") === "dashboard"
+      dashboardShape: url.searchParams.get("shape") === "dashboard",
+      allowedAccountIds: allowedAccountIdsForRequest(req)
     });
     return;
   }
@@ -3391,6 +3878,11 @@ const server = http.createServer((req, res) => {
     try {
       const runId = decodeURIComponent(collectionRunMatch[1] || "");
       const result = deleteCollectionRun({ databaseFile, runId });
+      audit(req, "collection.run.delete", {
+        targetType: "collection_run",
+        targetId: runId,
+        metadata: result.deleted || {}
+      });
       writeJson(res, 200, {
         ok: true,
         ...result
@@ -3412,6 +3904,16 @@ const server = http.createServer((req, res) => {
           runId,
           staleAfterMs,
           dryRun: Boolean(payload.dry_run || payload.dryRun)
+        });
+        audit(req, "collection.queue.recover", {
+          targetType: "collection_run",
+          targetId: runId,
+          metadata: {
+            dryRun: Boolean(payload.dry_run || payload.dryRun),
+            scanned: watchdog.scanned,
+            completedFromSuccess: watchdog.completedFromSuccess,
+            retried: watchdog.retried
+          }
         });
         writeJson(res, watchdog.error ? 500 : 200, {
           ok: !watchdog.error,
@@ -3503,6 +4005,14 @@ const server = http.createServer((req, res) => {
           mode: payload.mode,
           triggerSource: "manual"
         });
+        audit(req, "collection.run.start", {
+          targetType: "collection_run",
+          targetId: result.run?.run_id || "",
+          metadata: {
+            mode: payload.mode || "all",
+            accepted: Boolean(result.ok)
+          }
+        });
         writeJson(res, result.statusCode || (result.ok ? 202 : 409), result);
       })
       .catch((error) => {
@@ -3537,6 +4047,13 @@ const server = http.createServer((req, res) => {
         const payload = body ? JSON.parse(body) : {};
         const entries = normalizeEnvironmentPostEntries(payload);
         writeCliEnv(entries);
+        audit(req, "settings.environment.update", {
+          targetType: "environment",
+          metadata: {
+            keys: entries.map((entry) => entry.key),
+            configuredCount: entries.filter((entry) => String(entry.value || "").trim() !== "").length
+          }
+        });
         writeJson(res, 200, {
           ok: true,
           environment: buildEnvironmentSettings()
@@ -3567,6 +4084,11 @@ const server = http.createServer((req, res) => {
       .then((body) => {
         const payload = JSON.parse(body || "{}");
         const accounts = writeMonitoredAccounts(payload.accounts || []);
+        audit(req, "settings.accounts.update", {
+          targetType: "settings",
+          targetId: "accounts",
+          metadata: { accountCount: accounts.length }
+        });
         writeJson(res, 200, { ok: true, accounts });
       })
       .catch((error) => {
@@ -3600,6 +4122,14 @@ const server = http.createServer((req, res) => {
       .then((body) => {
         const payload = JSON.parse(body || "{}");
         const settings = writeSamplingSettings(payload.settings || payload);
+        audit(req, "settings.sampling.update", {
+          targetType: "settings",
+          targetId: "sampling",
+          metadata: {
+            campaignIds: settings.campaignMonitor?.campaignIds?.length || 0,
+            adIds: settings.adMonitor?.adIds?.length || 0
+          }
+        });
         writeJson(res, 200, { ok: true, settings });
       })
       .catch((error) => {
@@ -3639,6 +4169,14 @@ const server = http.createServer((req, res) => {
           accountId,
           reason: "manual",
           force: payload.force !== false
+        });
+        audit(req, "settings.resources.refresh", {
+          targetType: "account",
+          targetId: accountId,
+          metadata: {
+            ok: Boolean(result.ok),
+            skipped: Boolean(result.skipped)
+          }
         });
         writeJson(res, result.ok ? 200 : 502, result);
       })

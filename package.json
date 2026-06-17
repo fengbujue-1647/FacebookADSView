@@ -8,6 +8,8 @@
     "dev": "node --disable-warning=ExperimentalWarning src/server.js",
     "sentinel:start": "node ops/sentinel.js",
     "sentinel:check": "node ops/sentinel.js --check-config",
+    "auth:create-admin": "node scripts/create-admin.js",
+    "auth:reset-admin-password": "node scripts/create-admin.js --reset-password",
     "service:install": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/install-windows-service.ps1 -Start",
     "service:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/uninstall-windows-service.ps1",
     "cli:install": "npm --prefix cli install",

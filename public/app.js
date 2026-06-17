@@ -73,6 +73,16 @@ const COLLECTION_REFRESH_INTERVAL_MS = 2000;
 const MONITOR_STATUS_REFRESH_INTERVAL_MS = 15000;
 
 const state = {
+  appReady: false,
+  eventsBound: false,
+  auth: {
+    authenticated: false,
+    user: null,
+    permissions: new Set(),
+    csrfToken: "",
+    loginVisible: false,
+    loginMessage: ""
+  },
   activeView: "chart",
   activeSettingsTab: "monitors",
   listMode: "campaigns",
@@ -393,6 +403,213 @@ const els = {
 
 const dataSourceName = document.getElementById("dataSourceName");
 const dataSourceMeta = document.getElementById("dataSourceMeta");
+const nativeFetch = window.fetch.bind(window);
+
+function hasPermission(permission) {
+  return state.auth.permissions.has(permission) || state.auth.user?.role === "admin";
+}
+
+function dashboardPermission(permission) {
+  if (permission === "alerts.manage") return false;
+  return hasPermission(permission);
+}
+
+function setAuthState(payload = {}) {
+  state.auth.authenticated = Boolean(payload.user);
+  state.auth.user = payload.user || null;
+  state.auth.permissions = new Set(Array.isArray(payload.permissions) ? payload.permissions : []);
+  state.auth.csrfToken = payload.csrfToken || "";
+}
+
+async function apiFetch(url, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  const headers = {
+    ...(options.headers || {})
+  };
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers["X-CSRF-Token"] = state.auth.csrfToken;
+  }
+  const response = await nativeFetch(url, {
+    cache: "no-store",
+    credentials: "same-origin",
+    ...options,
+    headers
+  });
+  if (response.status === 401) {
+    setAuthState({});
+    showLogin("登录已过期，请重新登录");
+    throw new Error("请先登录");
+  }
+  if (response.status === 403) {
+    throw new Error("当前账号没有权限执行该操作");
+  }
+  return response;
+}
+
+window.apiFetch = apiFetch;
+window.fbHasPermission = dashboardPermission;
+
+function authOverlayHtml(message = "") {
+  return `
+    <div class="auth-panel">
+      <div class="auth-brand">
+        <img src="/favicon.svg?v=20260611-4" alt="">
+        <div>
+          <strong>广告看板</strong>
+          <span>Meta Insights</span>
+        </div>
+      </div>
+      <form id="authLoginForm" class="auth-form">
+        <h2>登录</h2>
+        <label>
+          <span>用户名</span>
+          <input id="authUsernameInput" name="username" autocomplete="username" required>
+        </label>
+        <label>
+          <span>密码</span>
+          <input id="authPasswordInput" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <p class="auth-message" id="authLoginMessage">${escapeHtml(message)}</p>
+        <button class="primary-button" type="submit">
+          <i data-lucide="check"></i>
+          <span>登录</span>
+        </button>
+      </form>
+    </div>
+  `;
+}
+
+function ensureLoginOverlay() {
+  let overlay = document.getElementById("authOverlay");
+  if (overlay) return overlay;
+  overlay = document.createElement("div");
+  overlay.id = "authOverlay";
+  overlay.className = "auth-overlay";
+  overlay.hidden = true;
+  document.body.appendChild(overlay);
+  overlay.addEventListener("submit", async (event) => {
+    if (event.target.id !== "authLoginForm") return;
+    event.preventDefault();
+    const form = event.target;
+    const button = form.querySelector("button[type='submit']");
+    const message = form.querySelector("#authLoginMessage");
+    button.disabled = true;
+    message.textContent = "登录中";
+    try {
+      const response = await nativeFetch("/api/auth/login", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          username: form.username.value,
+          password: form.password.value
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.ok === false) {
+        throw new Error(payload.message || "登录失败");
+      }
+      setAuthState(payload);
+      hideLogin();
+      await initializeApplication();
+    } catch (error) {
+      message.textContent = error.message || "登录失败";
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return overlay;
+}
+
+function showLogin(message = "") {
+  const overlay = ensureLoginOverlay();
+  state.auth.loginVisible = true;
+  overlay.innerHTML = authOverlayHtml(message);
+  overlay.hidden = false;
+  initIcons();
+  requestAnimationFrame(() => overlay.querySelector("#authUsernameInput")?.focus());
+}
+
+function hideLogin() {
+  const overlay = ensureLoginOverlay();
+  overlay.hidden = true;
+  overlay.innerHTML = "";
+  state.auth.loginVisible = false;
+}
+
+async function loadAuthSession() {
+  try {
+    const response = await nativeFetch("/api/auth/me", {
+      credentials: "same-origin",
+      cache: "no-store"
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      setAuthState({});
+      return false;
+    }
+    setAuthState(payload);
+    return true;
+  } catch {
+    setAuthState({});
+    return false;
+  }
+}
+
+async function logout() {
+  try {
+    await apiFetch("/api/auth/logout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: "{}"
+    });
+  } catch {
+    // The local session is cleared even when the request cannot complete.
+  }
+  setAuthState({});
+  state.appReady = false;
+  window.location.reload();
+}
+
+function renderAuthUser() {
+  let authBar = document.getElementById("authUserBar");
+  if (!authBar) {
+    authBar = document.createElement("div");
+    authBar.id = "authUserBar";
+    authBar.className = "auth-user-bar";
+    document.querySelector(".top-actions")?.appendChild(authBar);
+  }
+  const user = state.auth.user;
+  authBar.innerHTML = user ? `
+    <span>${escapeHtml(user.displayName || user.username)}</span>
+    <small>${escapeHtml(user.role === "admin" ? "管理员" : "用户")}</small>
+    <button class="secondary-button" id="logoutButton" type="button">退出</button>
+  ` : "";
+  authBar.querySelector("#logoutButton")?.addEventListener("click", logout);
+}
+
+function applyPermissionVisibility() {
+  const visibility = {
+    settings: false,
+    tasks: false,
+    alerts: hasPermission("alerts.read"),
+    analysis: hasPermission("reports.generate")
+  };
+  Object.entries(visibility).forEach(([view, visible]) => {
+    document.querySelectorAll(`[data-view="${view}"]`).forEach((button) => {
+      button.hidden = !visible;
+    });
+  });
+  if (state.activeView === "settings" && !visibility.settings) state.activeView = "chart";
+  if (state.activeView === "tasks" && !visibility.tasks) state.activeView = "chart";
+  if (state.activeView === "alerts" && !visibility.alerts) state.activeView = "chart";
+  if (state.activeView === "analysis" && !visibility.analysis) state.activeView = "chart";
+  renderAuthUser();
+}
 
 function pad(value) {
   return String(value).padStart(2, "0");
@@ -1158,7 +1375,29 @@ function updateDirtyState(message = "") {
   setSettingsStatus(dirty ? "有未保存变更" : "", dirty ? "pending" : "");
 }
 
+function resourcePickerDomReady() {
+  return Boolean(
+    els.campaignIdsInput
+    && els.adIdsInput
+    && els.campaignPickerToggle
+    && els.campaignPickerDropdown
+    && els.campaignPickerLabel
+    && els.campaignPickerMeta
+    && els.campaignSearchInput
+    && els.campaignOptionList
+    && els.campaignSelectedList
+    && els.adPickerToggle
+    && els.adPickerDropdown
+    && els.adPickerLabel
+    && els.adPickerMeta
+    && els.adSearchInput
+    && els.adOptionList
+    && els.adSelectedList
+  );
+}
+
 function syncHiddenResourceInputs() {
+  if (!els.campaignIdsInput || !els.adIdsInput) return;
   els.campaignIdsInput.value = selectedIdsForKind("campaigns").join("\n");
   els.adIdsInput.value = selectedIdsForKind("ads").join("\n");
 }
@@ -1286,6 +1525,7 @@ function renderResourcePicker(kind) {
 }
 
 function renderResourcePickers() {
+  if (!resourcePickerDomReady()) return;
   syncHiddenResourceInputs();
   renderResourcePicker("campaigns");
   renderResourcePicker("ads");
@@ -1996,7 +2236,7 @@ function collectSamplingSettings() {
 
 async function loadAccountSettings(message = "") {
   try {
-    const response = await fetch("/api/settings/accounts", { cache: "no-store" });
+    const response = await apiFetch("/api/settings/accounts", { cache: "no-store" });
     const payload = await response.json();
     state.monitoredAccounts = payload.ok && Array.isArray(payload.accounts) ? payload.accounts : [];
     renderAccountSettings(message);
@@ -2007,7 +2247,7 @@ async function loadAccountSettings(message = "") {
 
 async function loadSamplingSettings(message = "") {
   try {
-    const response = await fetch("/api/settings/sampling", { cache: "no-store" });
+    const response = await apiFetch("/api/settings/sampling", { cache: "no-store" });
     const payload = await response.json();
     state.samplingSettings = normalizeSamplingSettings(payload.ok ? payload.settings : {});
     renderSamplingSettings();
@@ -2022,7 +2262,7 @@ async function loadSamplingSettings(message = "") {
 
 async function loadMonitorStatus() {
   try {
-    const response = await fetch("/api/monitor/status", { cache: "no-store" });
+    const response = await apiFetch("/api/monitor/status", { cache: "no-store" });
     const payload = await response.json();
     state.monitorStatus = payload.ok ? payload.status : null;
   } catch {
@@ -2046,7 +2286,7 @@ async function loadCollectionQueueStatus(page = state.collectionPage, runId = st
     if (selectedRunId) {
       params.set("run_id", selectedRunId);
     }
-    const response = await fetch(`/api/collection/queue/status?${params}`, { cache: "no-store" });
+    const response = await apiFetch(`/api/collection/queue/status?${params}`, { cache: "no-store" });
     const payload = await response.json();
     state.collectionQueue = payload.ok ? payload.queue : null;
     state.collectionRunner = payload.ok ? payload.runner : null;
@@ -2083,7 +2323,7 @@ async function runCollectionQueueLegacy() {
   els.collectionQueueCaption.textContent = "正在投递";
   try {
     const mode = els.collectionRunModeSelect.value || "all";
-    const response = await fetch("/api/collection/queue/run", {
+    const response = await apiFetch("/api/collection/queue/run", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -2189,7 +2429,7 @@ const runCollectionQueue = async function runCollectionQueueWithPreview() {
   els.collectionQueueCaption.textContent = "正在生成投递预估";
   try {
     const mode = els.collectionRunModeSelect.value || "all";
-    const previewResponse = await fetch("/api/collection/queue/preview", {
+    const previewResponse = await apiFetch("/api/collection/queue/preview", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -2206,7 +2446,7 @@ const runCollectionQueue = async function runCollectionQueueWithPreview() {
       return;
     }
     els.collectionQueueCaption.textContent = "正在投递";
-    const response = await fetch("/api/collection/queue/run", {
+    const response = await apiFetch("/api/collection/queue/run", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -2232,7 +2472,7 @@ async function recoverCollectionQueue() {
   els.recoverCollectionQueueButton.disabled = true;
   els.collectionQueueCaption.textContent = "正在诊断卡住任务";
   try {
-    const response = await fetch("/api/collection/queue/recover", {
+    const response = await apiFetch("/api/collection/queue/recover", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -2290,7 +2530,7 @@ async function deleteCollectionRun(runId) {
     els.collectionQueueCaption.textContent = "正在删除采集批次";
   }
   try {
-    const response = await fetch(`/api/collection/queue/runs/${encodeURIComponent(normalizedRunId)}`, {
+    const response = await apiFetch(`/api/collection/queue/runs/${encodeURIComponent(normalizedRunId)}`, {
       method: "DELETE"
     });
     const payload = await response.json();
@@ -2359,7 +2599,7 @@ function syncMonitorStatusAutoRefresh() {
 
 async function loadEnvironmentSettings() {
   try {
-    const response = await fetch("/api/settings/environment", { cache: "no-store" });
+    const response = await apiFetch("/api/settings/environment", { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
       throw new Error(payload.message || "环境变量配置读取失败");
@@ -2375,7 +2615,7 @@ async function loadEnvironmentSettings() {
 
 async function loadResourceCatalog(message = "") {
   try {
-    const response = await fetch("/api/settings/resources", { cache: "no-store" });
+    const response = await apiFetch("/api/settings/resources", { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
       throw new Error(payload.message || "ACTIVE 候选读取失败");
@@ -2443,7 +2683,7 @@ async function refreshActiveResources() {
   els.refreshResourcesButton.disabled = true;
   updateDirtyState("ACTIVE 资源刷新中");
   try {
-    const response = await fetch("/api/settings/resources/refresh", {
+    const response = await apiFetch("/api/settings/resources/refresh", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -2480,7 +2720,7 @@ async function saveSettings() {
   els.saveSettingsButton.disabled = true;
   updateDirtyState("保存中");
   try {
-    const accountResponse = await fetch("/api/settings/accounts", {
+    const accountResponse = await apiFetch("/api/settings/accounts", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -2491,7 +2731,7 @@ async function saveSettings() {
     if (!accountResponse.ok || !accountPayload.ok) {
       throw new Error(accountPayload.message || "账户保存失败");
     }
-    const samplingResponse = await fetch("/api/settings/sampling", {
+    const samplingResponse = await apiFetch("/api/settings/sampling", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -2502,7 +2742,7 @@ async function saveSettings() {
     if (!samplingResponse.ok || !samplingPayload.ok) {
       throw new Error(samplingPayload.message || "取样设置保存失败");
     }
-    const environmentResponse = await fetch("/api/settings/environment", {
+    const environmentResponse = await apiFetch("/api/settings/environment", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -2531,17 +2771,22 @@ async function saveSettings() {
 
 async function loadCollectedRows() {
   try {
-    const response = await fetch("/api/fb-ads/latest?shape=dashboard", { cache: "no-store" });
+    const response = await apiFetch("/api/fb-ads/latest?shape=dashboard", { cache: "no-store" });
     if (!response.ok) return null;
     const payload = await response.json();
-    if (!payload.ok || !Array.isArray(payload.rows) || payload.rows.length === 0) return null;
+    if (!payload.ok || !Array.isArray(payload.rows)) return null;
+    if (payload.rows.length === 0) {
+      dataSourceName.textContent = payload.storage === "sqlite" ? "SQLite Insights" : "Collected Insights";
+      dataSourceMeta.textContent = "0 行";
+      return [];
+    }
 
     const rows = payload.shape === "dashboard_columns"
       ? mapDashboardColumnRows(payload.rows, payload.columns)
       : payload.shape === "dashboard"
         ? payload.rows.filter((row) => Number.isFinite(row.timestamp))
       : payload.rows.map(mapCollectedRow).filter((row) => Number.isFinite(row.timestamp));
-    if (rows.length === 0) return null;
+    if (rows.length === 0) return [];
 
     if (payload.metadata?.granularity === "hour" || payload.rows.some((row) => row.hour_start)) {
       state.granularity = "hour";
@@ -3359,6 +3604,7 @@ function renderMetricGrid(total) {
 }
 
 function renderView() {
+  applyPermissionVisibility();
   const copy = viewCopy[state.activeView];
   els.pageTitle.textContent = copy.title;
   els.pageSubtitle.textContent = copy.subtitle;
@@ -4133,15 +4379,15 @@ function bindEvents() {
 
   els.clearAdDrilldownButton.addEventListener("click", clearAdDrilldown);
 
-  els.reloadSettingsButton.addEventListener("click", () => {
+  els.reloadSettingsButton?.addEventListener("click", () => {
     loadSettings("已刷新");
   });
 
-  els.refreshResourcesButton.addEventListener("click", () => {
+  els.refreshResourcesButton?.addEventListener("click", () => {
     refreshActiveResources();
   });
 
-  els.refreshCollectionQueueButton.addEventListener("click", () => {
+  els.refreshCollectionQueueButton?.addEventListener("click", () => {
     loadCollectionQueueStatus(state.collectionPage, state.collectionRunId);
   });
 
@@ -4149,7 +4395,7 @@ function bindEvents() {
     recoverCollectionQueue();
   });
 
-  els.runCollectionQueueButton.addEventListener("click", () => {
+  els.runCollectionQueueButton?.addEventListener("click", () => {
     runCollectionQueue();
   });
 
@@ -4199,34 +4445,34 @@ function bindEvents() {
     selectCollectionRun(item.dataset.collectionRunId);
   });
 
-  els.resetSettingsButton.addEventListener("click", () => {
+  els.resetSettingsButton?.addEventListener("click", () => {
     loadSettings("已取消未保存改动");
   });
 
-  els.saveSettingsButton.addEventListener("click", () => {
+  els.saveSettingsButton?.addEventListener("click", () => {
     saveSettings();
   });
 
-  els.recentRunsFilter.addEventListener("change", () => {
+  els.recentRunsFilter?.addEventListener("change", () => {
     state.monitorRunFilter = els.recentRunsFilter.value;
     renderMonitorStatus();
   });
 
-  els.campaignPickerToggle.addEventListener("click", () => {
+  els.campaignPickerToggle?.addEventListener("click", () => {
     toggleResourceDropdown("campaigns");
   });
 
-  els.adPickerToggle.addEventListener("click", () => {
+  els.adPickerToggle?.addEventListener("click", () => {
     toggleResourceDropdown("ads");
   });
 
-  els.campaignSearchInput.addEventListener("input", () => {
+  els.campaignSearchInput?.addEventListener("input", () => {
     state.resourceUi.campaigns.query = els.campaignSearchInput.value;
     state.resourceUi.campaigns.open = true;
     renderResourcePicker("campaigns");
   });
 
-  els.adSearchInput.addEventListener("input", () => {
+  els.adSearchInput?.addEventListener("input", () => {
     state.resourceUi.ads.query = els.adSearchInput.value;
     state.resourceUi.ads.open = true;
     renderResourcePicker("ads");
@@ -4283,7 +4529,9 @@ function bindEvents() {
       return;
     }
 
-    if (!event.target.closest("[data-resource-picker]")) {
+    if (resourcePickerDomReady()
+      && (state.resourceUi.campaigns.open || state.resourceUi.ads.open)
+      && !event.target.closest("[data-resource-picker]")) {
       state.resourceUi.campaigns.open = false;
       state.resourceUi.ads.open = false;
       renderResourcePickers();
@@ -4313,7 +4561,7 @@ function bindEvents() {
     els.adQpsInput,
     els.adTimeoutInput,
     els.adMaxAttemptsInput
-  ].forEach((input) => {
+  ].filter(Boolean).forEach((input) => {
     input.addEventListener("change", () => {
       state.samplingSettings = collectSamplingSettings();
       renderSamplingSettings();
@@ -4374,16 +4622,35 @@ function scheduleIconRefresh() {
 
 window.fbRefreshIcons = scheduleIconRefresh;
 
-async function init() {
+async function initializeApplication() {
+  if (state.appReady) {
+    applyPermissionVisibility();
+    renderView();
+    return;
+  }
+  applyPermissionVisibility();
   rawRows = await loadCollectedRows() || buildRawRows();
   renderFilters();
   setDefaultWindow();
   els.normalizeToggle.checked = state.normalize;
-  bindEvents();
+  if (!state.eventsBound) {
+    bindEvents();
+    state.eventsBound = true;
+  }
   renderDashboard();
   renderView();
   renderSettingsTabs();
   initIcons();
+  state.appReady = true;
+}
+
+async function init() {
+  const authenticated = await loadAuthSession();
+  if (!authenticated) {
+    showLogin();
+    return;
+  }
+  await initializeApplication();
 }
 
 init();

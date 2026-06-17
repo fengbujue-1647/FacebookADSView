@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FB 广告数据看板</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=20260611-4">
+  <link rel="alternate icon" type="image/png" href="/favicon.png?v=20260611-4">
+  <link rel="stylesheet" href="/styles.css?v=20260616-admin3">
+  <link rel="stylesheet" href="/alert-ai.css?v=20260611-3">
+  <script defer src="/vendor/echarts.min.js?v=20260611-3"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="模块导航">
+      <div class="brand">
+        <div class="brand-mark" aria-label="ZAI 工作室">
+          <img src="/favicon.svg?v=20260611-4" alt="">
+        </div>
+        <div>
+          <strong>广告看板</strong>
+          <span>Meta Insights</span>
+        </div>
+      </div>
+
+      <nav class="nav-list" aria-label="看板视图">
+        <button class="nav-item active" type="button" data-view="chart">
+          <i data-lucide="area-chart"></i>
+          <span>图表看板</span>
+        </button>
+        <button class="nav-item" type="button" data-view="list">
+          <i data-lucide="list-filter"></i>
+          <span>列表看板</span>
+        </button>
+        <button class="nav-item" type="button" data-view="alerts">
+          <i data-lucide="bell-ring"></i>
+          <span>预警监控</span>
+        </button>
+        <button class="nav-item" type="button" data-view="analysis">
+          <i data-lucide="sparkles"></i>
+          <span>AI 分析</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="studio-lockup" aria-label="ZAI 工作室">
+          <img src="/favicon.svg?v=20260611-4" alt="">
+          <span>智在AI工作室</span>
+        </div>
+        <div class="side-note">
+          <span>数据源</span>
+          <strong id="dataSourceName">Demo Insights</strong>
+          <small id="dataSourceMeta">待接入采集数据</small>
+        </div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Facebook Ads Monitor</p>
+          <h1 id="pageTitle">FB 广告图表看板</h1>
+          <p class="page-subtitle" id="pageSubtitle">按时间查看广告指标走势和窗口变化。</p>
+        </div>
+        <div class="top-actions">
+          <button class="icon-button" id="resetWindowButton" type="button" title="重置时间窗口" aria-label="重置时间窗口">
+            <i data-lucide="rotate-ccw"></i>
+          </button>
+        </div>
+      </header>
+
+      <section class="view-toolbar" id="viewToolbar" aria-label="看板选项">
+        <div class="toolbar-row">
+          <button class="filter-button" id="moreOptionsToggle" type="button" aria-expanded="false" aria-controls="optionsPanel">
+            <i data-lucide="sliders-horizontal"></i>
+            <span>更多可选项</span>
+            <i data-lucide="chevron-down"></i>
+          </button>
+          <div class="active-chips" id="activeChips" aria-label="当前筛选条件"></div>
+        </div>
+
+        <div class="options-popover" id="optionsPanel" hidden>
+          <div class="option-grid">
+            <div class="control-group">
+              <label for="fromDate">开始时间(北京时间)</label>
+              <input id="fromDate" type="datetime-local" step="3600">
+            </div>
+            <div class="control-group">
+              <label for="toDate">结束时间(北京时间)</label>
+              <input id="toDate" type="datetime-local" step="3600">
+            </div>
+            <div class="control-group">
+              <label>计算方式</label>
+              <div class="segmented" role="group" aria-label="计算方式">
+                <button type="button" class="segment" data-granularity="hour">时</button>
+                <button type="button" class="segment active" data-granularity="day">日</button>
+                <button type="button" class="segment" data-granularity="week">周</button>
+                <button type="button" class="segment" data-granularity="month">月</button>
+              </div>
+            </div>
+            <div class="control-group">
+              <label for="campaignFilterToggle">广告系列</label>
+              <select id="campaignFilter" class="hidden-state-select" multiple tabindex="-1" aria-hidden="true"></select>
+              <div class="entity-picker filter-entity-picker" data-filter-picker-root="campaigns">
+                <button class="select-button entity-toggle" id="campaignFilterToggle" type="button" aria-expanded="false" aria-controls="campaignFilterDropdown">
+                  <span id="campaignFilterLabel">全部广告系列</span>
+                  <i data-lucide="chevron-down"></i>
+                </button>
+                <div class="entity-dropdown" id="campaignFilterDropdown" hidden>
+                  <div class="resource-search">
+                    <i data-lucide="search"></i>
+                    <input id="campaignFilterSearch" type="search" placeholder="搜索广告系列名称或 ID">
+                  </div>
+                  <div class="resource-toolbar">
+                    <button type="button" data-filter-picker-action="select-all" data-filter-picker="campaigns">全选当前</button>
+                    <button type="button" data-filter-picker-action="clear" data-filter-picker="campaigns">清空已选</button>
+                  </div>
+                  <div class="entity-option-list" id="campaignFilterOptionList"></div>
+                </div>
+              </div>
+              <div class="entity-selected-list compact-selected-list" id="campaignFilterSelectedList"></div>
+            </div>
+            <div class="control-group">
+              <label for="adFilterToggle">单广告</label>
+              <select id="adFilter" class="hidden-state-select" multiple tabindex="-1" aria-hidden="true"></select>
+              <div class="entity-picker filter-entity-picker" data-filter-picker-root="ads">
+                <button class="select-button entity-toggle" id="adFilterToggle" type="button" aria-expanded="false" aria-controls="adFilterDropdown">
+                  <span id="adFilterLabel">全部单广告</span>
+                  <i data-lucide="chevron-down"></i>
+                </button>
+                <div class="entity-dropdown" id="adFilterDropdown" hidden>
+                  <div class="resource-search">
+                    <i data-lucide="search"></i>
+                    <input id="adFilterSearch" type="search" placeholder="搜索广告名称或 ID">
+                  </div>
+                  <div class="resource-toolbar">
+                    <button type="button" data-filter-picker-action="select-all" data-filter-picker="ads">全选当前</button>
+                    <button type="button" data-filter-picker-action="clear" data-filter-picker="ads">清空已选</button>
+                  </div>
+                  <div class="entity-option-list" id="adFilterOptionList"></div>
+                </div>
+              </div>
+              <div class="entity-selected-list compact-selected-list" id="adFilterSelectedList"></div>
+            </div>
+            <div class="control-group">
+              <label for="deliveryFilterToggle">投放</label>
+              <select id="deliveryFilter" class="hidden-state-select" tabindex="-1" aria-hidden="true"></select>
+              <div class="entity-picker filter-entity-picker" data-filter-picker-root="delivery">
+                <button class="select-button entity-toggle" id="deliveryFilterToggle" type="button" aria-expanded="false" aria-controls="deliveryFilterDropdown">
+                  <span id="deliveryFilterLabel">全部投放状态</span>
+                  <i data-lucide="chevron-down"></i>
+                </button>
+                <div class="entity-dropdown" id="deliveryFilterDropdown" hidden>
+                  <div class="resource-search">
+                    <i data-lucide="search"></i>
+                    <input id="deliveryFilterSearch" type="search" placeholder="搜索投放状态">
+                  </div>
+                  <div class="resource-toolbar">
+                    <button type="button" data-filter-picker-action="clear" data-filter-picker="delivery">清空已选</button>
+                  </div>
+                  <div class="entity-option-list" id="deliveryFilterOptionList"></div>
+                </div>
+              </div>
+            </div>
+            <div class="control-group metric-picker-group">
+              <label for="fieldFilterToggle">图表指标 <span id="fieldSummary">已选 0 项</span></label>
+              <select id="fieldFilter" class="hidden-state-select" multiple tabindex="-1" aria-hidden="true"></select>
+              <div class="entity-picker filter-entity-picker" data-filter-picker-root="fields">
+                <button class="select-button entity-toggle" id="fieldFilterToggle" type="button" aria-expanded="false" aria-controls="fieldFilterDropdown">
+                  <span id="fieldFilterLabel">选择指标</span>
+                  <i data-lucide="chevron-down"></i>
+                </button>
+                <div class="entity-dropdown" id="fieldFilterDropdown" hidden>
+                  <div class="resource-search">
+                    <i data-lucide="search"></i>
+                    <input id="fieldFilterSearch" type="search" placeholder="搜索指标名称或字段">
+                  </div>
+                  <div class="resource-toolbar">
+                    <button type="button" data-filter-picker-action="select-all" data-filter-picker="fields">全选当前</button>
+                    <button type="button" data-filter-picker-action="clear" data-filter-picker="fields">清空已选</button>
+                  </div>
+                  <div class="entity-option-list" id="fieldFilterOptionList"></div>
+                </div>
+              </div>
+              <div class="entity-selected-list compact-selected-list" id="fieldFilterSelectedList"></div>
+              <div class="field-toolbar compact-field-toolbar">
+                <button type="button" data-field-action="core">常用</button>
+                <button type="button" data-field-action="allMetrics">全选</button>
+                <button type="button" data-field-action="clear">清空</button>
+              </div>
+            </div>
+            <div class="control-group quick-window-group">
+              <label>时间窗口</label>
+              <div class="quick-window" aria-label="快速时间窗口">
+                <button type="button" data-window-preset="yesterday">昨天</button>
+                <button type="button" data-window-preset="today">今天</button>
+                <button type="button" data-window-preset="last3">近 3 天</button>
+                <button type="button" data-window-days="7">近 7 天</button>
+                <button type="button" data-window-days="14">近 14 天</button>
+                <button type="button" data-window-days="30">近 30 天</button>
+                <button type="button" data-window-days="90">近 90 天</button>
+                <button type="button" data-window-days="180">近 180 天</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view-panel active" data-view-panel="chart">
+        <section class="panel chart-panel">
+          <div class="panel-head">
+            <div>
+              <h2>时间分布</h2>
+              <span id="chartCaption">按日聚合</span>
+            </div>
+            <label class="switch">
+              <input id="normalizeToggle" type="checkbox" checked>
+              <span>统一比例</span>
+            </label>
+          </div>
+          <div class="chart-wrap">
+            <div id="mainChart" class="chart"></div>
+            <div class="empty-state" id="chartEmpty" hidden>请选择至少一个数值指标</div>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-panel" data-view-panel="list" hidden>
+        <section class="kpi-grid" id="kpiGrid" aria-label="关键指标"></section>
+        <section class="panel metric-panel">
+          <div class="panel-head">
+            <div>
+              <h2>指标总览</h2>
+              <span id="metricCaption">当前时间窗口</span>
+            </div>
+          </div>
+          <div class="metric-grid" id="metricGrid"></div>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="panel-head list-panel-head">
+            <div>
+              <h2 id="tableTitle">广告系列汇总</h2>
+              <span id="tableCaption">当前时间窗口</span>
+            </div>
+            <div class="list-actions">
+              <div class="segmented compact-segmented" role="group" aria-label="列表层级">
+                <button type="button" class="segment active" data-list-mode="campaigns">广告系列</button>
+                <button type="button" class="segment" data-list-mode="ads">广告</button>
+              </div>
+              <div class="table-count" id="tableCount">0 行</div>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead id="tableHead"></thead>
+              <tbody id="tableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel chart-panel list-ad-chart-panel" id="listAdChartPanel" hidden>
+          <div class="panel-head">
+            <div>
+              <h2 id="listAdChartTitle">单广告趋势</h2>
+              <span id="listAdChartCaption">从广告列表选择一个 ad 后展示</span>
+            </div>
+            <button class="secondary-button" id="clearAdDrilldownButton" type="button">
+              <i data-lucide="x"></i>
+              <span>清除下钻</span>
+            </button>
+          </div>
+          <div class="chart-wrap compact-chart-wrap">
+            <div id="listAdChart" class="chart compact-chart"></div>
+            <div class="empty-state" id="listAdChartEmpty" hidden>当前广告没有可展示趋势</div>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-panel" data-view-panel="alert-ai" hidden>
+        <section id="alertAiModule" class="alert-ai-module" aria-label="广告预警与智能 AI 分析系统"></section>
+      </section>
+    </main>
+  </div>
+
+  <script defer src="/app.js?v=20260616-admin3"></script>
+  <script defer src="/alert-ai.js?v=20260616-admin3"></script>
+</body>
+</html>

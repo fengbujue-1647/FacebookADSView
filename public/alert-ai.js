@@ -1,6 +1,5 @@
 (() => {
-  const root = document.getElementById("alertAiModule");
-  if (!root) return;
+  let root = document.getElementById("alertAiModule");
 
   const promptMaxLength = 1600;
   const templatePageSize = 8;
@@ -99,6 +98,14 @@
   const $ = (selector) => root.querySelector(selector);
   const $$ = (selector) => [...root.querySelectorAll(selector)];
 
+  function hasPermission(permission) {
+    return window.fbHasPermission?.(permission) === true;
+  }
+
+  function canManageAlerts() {
+    return hasPermission("alerts.manage");
+  }
+
   function escapeHtml(value) {
     return String(value ?? "")
       .replaceAll("&", "&amp;")
@@ -121,7 +128,8 @@
   }
 
   async function apiJson(url, options = {}) {
-    const response = await fetch(url, {
+    const request = window.apiFetch || fetch;
+    const response = await request(url, {
       cache: "no-store",
       headers: {
         "Content-Type": "application/json",
@@ -165,6 +173,7 @@
   }
 
   function renderShell() {
+    const templateTitle = canManageAlerts() ? "广告预警模板管理" : "广告预警模板";
     root.innerHTML = `
       <div class="alert-tabs module-inner-tabs" role="tablist" aria-label="广告预警与 AI 分析" hidden>
         <button class="alert-tab active" type="button" role="tab" data-alert-tab="templates">
@@ -181,14 +190,14 @@
         <section class="panel alert-panel">
           <div class="panel-head alert-panel-head">
             <div>
-              <h2>广告预警模板管理</h2>
+              <h2>${templateTitle}</h2>
               <span id="alertTemplateCaption">加载中</span>
             </div>
-            <button class="primary-button" id="newAlertTemplateButton" type="button">
+            <button class="primary-button" id="newAlertTemplateButton" type="button" data-alert-manage-only>
               <i data-lucide="plus"></i>
               <span>新建模板</span>
             </button>
-            <button class="secondary-button" id="evaluateAlertsButton" type="button">
+            <button class="secondary-button" id="evaluateAlertsButton" type="button" data-alert-manage-only>
               <i data-lucide="send"></i>
               <span>立即评估</span>
             </button>
@@ -238,7 +247,7 @@
                 </svg>
               </div>
               <strong>暂无预警模板</strong>
-              <span>新建一个模板后即可在这里统一管理状态、规则和通知渠道。</span>
+              <span>当前账号可查看已有模板、历史预警消息和推送记录。</span>
             </div>
           </div>
           <div class="alert-pagination" id="alertTemplatePagination"></div>
@@ -557,6 +566,9 @@
 
       <div class="alert-toast-stack" id="alertToastStack" aria-live="polite"></div>
     `;
+    if (!canManageAlerts()) {
+      $$("[data-alert-manage-only], #templateDrawer").forEach((element) => element.remove());
+    }
   }
 
   function reportMetricOptions() {
@@ -646,18 +658,20 @@
       `<option value="${category.id}">${escapeHtml(category.label)}</option>`
     )).join("")}`;
 
-    $("#templateTargetLevel").innerHTML = metadata.targetLevels.map((level) => (
-      `<option value="${level.id}">${escapeHtml(level.label)}</option>`
-    )).join("");
-    $("#templateWindowType").innerHTML = metadata.windows.map((item) => (
-      `<option value="${item.id}">${escapeHtml(item.label)}</option>`
-    )).join("");
-    $("#templateChannels").innerHTML = metadata.channels.map((channel) => `
-      <label class="channel-option">
-        <input type="checkbox" name="templateChannels" value="${channel.id}">
-        <span>${escapeHtml(channel.label)}</span>
-      </label>
-    `).join("");
+    if (canManageAlerts()) {
+      $("#templateTargetLevel").innerHTML = metadata.targetLevels.map((level) => (
+        `<option value="${level.id}">${escapeHtml(level.label)}</option>`
+      )).join("");
+      $("#templateWindowType").innerHTML = metadata.windows.map((item) => (
+        `<option value="${item.id}">${escapeHtml(item.label)}</option>`
+      )).join("");
+      $("#templateChannels").innerHTML = metadata.channels.map((channel) => `
+        <label class="channel-option">
+          <input type="checkbox" name="templateChannels" value="${channel.id}">
+          <span>${escapeHtml(channel.label)}</span>
+        </label>
+      `).join("");
+    }
     $("#reportLevelGroup").innerHTML = metadata.report.levels.map((level) => `
       <label class="level-option">
         <input data-report-input type="radio" name="reportLevel" value="${level.id}" ${level.id === state.entities.level ? "checked" : ""}>
@@ -699,6 +713,12 @@
     refreshIcons();
   }
 
+  function applyPermissionVisibility() {
+    $$("[data-alert-manage-only]").forEach((element) => {
+      element.hidden = !canManageAlerts();
+    });
+  }
+
   function renderTemplateTable() {
     const body = $("#alertTemplateBody");
     const empty = $("#alertTemplateEmpty");
@@ -722,6 +742,7 @@
     }
 
     empty.hidden = true;
+    const manage = canManageAlerts();
     body.innerHTML = state.templates.items.map((item) => `
       <tr data-template-row="${item.id}">
         <td>
@@ -740,13 +761,13 @@
           <small>${formatDateTime(item.next_check_at)}</small>
         </td>
         <td>
-          <label class="alert-switch">
+          ${manage ? `<label class="alert-switch">
             <input type="checkbox" data-template-status="${item.id}" ${item.enabled ? "checked" : ""}>
             <span></span>
-          </label>
+          </label>` : `<span class="template-severity ${item.enabled ? "low" : "medium"}">${item.enabled ? "启用" : "停用"}</span>`}
         </td>
         <td>
-          <div class="row-actions">
+          ${manage ? `<div class="row-actions">
             <button type="button" data-template-action="edit" data-template-id="${item.id}" title="编辑" aria-label="编辑">
               <i data-lucide="pencil"></i>
             </button>
@@ -756,7 +777,7 @@
             <button type="button" data-template-action="delete" data-template-id="${item.id}" title="删除" aria-label="删除">
               <i data-lucide="trash-2"></i>
             </button>
-          </div>
+          </div>` : `<span class="muted-inline">只读</span>`}
         </td>
       </tr>
     `).join("");
@@ -1555,6 +1576,7 @@
   }
 
   function renderTemplateTargetPicker() {
+    if (!canManageAlerts() || !$("#templateTargetPickerLabel")) return;
     const picker = state.drawer.targetPicker;
     const selectedCount = picker.selectedIds.size;
     $("#templateTargetPickerLabel").textContent = selectedCount ? `已选 ${selectedCount} 个目标` : "全部目标";
@@ -1595,6 +1617,7 @@
   }
 
   async function loadTemplateTargetEntities() {
+    if (!canManageAlerts() || !$("#templateTargetLevel")) return;
     const picker = state.drawer.targetPicker;
     picker.loading = true;
     renderTemplateTargetPicker();
@@ -2010,7 +2033,8 @@
     const timeoutId = setTimeout(() => controller.abort(), 55_000);
 
     try {
-      const response = await fetch("/api/alert-ai/reports/stream", {
+      const requestFetch = window.apiFetch || fetch;
+      const response = await requestFetch("/api/alert-ai/reports/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
@@ -2115,8 +2139,10 @@
       button.addEventListener("click", () => setActiveTab(button.dataset.alertTab));
     });
 
-    $("#newAlertTemplateButton").addEventListener("click", () => openTemplateDrawer());
-    $("#evaluateAlertsButton").addEventListener("click", evaluateAlerts);
+    if (canManageAlerts()) {
+      $("#newAlertTemplateButton").addEventListener("click", () => openTemplateDrawer());
+      $("#evaluateAlertsButton").addEventListener("click", evaluateAlerts);
+    }
     $("#alertTemplateSearch").addEventListener("input", (event) => {
       state.templates.search = event.target.value;
       debouncedTemplateSearch();
@@ -2132,50 +2158,52 @@
       loadTemplates();
     });
 
-    $("#templateForm").addEventListener("submit", saveTemplate);
-    $$("[data-drawer-close]").forEach((button) => button.addEventListener("click", closeTemplateDrawer));
-    ["templateTargetLevel", "templateWindowType", "templateWindowMinutes", "templateCheckIntervalMinutes"].forEach((id) => {
-      $(`#${id}`).addEventListener("input", updateTemplateDynamic);
-      $(`#${id}`).addEventListener("change", updateTemplateDynamic);
-    });
-    $("#templateTargetLevel").addEventListener("change", () => {
-      state.drawer.targetPicker.query = "";
-      state.drawer.targetPicker.options = [];
-      state.drawer.targetPicker.selectedIds.clear();
-      state.drawer.targetPicker.selectedMap.clear();
-      $("#templateTargetPickerSearch").value = "";
-      loadTemplateTargetEntities();
-    });
-    $("#templateTargetPickerToggle").addEventListener("click", () => {
-      state.drawer.targetPicker.open = !state.drawer.targetPicker.open;
-      renderTemplateTargetPicker();
-    });
-    $("#templateTargetPickerSearch").addEventListener("input", (event) => {
-      state.drawer.targetPicker.query = event.target.value;
-      debouncedTemplateTargetSearch();
-    });
-    $("#addConditionButton").addEventListener("click", () => {
-      state.drawer.conditions.push({ id: crypto.randomUUID(), logic: "and", metric: "spend", comparison: "gt", threshold: 100, thresholdMax: 500 });
-      renderConditions();
-      updateTemplateDynamic();
-    });
-    $("#templateConditionList").addEventListener("input", (event) => {
-      if (event.target.dataset.conditionField) syncConditionFromInput(event.target);
-    });
-    $("#templateConditionList").addEventListener("change", (event) => {
-      if (event.target.dataset.conditionField) syncConditionFromInput(event.target);
-    });
-    $("#templateName").addEventListener("blur", (event) => {
-      event.target.value = event.target.value.trim();
-    });
-    $("#templateChannels").addEventListener("change", updateTemplateDynamic);
-    $("#recipientInput").addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === "," || event.key === "，") {
-        event.preventDefault();
-        addRecipientsFromInput();
-      }
-    });
-    $("#recipientInput").addEventListener("blur", addRecipientsFromInput);
+    if (canManageAlerts()) {
+      $("#templateForm").addEventListener("submit", saveTemplate);
+      $$("[data-drawer-close]").forEach((button) => button.addEventListener("click", closeTemplateDrawer));
+      ["templateTargetLevel", "templateWindowType", "templateWindowMinutes", "templateCheckIntervalMinutes"].forEach((id) => {
+        $(`#${id}`).addEventListener("input", updateTemplateDynamic);
+        $(`#${id}`).addEventListener("change", updateTemplateDynamic);
+      });
+      $("#templateTargetLevel").addEventListener("change", () => {
+        state.drawer.targetPicker.query = "";
+        state.drawer.targetPicker.options = [];
+        state.drawer.targetPicker.selectedIds.clear();
+        state.drawer.targetPicker.selectedMap.clear();
+        $("#templateTargetPickerSearch").value = "";
+        loadTemplateTargetEntities();
+      });
+      $("#templateTargetPickerToggle").addEventListener("click", () => {
+        state.drawer.targetPicker.open = !state.drawer.targetPicker.open;
+        renderTemplateTargetPicker();
+      });
+      $("#templateTargetPickerSearch").addEventListener("input", (event) => {
+        state.drawer.targetPicker.query = event.target.value;
+        debouncedTemplateTargetSearch();
+      });
+      $("#addConditionButton").addEventListener("click", () => {
+        state.drawer.conditions.push({ id: crypto.randomUUID(), logic: "and", metric: "spend", comparison: "gt", threshold: 100, thresholdMax: 500 });
+        renderConditions();
+        updateTemplateDynamic();
+      });
+      $("#templateConditionList").addEventListener("input", (event) => {
+        if (event.target.dataset.conditionField) syncConditionFromInput(event.target);
+      });
+      $("#templateConditionList").addEventListener("change", (event) => {
+        if (event.target.dataset.conditionField) syncConditionFromInput(event.target);
+      });
+      $("#templateName").addEventListener("blur", (event) => {
+        event.target.value = event.target.value.trim();
+      });
+      $("#templateChannels").addEventListener("change", updateTemplateDynamic);
+      $("#recipientInput").addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === "," || event.key === "，") {
+          event.preventDefault();
+          addRecipientsFromInput();
+        }
+      });
+      $("#recipientInput").addEventListener("blur", addRecipientsFromInput);
+    }
 
     $("#reportSince").addEventListener("change", () => clearFieldErrors(root));
     $("#reportUntil").addEventListener("change", () => clearFieldErrors(root));
@@ -2219,6 +2247,7 @@
       }
       const actionButton = event.target.closest("[data-template-action]");
       if (actionButton) {
+        if (!canManageAlerts()) return;
         const id = actionButton.dataset.templateId;
         const action = actionButton.dataset.templateAction;
         if (action === "edit") openTemplateForEdit(id);
@@ -2228,12 +2257,14 @@
       }
       const removeRecipient = event.target.closest("[data-remove-recipient]");
       if (removeRecipient) {
+        if (!canManageAlerts()) return;
         state.drawer.recipients = state.drawer.recipients.filter((email) => email !== removeRecipient.dataset.removeRecipient);
         renderRecipients();
         return;
       }
       const removeCondition = event.target.closest("[data-condition-remove]");
       if (removeCondition) {
+        if (!canManageAlerts()) return;
         state.drawer.conditions = state.drawer.conditions.filter((condition) => condition.id !== removeCondition.dataset.conditionRemove);
         if (state.drawer.conditions[0]) {
           state.drawer.conditions[0].logic = "and";
@@ -2244,6 +2275,7 @@
       }
       const templateTargetAction = event.target.closest("[data-template-target-action]");
       if (templateTargetAction) {
+        if (!canManageAlerts()) return;
         if (templateTargetAction.dataset.templateTargetAction === "select-all") {
           state.drawer.targetPicker.options.forEach(selectTemplateTarget);
         }
@@ -2258,6 +2290,7 @@
       }
       const removeTemplateTarget = event.target.closest("[data-remove-template-target]");
       if (removeTemplateTarget) {
+        if (!canManageAlerts()) return;
         toggleTemplateTarget(removeTemplateTarget.dataset.removeTemplateTarget, false);
         return;
       }
@@ -2312,8 +2345,10 @@
       if (!event.target.closest(".entity-picker")) {
         closeSearchableSelects();
         state.entities.open = false;
-        state.drawer.targetPicker.open = false;
-        renderTemplateTargetPicker();
+        if (canManageAlerts()) {
+          state.drawer.targetPicker.open = false;
+          renderTemplateTargetPicker();
+        }
         renderEntityPicker();
       }
     });
@@ -2321,6 +2356,7 @@
     root.addEventListener("change", (event) => {
       const statusInput = event.target.closest("[data-template-status]");
       if (statusInput) {
+        if (!canManageAlerts()) return;
         updateTemplateStatus(statusInput.dataset.templateStatus, statusInput.checked);
         return;
       }
@@ -2336,6 +2372,7 @@
       }
       const templateTargetInput = event.target.closest("[data-template-target-id]");
       if (templateTargetInput) {
+        if (!canManageAlerts()) return;
         toggleTemplateTarget(templateTargetInput.dataset.templateTargetId, templateTargetInput.checked);
         return;
       }
@@ -2354,13 +2391,21 @@
   }
 
   async function init() {
+    const nextRoot = document.getElementById("alertAiModule");
+    if (!nextRoot) return;
+    if (root !== nextRoot) {
+      root = nextRoot;
+      state.initialized = false;
+    }
     if (state.initialized) return;
     state.initialized = true;
     renderShell();
+    applyPermissionVisibility();
     try {
       const metadataPayload = await apiJson("/api/alert-ai/metadata");
       state.metadata = metadataPayload.metadata;
       renderMetadataControls();
+      applyPermissionVisibility();
       enhanceSearchableSelects(root);
       setReportDefaults();
       bindEvents();
@@ -2368,6 +2413,7 @@
       await Promise.all([loadTemplates(), loadEntities(), loadAlertHistory(), loadReportHistory()]);
       refreshIcons();
     } catch (error) {
+      state.initialized = false;
       root.innerHTML = `
         <section class="panel alert-panel">
           <div class="report-error">
@@ -2383,7 +2429,14 @@
 
   window.AlertAiModule = {
     activate(tab = "templates") {
+      const nextRoot = document.getElementById("alertAiModule");
+      if (!nextRoot) return;
+      if (root !== nextRoot) {
+        root = nextRoot;
+        state.initialized = false;
+      }
       init().then(() => {
+        applyPermissionVisibility();
         setActiveTab(tab);
         if (tab === "report" && !state.report.history.items.length) {
           loadReportHistory();
@@ -2392,6 +2445,4 @@
       });
     }
   };
-
-  init();
 })();
