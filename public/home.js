@@ -55,10 +55,7 @@ function initReveal() {
 
   const staggerGroups = [
     ".capability-grid",
-    ".model-grid",
-    ".tech-grid",
-    ".case-grid",
-    ".deploy-grid"
+    ".model-grid"
   ];
 
   staggerGroups.forEach((selector) => {
