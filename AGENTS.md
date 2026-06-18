@@ -334,6 +334,7 @@ Always 先理解这些目录职责，再修改代码：
   - Always 登录/注册页优先复用 `.auth-panel`、`.auth-form`、`.segmented`、`.primary-button`、`.secondary-button` 等现有组件。
   - Always 登录页保持朴素业务入口，只说登录/注册/邮箱验证码等必要动作，不写营销口号、“统一身份”、“进入工作台”等容易误导的产品话术。
   - Always 邮箱验证码注册使用成熟邮件库和显式 SMTP 配置；未配置时返回可解释错误，不伪造发送成功，不手写脆弱 SMTP。
+  - Always 外部邮件服务商错误必须转成中文业务提示；Never 把 Resend/SMTP 原始英文 550、认证失败或连接失败直接展示给注册用户。
   - Never 为登录/注册单独引入新 UI 框架或做成 landing page，除非用户明确要求。
 - Status tags:
   - Always 使用 `.status-pill`、`.run-badge`、`.env-badge` 这类小标签。
@@ -445,6 +446,15 @@ Always 先理解这些目录职责，再修改代码：
 - Wrong pattern: 登录页左侧大段产品叙述，注册流程不走真实邮箱验证码，或为了“现成组件”引入新的 UI 框架。
 - Correct pattern: 登录页只承载登录/注册动作；注册使用邮箱验证码和明确 SMTP 配置；样式复用 `.auth-panel`、`.auth-form`、`.segmented`、`.primary-button`、`.secondary-button`。
 - Future rule: Auth 页面必须朴素、明确、低耦合；模块选择放到 `/console`，业务模块权限由登录后的工作台和后端策略处理。
+
+### Avoid: 邮件服务测试模式误当正式发信能力
+
+- Status: Confirmed issue.
+- Symptom: Resend 测试 API key 可以给账号邮箱发送成功，但给其他注册邮箱时报 `550 You can only send testing emails to your own email address`，页面直接暴露英文供应商错误。
+- Cause: 把“SMTP 链路能发到账号邮箱”误判为“注册验证码可向任意邮箱发信”，且后端没有归一化外部邮件服务错误。
+- Wrong pattern: 使用 `onboarding@resend.dev` 测试发件人开放注册，或把 Resend/SMTP 原始错误 message 直接返回前端。
+- Correct pattern: 测试模式只用于链路验证；正式注册必须验证自有发信域名并改用 `no-reply@<domain>`；服务端将服务商错误映射为中文可操作提示。
+- Future rule: Always 区分邮件服务测试模式和生产模式；Never 在未验证发信域名时承诺可给任意用户邮箱发送验证码。
 
 ### Avoid: 接口失败被 demo fallback 完全掩盖
 

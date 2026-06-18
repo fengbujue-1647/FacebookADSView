@@ -65,6 +65,8 @@ cli/.env.example -> cli/.env
 | `SMTP_PASS` | 否 | 空 | SMTP 登录密码或授权码。 |
 | `SMTP_FROM` | 否 | 空 | 验证码邮件发件邮箱。 |
 
+Resend 可作为 SMTP 服务使用：`SMTP_HOST=smtp.resend.com`、`SMTP_USER=resend`、`SMTP_PASS=<Resend API Key>`。Resend 测试模式只允许向账号自己的邮箱发送测试邮件；要给任意注册邮箱发送验证码，必须先在 Resend 验证 `zhizai.art` 这类发信域名，并把 `SMTP_FROM` 改成该域名下的地址，例如 `智在 AI <no-reply@zhizai.art>`。
+
 ## 启动方式
 
 ### 账号和安全
