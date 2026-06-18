@@ -9,6 +9,9 @@
   --line: rgba(0, 0, 0, 0.18);
   --line-soft: rgba(0, 0, 0, 0.08);
   --blue: #0052d9;
+  --glass-surface: rgba(255, 255, 255, 0.68);
+  --glass-border: rgba(0, 82, 217, 0.26);
+  --glass-glow: rgba(0, 82, 217, 0.12);
   --grid-margin: 80px;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-exit: cubic-bezier(0.55, 0, 1, 0.45);
@@ -562,33 +565,68 @@ body.home-page.is-home-ready .hero-stage {
 }
 
 .pillars-grid {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   border-top: 0.5px solid var(--black);
+  border-bottom: 0.5px solid var(--line-soft);
+  gap: 0;
+}
+
+.pillars-grid::before {
+  content: "";
+  position: absolute;
+  left: 28px;
+  right: 28px;
+  top: 82px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--blue), rgba(0, 82, 217, 0.18));
+  transform-origin: left center;
+  opacity: 0.72;
 }
 
 .pillar-card {
-  min-height: 320px;
-  padding: 28px;
-  border-right: 0.5px solid var(--line-soft);
-  background: var(--white);
-  transition: background var(--motion-base) var(--ease), color var(--motion-base) var(--ease);
-}
-
-.pillar-card:last-child {
-  border-right: 0;
+  position: relative;
+  isolation: isolate;
+  min-height: 300px;
+  padding: 30px 28px 28px;
+  background: transparent;
+  transition: background var(--motion-base) var(--ease), box-shadow var(--motion-base) var(--ease), filter var(--motion-base) var(--ease);
 }
 
 .pillar-card span {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px 0 0;
+  background: var(--white);
   color: var(--blue);
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  transition: color var(--motion-base) var(--ease);
+}
+
+.pillar-card::after {
+  content: "";
+  position: absolute;
+  top: 73px;
+  left: 28px;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--blue);
+  background: var(--white);
+  box-shadow: 0 0 0 8px rgba(0, 82, 217, 0.06);
+  transform: rotate(45deg);
+  transition: background var(--motion-base) var(--ease), border-color var(--motion-base) var(--ease), box-shadow var(--motion-base) var(--ease), transform var(--motion-base) var(--ease);
 }
 
 .pillar-card h3 {
-  margin-top: 58px;
+  margin-top: 92px;
+  max-width: 360px;
   font-size: 24px;
   font-weight: 900;
   line-height: 1.2;
@@ -597,26 +635,45 @@ body.home-page.is-home-ready .hero-stage {
 
 .pillar-card p {
   margin: 18px 0 0;
+  max-width: 420px;
   color: var(--muted);
   font-size: 15px;
   line-height: 1.85;
   transition: color var(--motion-base) var(--ease);
 }
 
+.capability-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  opacity: 0;
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, 0.18), rgba(0, 82, 217, 0.16), rgba(255, 255, 255, 0.52)),
+    radial-gradient(circle at 16% 18%, rgba(0, 82, 217, 0.18), transparent 30%),
+    radial-gradient(circle at 88% 82%, rgba(0, 0, 0, 0.08), transparent 34%);
+  background-size: 180% 180%, 100% 100%, 100% 100%;
+  transform: translate3d(-8%, 0, 0);
+  transition: opacity var(--motion-base) var(--ease), transform var(--motion-slow) var(--ease);
+}
+
 .pillar-card:hover,
 .pillar-card:focus-within {
-  background: var(--space);
-  color: var(--white);
+  background: linear-gradient(180deg, rgba(0, 82, 217, 0.06), rgba(255, 255, 255, 0));
+  box-shadow: inset 0 1px 0 rgba(0, 82, 217, 0.22);
 }
 
-.pillar-card:hover h3,
-.pillar-card:focus-within h3 {
-  color: var(--white);
+.pillar-card:hover span,
+.pillar-card:focus-within span {
+  color: var(--black);
 }
 
-.pillar-card:hover p,
-.pillar-card:focus-within p {
-  color: rgba(255, 255, 255, 0.72);
+.pillar-card:hover::after,
+.pillar-card:focus-within::after {
+  background: var(--blue);
+  border-color: var(--blue);
+  box-shadow: 0 0 0 10px rgba(0, 82, 217, 0.12), 0 14px 32px rgba(0, 82, 217, 0.18);
+  transform: rotate(45deg) scale(1.08);
 }
 
 .capability-grid {
@@ -627,19 +684,32 @@ body.home-page.is-home-ready .hero-stage {
 }
 
 .capability-card {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   min-height: 260px;
   padding: 24px;
   border-right: 0.5px solid var(--line-soft);
   border-bottom: 0.5px solid var(--line-soft);
-  background: var(--white);
-  transition: border-color var(--motion-fast) var(--ease), background var(--motion-fast) var(--ease), transform var(--motion-fast) var(--ease);
+  background: transparent;
+  transition: border-color var(--motion-base) var(--ease), background var(--motion-base) var(--ease), box-shadow var(--motion-base) var(--ease), filter var(--motion-base) var(--ease);
 }
 
 .capability-card:hover,
 .capability-card:focus-within {
-  border-color: #333333;
-  background: rgba(0, 0, 0, 0.05);
-  transform: translate(4px, -4px);
+  border-color: var(--glass-border);
+  background: var(--glass-surface);
+  box-shadow: 0 20px 60px var(--glass-glow);
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  filter: brightness(1.02);
+}
+
+.capability-card:hover::before,
+.capability-card:focus-within::before {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  animation: glassGradientDrift 5200ms var(--ease) infinite alternate;
 }
 
 .capability-card h3 {
@@ -1020,6 +1090,22 @@ pre {
   }
 }
 
+@keyframes glassGradientDrift {
+  from {
+    background-position: 0% 50%, 0 0, 0 0;
+  }
+  to {
+    background-position: 100% 50%, 0 0, 0 0;
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .capability-card:hover,
+  .capability-card:focus-within {
+    background: rgba(255, 255, 255, 0.86);
+  }
+}
+
 @media (max-width: 1180px) {
   :root {
     --grid-margin: 48px;
@@ -1131,6 +1217,29 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .pillars-grid::before {
+    left: 37px;
+    right: auto;
+    top: 40px;
+    bottom: 40px;
+    width: 1px;
+    height: auto;
+    background: linear-gradient(180deg, var(--blue), rgba(0, 82, 217, 0.18));
+  }
+
+  .pillar-card {
+    min-height: 220px;
+    padding-left: 72px;
+  }
+
+  .pillar-card::after {
+    left: 28px;
+  }
+
+  .pillar-card h3 {
+    margin-top: 54px;
+  }
+
   .pillar-card,
   .model-card,
   .split-case > div,
@@ -1205,6 +1314,19 @@ pre {
     min-height: 220px;
     padding: 20px;
   }
+
+  .pillar-card {
+    padding-left: 64px;
+  }
+
+  .pillar-card::after {
+    top: 66px;
+    left: 24px;
+  }
+
+  .pillar-card h3 {
+    margin-top: 42px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1220,6 +1342,8 @@ pre {
   .nav-cta,
   .capability-card,
   .pillar-card,
+  .capability-card::before,
+  .pillar-card::after,
   .pillar-card h3,
   .pillar-card p,
   .site-menu-panel,
@@ -1233,6 +1357,13 @@ pre {
   .hero-stage {
     opacity: 1;
     transform: none;
+    animation: none;
+  }
+
+  .capability-card:hover::before,
+  .capability-card:focus-within::before,
+  .pillar-card:hover::after,
+  .pillar-card:focus-within::after {
     animation: none;
   }
 
