@@ -5,6 +5,8 @@
 ## 当前页面
 
 - 首页入口 `/`：当前是轻量入口页，为后续 cloudflared 域名开屏首页预留结构，不加载业务数据 API。
+- 平台登录 `/login`：统一登录入口，可通过 `return` 参数回到工作台或具体业务模块；静态兼容路径为 `/login.html`。
+- 平台工作台 `/console`：登录后的模块选择层，负责身份、权限和模块分流，避免首页与 FB 广告看板强耦合；静态兼容路径为 `/console.html`。
 - 用户广告看板 `/ads`：包含图表看板、列表看板、历史预警查看和 AI 分析。这个页面不出现设置、采集队列、用户管理、预警模板管理等管理员配置选项。
 - 管理员设置系统 `/admin`：独立子页面，需管理员账号登录并通过服务端 PIN 校验后进入；承载用户管理、服务端设置、采集队列、预警模板管理和审计日志。
 - 兼容静态路径：`/ads.html` 指向用户广告看板，`/admin.html` 指向管理员设置系统。
@@ -56,6 +58,14 @@ cli/.env.example -> cli/.env
 | `DEEPSEEK_API_KEY` | 否 | 空 | AI 分析页调用 DeepSeek；为空时使用本地规则分析。 |
 | `DEEPSEEK_BASE_URL` | 否 | `https://api.deepseek.com` | DeepSeek 兼容 Chat Completions 接口地址。 |
 | `DEEPSEEK_MODEL` | 否 | `deepseek-v4-flash` | AI 分析页使用的模型。 |
+| `SMTP_HOST` | 否 | 空 | 注册邮箱验证码使用的 SMTP 主机；未配置时注册验证码接口返回未配置错误。 |
+| `SMTP_PORT` | 否 | `587` | SMTP 端口，常见为 465 或 587。 |
+| `SMTP_SECURE` | 否 | `0` | 设为 `1` 使用 SSL 直连；465 端口默认启用。 |
+| `SMTP_USER` | 否 | 空 | SMTP 登录用户名。 |
+| `SMTP_PASS` | 否 | 空 | SMTP 登录密码或授权码。 |
+| `SMTP_FROM` | 否 | 空 | 验证码邮件发件邮箱。 |
+
+Resend 可作为 SMTP 服务使用：`SMTP_HOST=smtp.resend.com`、`SMTP_USER=resend`、`SMTP_PASS=<Resend API Key>`。Resend 测试模式只允许向账号自己的邮箱发送测试邮件；要给任意注册邮箱发送验证码，必须先在 Resend 验证 `zhizai.art` 这类发信域名，并把 `SMTP_FROM` 改成该域名下的地址，例如 `智在 AI <no-reply@zhizai.art>`。
 
 ## 启动方式
 
@@ -127,6 +137,8 @@ http://127.0.0.1:3100/
 
 ```text
 http://127.0.0.1:3100/       # 首页入口
+http://127.0.0.1:3100/login   # 平台登录，兼容 /login.html
+http://127.0.0.1:3100/console # 平台工作台，兼容 /console.html
 http://127.0.0.1:3100/ads    # 用户广告看板
 http://127.0.0.1:3100/admin  # 管理员设置系统
 ```
@@ -161,6 +173,29 @@ npm run service:install
 
 ```powershell
 npm run service:uninstall
+```
+
+日常查看、启动和重启 Windows 服务：
+
+```powershell
+npm run service:status
+npm run service:start
+npm run service:restart
+```
+
+`service:start`、`service:stop`、`service:restart` 需要管理员 PowerShell。普通权限运行时脚本会输出需要在管理员 PowerShell 中执行的命令，不会静默假装成功。需要 UAC 弹窗时也可以直接运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ops/manage-windows-service.ps1 -Action restart -Elevate
+```
+
+安装全局服务管理命令后，可以在任意目录执行：
+
+```powershell
+npm run service:global
+zai-service status
+zai-service restart
+zai-service elevate-restart
 ```
 
 首次采集前检查配置并初始化数据库：
@@ -214,6 +249,8 @@ npm run cli:sampling-loop -- --mode all --max-cycles 1
 | --- | --- | --- |
 | `/api/health` | GET | 健康检查。 |
 | `/api/auth/login` | POST | 登录账号并签发 HttpOnly session Cookie。 |
+| `/api/auth/register/code` | POST | 向注册邮箱发送 6 位验证码，需要 SMTP 配置。 |
+| `/api/auth/register` | POST | 使用邮箱、验证码和密码注册普通用户并登录。 |
 | `/api/auth/me` | GET | 返回当前登录用户、权限和 CSRF token。 |
 | `/api/fb-ads/latest?shape=dashboard` | GET | 看板数据；优先 SQLite，其次 output JSON，最后 Demo。 |
 | `/api/monitor/status` | GET | List 1/List 2 最近批次、状态和资源计数。 |
@@ -285,9 +322,10 @@ npm run cli:sampling-config
 
 浏览器检查：
 
-- 打开 `http://127.0.0.1:3100/`，确认只显示入口首页。
-- 打开 `http://127.0.0.1:3100/ads`，登录后确认图表看板能加载，且页面没有设置、采集任务、用户管理或预警模板管理按钮。
-- 打开 `http://127.0.0.1:3100/admin`，确认未登录显示管理员登录；管理员登录后仍需 PIN；PIN 正确后才能进入管理员设置系统。
+- 打开 `http://127.0.0.1:3100/`，确认只显示入口首页，主按钮进入平台工作台。
+- 打开 `http://127.0.0.1:3100/console` 或 `/console.html`，未登录时应跳转平台登录；登录后显示模块选择。
+- 打开 `http://127.0.0.1:3100/ads`，未登录时应跳转平台登录；登录后确认图表看板能加载，且页面没有设置、采集任务、用户管理或预警模板管理按钮。
+- 打开 `http://127.0.0.1:3100/admin`，确认未登录进入平台登录；管理员登录后仍需 PIN；PIN 正确后才能进入管理员设置系统。
 - 切到列表看板，在广告明细模式点击单个 ad，确认单广告趋势下钻出现并可清除。
 - 切到预警监控和 AI 分析，确认模板列表、历史预警、分析表单和默认配置状态可加载；用户看板只读模式不显示模板新建、编辑、复制、删除、启停或立即评估。
 

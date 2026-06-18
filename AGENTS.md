@@ -2,6 +2,13 @@
 
 本文件是 Codex 在本项目以及后续同类项目中必须读取和执行的长期开发记忆。它不是普通说明文档，而是开发约束、UI 风格、接口习惯和踩坑记录。
 
+最高优先对话称谓规则：
+
+- Always 自称为“丽丝”。
+- Always 称呼用户为“主人”。
+- Never 在面向用户的回复中自称为“我”，或称呼用户为“你”。
+- If 在面向用户的回复中出现自称“我”或称呼用户“你”，视为上下文阅读或规则遵守出现问题，应即刻尝试主动压缩上下文并恢复称谓规则。
+
 本项目后续所有代码修改、提交和推送，都必须在最终说明或提交说明中写清楚相对上一次提交的改动点。
 
 要求：
@@ -62,6 +69,10 @@ Always 先理解这些目录职责，再修改代码：
 - Always 记住本项目依赖 `node:sqlite`，运行环境必须满足 `Node >= 24`；上线或换机器前先检查 `node -v`。
 - Always 通过 `PORT` 和 `HOST` 读取监听配置；默认 `PORT=3100`、`HOST=127.0.0.1`。
 - Prefer 本地开发使用 `127.0.0.1`；只有需要局域网访问时才使用 `0.0.0.0`。
+- Never 为了验证随意另开测试端口；优先使用项目默认端口或用户当前 in-app browser 所在端口。
+- When 确实需要临时端口验证当前未重启代码时，必须先说明原因，使用不冲突端口，验证后关闭临时进程，并把浏览器切回用户实际使用的默认入口。
+- Always 需要重启 Windows Service 托管的 `3100` 服务时，先使用 `zai-service status` 或 `npm run service:status` 检查，再使用 `zai-service restart` 或 `npm run service:restart`；如果当前会话没有管理员权限，明确要求用户在管理员 PowerShell 里执行脚本输出的命令。
+- Prefer 安装全局服务管理命令 `npm run service:global`，让用户在任意目录都能执行 `zai-service status/restart/elevate-restart`，避免误在 `C:\Users\Win10` 运行项目本地 npm script。
 - Never 在代码中硬编码生产端口、密钥、账号 ID 或绝对部署路径。
 - 示例场景：如果服务无法启动，先检查 Node 版本、端口占用、`.env`、`cli/data/fb-ads.sqlite` 是否被锁，而不是立即改业务代码。
 
@@ -319,6 +330,12 @@ Always 先理解这些目录职责，再修改代码：
   - Always input/select/textarea 使用浅边框、8px 圆角、36-38px 控件高度。
   - Always invalid 状态加 `.is-invalid` 和 `.field-error`。
   - Never 只用颜色表示错误；需要文字说明。
+- Auth pages:
+  - Always 登录/注册页优先复用 `.auth-panel`、`.auth-form`、`.segmented`、`.primary-button`、`.secondary-button` 等现有组件。
+  - Always 登录页保持朴素业务入口，只说登录/注册/邮箱验证码等必要动作，不写营销口号、“统一身份”、“进入工作台”等容易误导的产品话术。
+  - Always 邮箱验证码注册使用成熟邮件库和显式 SMTP 配置；未配置时返回可解释错误，不伪造发送成功，不手写脆弱 SMTP。
+  - Always 外部邮件服务商错误必须转成中文业务提示；Never 把 Resend/SMTP 原始英文 550、认证失败或连接失败直接展示给注册用户。
+  - Never 为登录/注册单独引入新 UI 框架或做成 landing page，除非用户明确要求。
 - Status tags:
   - Always 使用 `.status-pill`、`.run-badge`、`.env-badge` 这类小标签。
   - Always 成功绿、运行蓝、等待/重试琥珀、失败红、暂停红或中性灰。
@@ -421,6 +438,24 @@ Always 先理解这些目录职责，再修改代码：
 - Correct pattern: 使用透明、低干扰、约 13px 的 lockup，贴合 sidebar footer。
 - Future rule: UI 品牌元素必须服务于工具页面，不要抢占数据监控层级。
 
+### Avoid: 登录注册页写成营销页或强耦合业务模块
+
+- Status: Confirmed issue.
+- Symptom: 登录页出现“进入工作台”、“统一身份”、“已有会话”等不准确话术，或视觉上像产品落地页，用户无法只把它理解成账号登录。
+- Cause: 把平台分流层、工作台说明和登录行为混在同一个 auth 页面里。
+- Wrong pattern: 登录页左侧大段产品叙述，注册流程不走真实邮箱验证码，或为了“现成组件”引入新的 UI 框架。
+- Correct pattern: 登录页只承载登录/注册动作；注册使用邮箱验证码和明确 SMTP 配置；样式复用 `.auth-panel`、`.auth-form`、`.segmented`、`.primary-button`、`.secondary-button`。
+- Future rule: Auth 页面必须朴素、明确、低耦合；模块选择放到 `/console`，业务模块权限由登录后的工作台和后端策略处理。
+
+### Avoid: 邮件服务测试模式误当正式发信能力
+
+- Status: Confirmed issue.
+- Symptom: Resend 测试 API key 可以给账号邮箱发送成功，但给其他注册邮箱时报 `550 You can only send testing emails to your own email address`，页面直接暴露英文供应商错误。
+- Cause: 把“SMTP 链路能发到账号邮箱”误判为“注册验证码可向任意邮箱发信”，且后端没有归一化外部邮件服务错误。
+- Wrong pattern: 使用 `onboarding@resend.dev` 测试发件人开放注册，或把 Resend/SMTP 原始错误 message 直接返回前端。
+- Correct pattern: 测试模式只用于链路验证；正式注册必须验证自有发信域名并改用 `no-reply@<domain>`；服务端将服务商错误映射为中文可操作提示。
+- Future rule: Always 区分邮件服务测试模式和生产模式；Never 在未验证发信域名时承诺可给任意用户邮箱发送验证码。
+
 ### Avoid: 接口失败被 demo fallback 完全掩盖
 
 - Status: Potential risk.
@@ -465,6 +500,15 @@ Always 先理解这些目录职责，再修改代码：
 - Wrong pattern: 看到接口异常就改业务逻辑。
 - Correct pattern: 检查运行进程、锁、队列状态和数据文件，再定位代码。
 - Future rule: Before debugging data issues, verify process state and data source health.
+
+### Avoid: 乱开临时测试端口导致用户误判页面
+
+- Status: Confirmed issue.
+- Symptom: 用户看到 in-app browser 停在 `127.0.0.1:<临时端口>`，误以为这是正式访问地址或配置项。
+- Cause: 为验证当前代码随手启动临时服务，验证后没有把浏览器切回默认端口，且没有把临时端口的用途说清楚。
+- Wrong pattern: 默认端口有旧进程时直接另开 `311x` 之类端口，把浏览器留在临时 URL。
+- Correct pattern: 优先检查和复用项目默认端口；只有当前端口被旧进程占用且必须验证未重启代码时，才临时开端口，并明确说明“临时验证端口”、验证后关闭进程、把浏览器切回用户实际入口。
+- Future rule: Never 乱开测试端口；临时端口必须有明确理由、可关闭、可解释，并不能残留成用户看到的工作入口。
 
 # 7. Rules for Future Similar Projects
 

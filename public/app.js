@@ -249,6 +249,7 @@ const chartPalette = [
 ];
 
 const iconPaths = {
+  "layout-dashboard": ["M3 3h8v8H3z", "M13 3h8v5h-8z", "M13 10h8v11h-8z", "M3 13h8v8H3z"],
   "area-chart": ["M3 3v18h18", "M7 15l4-4 4 4 5-8"],
   "gauge": ["M4 14a8 8 0 0 1 16 0", "M12 14l4-4", "M8 18h8"],
   "list-filter": ["M3 6h18", "M6 12h12", "M10 18h4"],
@@ -437,7 +438,7 @@ async function apiFetch(url, options = {}) {
   });
   if (response.status === 401) {
     setAuthState({});
-    showLogin("登录已过期，请重新登录");
+    redirectToPlatformLogin("/ads");
     throw new Error("请先登录");
   }
   if (response.status === 403) {
@@ -448,6 +449,11 @@ async function apiFetch(url, options = {}) {
 
 window.apiFetch = apiFetch;
 window.fbHasPermission = dashboardPermission;
+
+function redirectToPlatformLogin(returnPath = window.location.pathname + window.location.search) {
+  const safePath = String(returnPath || "/ads");
+  window.location.href = `/login.html?return=${encodeURIComponent(safePath)}`;
+}
 
 function authOverlayHtml(message = "") {
   return `
@@ -4647,7 +4653,7 @@ async function initializeApplication() {
 async function init() {
   const authenticated = await loadAuthSession();
   if (!authenticated) {
-    showLogin();
+    redirectToPlatformLogin("/ads");
     return;
   }
   await initializeApplication();

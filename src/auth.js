@@ -1,6 +1,10 @@
+const { randomInt } = require("node:crypto");
 const {
   authenticateUser,
+  createUser,
   createSession,
+  getUserByEmail,
+  getUserByUsername,
   readSession,
   rotateCsrfToken,
   revokeSession,
@@ -9,14 +13,21 @@ const {
   sessionAbsoluteTimeoutMs
 } = require("./authStore");
 const { clearAdminPinCookie } = require("./adminPin");
+const { sendVerificationCode } = require("./email");
 
 const sessionCookieName = "id";
 const csrfCookieName = "csrf";
 const csrfHeaderName = "x-csrf-token";
 const loginBodyLimit = 32 * 1024;
 const loginAttempts = new Map();
+const registerCodes = new Map();
+const registerCodeAttempts = new Map();
 const loginRateWindowMs = 10 * 60 * 1000;
 const loginRateMaxAttempts = 20;
+const registerCodeTtlMs = 10 * 60 * 1000;
+const registerCodeRateWindowMs = 10 * 60 * 1000;
+const registerCodeRateMaxAttempts = 5;
+const registerCodeMinIntervalMs = 60 * 1000;
 
 function parseCookies(req) {
   const header = String(req.headers.cookie || "");
@@ -142,11 +153,112 @@ function recordLoginAttempt(req, username, success) {
   loginAttempts.set(key, record);
 }
 
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function assertEmail(email) {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error("请输入有效邮箱");
+  }
+}
+
+function assertRegisterPassword(password) {
+  if (String(password || "").length < 10) {
+    throw new Error("密码至少需要 10 个字符");
+  }
+}
+
+function normalizeRegisterUsername(value, email) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw) return raw;
+  const base = normalizeEmail(email)
+    .split("@")[0]
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[^a-z0-9]+/, "")
+    .slice(0, 20);
+  return base.length >= 3 ? base : "user";
+}
+
+function uniqueRegisterUsername(email) {
+  const base = normalizeRegisterUsername("", email);
+  if (!getUserByUsername(base)) return base;
+  for (let index = 0; index < 20; index += 1) {
+    const suffix = String(Math.floor(1000 + Math.random() * 9000));
+    const candidate = `${base.slice(0, 24)}-${suffix}`;
+    if (!getUserByUsername(candidate)) return candidate;
+  }
+  throw new Error("用户名生成失败，请稍后重试");
+}
+
+function randomCode() {
+  return String(randomInt(100000, 1000000));
+}
+
+function registerCodeRateKey(req, email) {
+  return `${readClientIp(req)}:${email}`;
+}
+
+function checkRegisterCodeRate(req, email) {
+  const key = registerCodeRateKey(req, email);
+  const now = Date.now();
+  const record = registerCodeAttempts.get(key) || { count: 0, startedAt: now, lastSentAt: 0 };
+  if (now - record.startedAt > registerCodeRateWindowMs) {
+    registerCodeAttempts.set(key, { count: 0, startedAt: now, lastSentAt: 0 });
+    return { ok: true, key };
+  }
+  if (now - record.lastSentAt < registerCodeMinIntervalMs) {
+    return { ok: false, statusCode: 429, message: "验证码发送过于频繁，请稍后再试" };
+  }
+  if (record.count >= registerCodeRateMaxAttempts) {
+    return { ok: false, statusCode: 429, message: "验证码请求过多，请稍后再试" };
+  }
+  return { ok: true, key };
+}
+
+function recordRegisterCodeSent(req, email) {
+  const key = registerCodeRateKey(req, email);
+  const now = Date.now();
+  const record = registerCodeAttempts.get(key) || { count: 0, startedAt: now, lastSentAt: 0 };
+  if (now - record.startedAt > registerCodeRateWindowMs) {
+    registerCodeAttempts.set(key, { count: 1, startedAt: now, lastSentAt: now });
+    return;
+  }
+  record.count += 1;
+  record.lastSentAt = now;
+  registerCodeAttempts.set(key, record);
+}
+
+function storeRegisterCode(email, code) {
+  registerCodes.set(email, {
+    code,
+    expiresAt: Date.now() + registerCodeTtlMs,
+    attempts: 0
+  });
+}
+
+function verifyRegisterCode(email, code) {
+  const record = registerCodes.get(email);
+  if (!record || record.expiresAt < Date.now()) {
+    registerCodes.delete(email);
+    return false;
+  }
+  record.attempts += 1;
+  if (record.attempts > 5) {
+    registerCodes.delete(email);
+    return false;
+  }
+  const ok = record.code === String(code || "").trim();
+  if (ok) registerCodes.delete(email);
+  return ok;
+}
+
 function publicUser(authContext) {
   const user = authContext.user;
   return {
     id: user.id,
     username: user.username,
+    email: user.email || "",
     displayName: user.displayName,
     role: user.role,
     accountIds: user.role === "admin" ? [] : user.accountIds || []
@@ -176,6 +288,123 @@ function requireCsrf(req, authContext) {
 }
 
 async function handleAuthRoutes(req, res, url, writeJson) {
+  if (url.pathname === "/api/auth/register/code" && req.method === "POST") {
+    try {
+      const body = await readRequestBodyLimited(req);
+      const payload = JSON.parse(body || "{}");
+      const email = normalizeEmail(payload.email);
+      assertEmail(email);
+      if (getUserByEmail(email)) {
+        writeJson(res, 409, {
+          ok: false,
+          error: "email_exists",
+          message: "该邮箱已注册"
+        });
+        return true;
+      }
+      const rate = checkRegisterCodeRate(req, email);
+      if (!rate.ok) {
+        writeJson(res, rate.statusCode, {
+          ok: false,
+          error: "too_many_register_code_requests",
+          message: rate.message
+        });
+        return true;
+      }
+      const code = randomCode();
+      await sendVerificationCode(email, code);
+      storeRegisterCode(email, code);
+      recordRegisterCodeSent(req, email);
+      writeAuditEvent({
+        action: "auth.register_code_sent",
+        targetType: "email",
+        targetId: email,
+        ip: readClientIp(req),
+        userAgent: req.headers["user-agent"] || ""
+      });
+      writeJson(res, 200, {
+        ok: true,
+        message: "验证码已发送"
+      });
+    } catch (error) {
+      writeJson(res, error.statusCode || (error.message === "request_body_too_large" ? 413 : 400), {
+        ok: false,
+        error: error.code || "send_register_code_failed",
+        message: error.message
+      });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/auth/register" && req.method === "POST") {
+    try {
+      const body = await readRequestBodyLimited(req);
+      const payload = JSON.parse(body || "{}");
+      const email = normalizeEmail(payload.email);
+      const password = String(payload.password || "");
+      assertEmail(email);
+      assertRegisterPassword(password);
+      if (!verifyRegisterCode(email, payload.code)) {
+        writeJson(res, 422, {
+          ok: false,
+          error: "invalid_register_code",
+          message: "验证码无效或已过期"
+        });
+        return true;
+      }
+      const username = uniqueRegisterUsername(email);
+      if (getUserByEmail(email)) {
+        writeJson(res, 409, {
+          ok: false,
+          error: "account_exists",
+          message: "该邮箱已注册"
+        });
+        return true;
+      }
+      const user = createUser({
+        username,
+        email,
+        password,
+        displayName: String(payload.displayName || "").trim(),
+        role: "user",
+        status: "active",
+        accountIds: []
+      });
+      const session = createSession({
+        userId: user.id,
+        userAgent: req.headers["user-agent"] || "",
+        ipPrefix: ipPrefix(readClientIp(req))
+      });
+      const authContext = readSession(session.sessionId);
+      setSessionCookies(req, res, session);
+      writeAuditEvent({
+        actorUserId: user.id,
+        action: "auth.register_success",
+        targetType: "user",
+        targetId: user.id,
+        ip: readClientIp(req),
+        userAgent: req.headers["user-agent"] || "",
+        metadata: { email }
+      });
+      writeJson(res, 201, {
+        ok: true,
+        user: publicUser(authContext),
+        permissions: authContext.permissions,
+        csrfToken: session.csrfToken,
+        session: {
+          expiresAt: session.expiresAt
+        }
+      });
+    } catch (error) {
+      writeJson(res, error.statusCode || (error.message === "request_body_too_large" ? 413 : 400), {
+        ok: false,
+        error: "register_failed",
+        message: error.message
+      });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/auth/login" && req.method === "POST") {
     try {
       const body = await readRequestBodyLimited(req);

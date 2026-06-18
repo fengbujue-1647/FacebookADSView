@@ -69,6 +69,7 @@ function initAuthDatabase(databaseFile = authDatabaseFile) {
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
+        email TEXT NOT NULL DEFAULT '',
         display_name TEXT NOT NULL DEFAULT '',
         password_hash TEXT NOT NULL,
         password_alg TEXT NOT NULL,
@@ -120,10 +121,26 @@ function initAuthDatabase(databaseFile = authDatabaseFile) {
       CREATE INDEX IF NOT EXISTS idx_audit_events_created
         ON audit_events(created_at DESC);
     `);
+    ensureColumn(db, "users", "email", "TEXT NOT NULL DEFAULT ''");
+    ensureUniqueIndex(db, "idx_users_email_unique", "users", "email", "email <> ''");
     return databaseFile;
   } finally {
     db.close();
   }
+}
+
+function tableColumns(db, tableName) {
+  return db.prepare(`PRAGMA table_info(${tableName})`).all().map((row) => row.name);
+}
+
+function ensureColumn(db, tableName, columnName, definition) {
+  if (!tableColumns(db, tableName).includes(columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  }
+}
+
+function ensureUniqueIndex(db, indexName, tableName, columnName, where = "") {
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ${indexName} ON ${tableName}(${columnName}) ${where ? `WHERE ${where}` : ""}`);
 }
 
 function nowIso() {
@@ -139,6 +156,10 @@ function randomToken(bytes = 32) {
 }
 
 function normalizeUsername(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
 }
 
@@ -162,6 +183,12 @@ function normalizeAccountIds(accountIds = []) {
 function assertUsername(username) {
   if (!/^[a-z0-9][a-z0-9._-]{2,31}$/.test(username)) {
     throw new Error("用户名必须为 3-32 位小写字母、数字、点、下划线或横线，并以字母或数字开头");
+  }
+}
+
+function assertEmail(email) {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ""))) {
+    throw new Error("请输入有效邮箱");
   }
 }
 
@@ -213,6 +240,7 @@ function mapUser(row, accountIds = []) {
   return {
     id: row.id,
     username: row.username,
+    email: row.email || "",
     displayName: row.display_name || row.username,
     role: row.role,
     status: row.status,
@@ -250,6 +278,16 @@ function getUserByUsername(username, databaseFile = authDatabaseFile) {
   }
 }
 
+function getUserByEmail(email, databaseFile = authDatabaseFile) {
+  initAuthDatabase(databaseFile);
+  const db = openAuthDatabase(databaseFile);
+  try {
+    return db.prepare("SELECT * FROM users WHERE email = ?").get(normalizeEmail(email)) || null;
+  } finally {
+    db.close();
+  }
+}
+
 function getUserById(userId, databaseFile = authDatabaseFile) {
   initAuthDatabase(databaseFile);
   const db = openAuthDatabase(databaseFile);
@@ -278,6 +316,7 @@ function listUsers(databaseFile = authDatabaseFile) {
 
 function createUser({
   username,
+  email = "",
   password,
   displayName = "",
   role = "user",
@@ -287,6 +326,8 @@ function createUser({
   initAuthDatabase(databaseFile);
   const normalizedUsername = normalizeUsername(username);
   assertUsername(normalizedUsername);
+  const normalizedEmail = normalizeEmail(email);
+  if (normalizedEmail) assertEmail(normalizedEmail);
   const normalizedRole = normalizeRole(role);
   const normalizedStatus = normalizeStatus(status);
   const passwordHash = hashPassword(password);
@@ -300,6 +341,7 @@ function createUser({
         INSERT INTO users (
           id,
           username,
+          email,
           display_name,
           password_hash,
           password_alg,
@@ -308,10 +350,11 @@ function createUser({
           password_changed_at,
           created_at,
           updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         userId,
         normalizedUsername,
+        normalizedEmail,
         String(displayName || "").trim(),
         passwordHash,
         "scrypt",
@@ -424,7 +467,9 @@ function authenticateUser(username, password, databaseFile = authDatabaseFile) {
   const normalizedUsername = normalizeUsername(username);
   const db = openAuthDatabase(databaseFile);
   try {
-    const row = db.prepare("SELECT * FROM users WHERE username = ?").get(normalizedUsername);
+    const row = normalizedUsername.includes("@")
+      ? db.prepare("SELECT * FROM users WHERE email = ?").get(normalizeEmail(normalizedUsername))
+      : db.prepare("SELECT * FROM users WHERE username = ?").get(normalizedUsername);
     if (!row || row.status !== "active" || isUserLocked(row)) {
       if (row && row.status === "active" && isUserLocked(row)) {
         return { ok: false, reason: "locked" };
@@ -539,7 +584,16 @@ function readSession(sessionId, databaseFile = authDatabaseFile) {
   try {
     cleanupExpiredSessions(db);
     const row = db.prepare(`
-      SELECT s.*, u.username, u.display_name, u.role, u.status, u.last_login_at, u.created_at AS user_created_at, u.updated_at AS user_updated_at
+      SELECT
+        s.*,
+        u.username,
+        u.email,
+        u.display_name,
+        u.role,
+        u.status,
+        u.last_login_at,
+        u.created_at AS user_created_at,
+        u.updated_at AS user_updated_at
       FROM sessions s
       INNER JOIN users u ON u.id = s.user_id
       WHERE s.id_hash = ?
@@ -565,6 +619,7 @@ function readSession(sessionId, databaseFile = authDatabaseFile) {
       user: {
         id: row.user_id,
         username: row.username,
+        email: row.email || "",
         displayName: row.display_name || row.username,
         role: row.role,
         status: row.status,
@@ -698,6 +753,7 @@ module.exports = {
   updateUser,
   resetUserPassword,
   getUserById,
+  getUserByEmail,
   getUserByUsername,
   listUsers,
   authenticateUser,

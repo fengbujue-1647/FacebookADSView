@@ -251,6 +251,52 @@ const environmentGroups = [
     ]
   },
   {
+    id: "mail",
+    title: "邮件服务",
+    items: [
+      {
+        key: "SMTP_HOST",
+        label: "SMTP 主机",
+        description: "邮箱验证码发送使用的 SMTP 服务器地址。",
+        usedBy: "注册验证码"
+      },
+      {
+        key: "SMTP_PORT",
+        label: "SMTP 端口",
+        description: "SMTP 端口，常见为 465 或 587。",
+        defaultValue: "587",
+        usedBy: "注册验证码"
+      },
+      {
+        key: "SMTP_SECURE",
+        label: "SMTP SSL",
+        description: "设为 1 使用 SSL 直连；465 端口默认启用。",
+        defaultValue: "0",
+        usedBy: "注册验证码"
+      },
+      {
+        key: "SMTP_USER",
+        label: "SMTP 用户",
+        description: "SMTP 登录用户名。",
+        sensitive: true,
+        usedBy: "注册验证码"
+      },
+      {
+        key: "SMTP_PASS",
+        label: "SMTP 密码",
+        description: "SMTP 登录密码或授权码。",
+        sensitive: true,
+        usedBy: "注册验证码"
+      },
+      {
+        key: "SMTP_FROM",
+        label: "发件邮箱",
+        description: "发送验证码时使用的 From 地址。",
+        usedBy: "注册验证码"
+      }
+    ]
+  },
+  {
     id: "sentinel",
     title: "服务哨兵",
     items: [
@@ -600,6 +646,8 @@ function resolvePublicPath(pathname) {
   try {
     const routeMap = new Map([
       ["/", "/index.html"],
+      ["/login", "/login.html"],
+      ["/console", "/console.html"],
       ["/ads", "/ads.html"],
       ["/admin", "/admin.html"]
     ]);
