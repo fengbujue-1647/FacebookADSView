@@ -255,13 +255,20 @@ function verifyRegisterCode(email, code) {
 
 function publicUser(authContext) {
   const user = authContext.user;
+  const resourceScope = user.resourceScope || {
+    accountIds: user.accountIds || [],
+    campaignIds: [],
+    adsetIds: [],
+    adIds: []
+  };
   return {
     id: user.id,
     username: user.username,
     email: user.email || "",
     displayName: user.displayName,
     role: user.role,
-    accountIds: user.role === "admin" ? [] : user.accountIds || []
+    accountIds: resourceScope.accountIds || [],
+    resourceScope
   };
 }
 

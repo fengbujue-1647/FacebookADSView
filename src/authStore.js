@@ -90,6 +90,14 @@ function initAuthDatabase(databaseFile = authDatabaseFile) {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS user_resource_scopes (
+        user_id TEXT NOT NULL,
+        level TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        PRIMARY KEY (user_id, level, resource_id),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS sessions (
         id_hash TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -180,6 +188,20 @@ function normalizeAccountIds(accountIds = []) {
     .filter((id) => /^\d{3,32}$/.test(id)))];
 }
 
+function normalizeResourceIds(ids = []) {
+  return normalizeAccountIds(ids);
+}
+
+function normalizeResourceScope(scope = {}, fallbackAccountIds = []) {
+  const source = scope && typeof scope === "object" ? scope : {};
+  return {
+    accountIds: normalizeAccountIds(source.accountIds || source.account_ids || fallbackAccountIds),
+    campaignIds: normalizeResourceIds(source.campaignIds || source.campaign_ids || []),
+    adsetIds: normalizeResourceIds(source.adsetIds || source.adset_ids || []),
+    adIds: normalizeResourceIds(source.adIds || source.ad_ids || [])
+  };
+}
+
 function assertUsername(username) {
   if (!/^[a-z0-9][a-z0-9._-]{2,31}$/.test(username)) {
     throw new Error("用户名必须为 3-32 位小写字母、数字、点、下划线或横线，并以字母或数字开头");
@@ -235,8 +257,9 @@ function permissionsForRole(role) {
   return rolePermissions[role] || [];
 }
 
-function mapUser(row, accountIds = []) {
+function mapUser(row, accountIds = [], resourceScope = null) {
   if (!row) return null;
+  const normalizedScope = normalizeResourceScope(resourceScope || {}, accountIds);
   return {
     id: row.id,
     username: row.username,
@@ -247,7 +270,8 @@ function mapUser(row, accountIds = []) {
     lastLoginAt: row.last_login_at || "",
     createdAt: row.created_at || "",
     updatedAt: row.updated_at || "",
-    accountIds
+    accountIds: normalizedScope.accountIds,
+    resourceScope: normalizedScope
   };
 }
 
@@ -265,6 +289,37 @@ function writeAccountScopes(db, userId, accountIds = []) {
   const insert = db.prepare("INSERT INTO user_account_scopes (user_id, account_id) VALUES (?, ?)");
   normalizeAccountIds(accountIds).forEach((accountId) => {
     insert.run(userId, accountId);
+  });
+}
+
+function readResourceScope(db, userId) {
+  const accountIds = readAccountScopes(db, userId);
+  const rows = db.prepare(`
+    SELECT level, resource_id
+    FROM user_resource_scopes
+    WHERE user_id = ?
+    ORDER BY level, resource_id
+  `).all(userId);
+  const scope = normalizeResourceScope({}, accountIds);
+  rows.forEach((row) => {
+    if (row.level === "campaign") scope.campaignIds.push(String(row.resource_id));
+    if (row.level === "adset") scope.adsetIds.push(String(row.resource_id));
+    if (row.level === "ad") scope.adIds.push(String(row.resource_id));
+  });
+  return normalizeResourceScope(scope, accountIds);
+}
+
+function writeResourceScope(db, userId, resourceScope = {}) {
+  const scope = normalizeResourceScope(resourceScope);
+  writeAccountScopes(db, userId, scope.accountIds);
+  db.prepare("DELETE FROM user_resource_scopes WHERE user_id = ?").run(userId);
+  const insert = db.prepare("INSERT INTO user_resource_scopes (user_id, level, resource_id) VALUES (?, ?, ?)");
+  [
+    ["campaign", scope.campaignIds],
+    ["adset", scope.adsetIds],
+    ["ad", scope.adIds]
+  ].forEach(([level, ids]) => {
+    ids.forEach((id) => insert.run(userId, level, id));
   });
 }
 
@@ -293,7 +348,7 @@ function getUserById(userId, databaseFile = authDatabaseFile) {
   const db = openAuthDatabase(databaseFile);
   try {
     const row = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-    return row ? mapUser(row, readAccountScopes(db, userId)) : null;
+    return row ? mapUser(row, readAccountScopes(db, userId), readResourceScope(db, userId)) : null;
   } finally {
     db.close();
   }
@@ -308,7 +363,7 @@ function listUsers(databaseFile = authDatabaseFile) {
       FROM users
       ORDER BY created_at DESC
     `).all();
-    return rows.map((row) => mapUser(row, readAccountScopes(db, row.id)));
+    return rows.map((row) => mapUser(row, readAccountScopes(db, row.id), readResourceScope(db, row.id)));
   } finally {
     db.close();
   }
@@ -321,7 +376,8 @@ function createUser({
   displayName = "",
   role = "user",
   status = "active",
-  accountIds = []
+  accountIds = [],
+  resourceScope = undefined
 } = {}, databaseFile = authDatabaseFile) {
   initAuthDatabase(databaseFile);
   const normalizedUsername = normalizeUsername(username);
@@ -364,7 +420,9 @@ function createUser({
         now,
         now
       );
-      writeAccountScopes(db, userId, accountIds);
+      writeResourceScope(db, userId, resourceScope === undefined
+        ? normalizeResourceScope({}, accountIds)
+        : normalizeResourceScope(resourceScope, accountIds));
       db.exec("COMMIT");
     } catch (error) {
       db.exec("ROLLBACK");
@@ -380,7 +438,8 @@ function updateUser(userId, {
   displayName,
   role,
   status,
-  accountIds
+  accountIds,
+  resourceScope
 } = {}, databaseFile = authDatabaseFile) {
   initAuthDatabase(databaseFile);
   const db = openAuthDatabase(databaseFile);
@@ -404,8 +463,10 @@ function updateUser(userId, {
           updated_at = ?
         WHERE id = ?
       `).run(nextDisplayName, nextRole, nextStatus, nowIso(), userId);
-      if (accountIds !== undefined) {
-        writeAccountScopes(db, userId, accountIds);
+      if (resourceScope !== undefined || accountIds !== undefined) {
+        writeResourceScope(db, userId, resourceScope === undefined
+          ? normalizeResourceScope({}, accountIds)
+          : normalizeResourceScope(resourceScope, accountIds));
       }
       if (nextStatus !== "active" || nextRole !== existing.role) {
         db.prepare(`
@@ -452,6 +513,34 @@ function resetUserPassword(userId, password, databaseFile = authDatabaseFile) {
       WHERE user_id = ? AND revoked_at = ''
     `).run(now, userId);
     return getUserById(userId, databaseFile);
+  } finally {
+    db.close();
+  }
+}
+
+function deleteUser(userId, databaseFile = authDatabaseFile) {
+  initAuthDatabase(databaseFile);
+  const db = openAuthDatabase(databaseFile);
+  try {
+    const existing = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+    if (!existing) {
+      const error = new Error("用户不存在");
+      error.statusCode = 404;
+      throw error;
+    }
+    const user = mapUser(existing, readAccountScopes(db, userId));
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare("DELETE FROM user_account_scopes WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM user_resource_scopes WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return user;
   } finally {
     db.close();
   }
@@ -608,7 +697,11 @@ function readSession(sessionId, databaseFile = authDatabaseFile) {
       return null;
     }
     db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id_hash = ?").run(nowIso(), sessionHash);
-    const accountIds = readAccountScopes(db, row.user_id);
+    const resourceScope = readResourceScope(db, row.user_id);
+    const allowedResourceScope = row.role === "admin" && resourceScope.accountIds.length === 0
+      ? null
+      : resourceScope;
+    const accountIds = resourceScope.accountIds;
     return {
       session: {
         idHash: sessionHash,
@@ -626,10 +719,12 @@ function readSession(sessionId, databaseFile = authDatabaseFile) {
         lastLoginAt: row.last_login_at || "",
         createdAt: row.user_created_at || "",
         updatedAt: row.user_updated_at || "",
-        accountIds
+        accountIds,
+        resourceScope
       },
       permissions: permissionsForRole(row.role),
-      allowedAccountIds: row.role === "admin" ? null : accountIds
+      allowedAccountIds: allowedResourceScope === null ? null : allowedResourceScope.accountIds,
+      allowedResourceScope
     };
   } finally {
     db.close();
@@ -749,8 +844,10 @@ module.exports = {
   verifyPassword,
   permissionsForRole,
   normalizeAccountIds,
+  normalizeResourceScope,
   createUser,
   updateUser,
+  deleteUser,
   resetUserPassword,
   getUserById,
   getUserByEmail,

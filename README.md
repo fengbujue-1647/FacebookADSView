@@ -258,7 +258,7 @@ npm run cli:sampling-loop -- --mode all --max-cycles 1
 | `/api/admin/pin/verify` | POST | 校验管理员 PIN，成功后写入短期 HttpOnly PIN Cookie。 |
 | `/api/admin/pin/clear` | POST | 清除当前浏览器 PIN 通过状态。 |
 | `/api/admin/users` | GET/POST | 管理员用户列表和新增用户。 |
-| `/api/admin/users/:id` | PUT | 管理员编辑用户显示名、角色、状态和广告账户范围。 |
+| `/api/admin/users/:id` | PUT/DELETE | 管理员编辑或删除用户，支持账户 / 广告系列 / 广告组 / 广告四层数据范围；不能删除当前登录管理员账号。 |
 | `/api/admin/users/:id/password` | POST | 管理员重置用户密码。 |
 | `/api/admin/audit-events` | GET | 管理员查看审计日志。 |
 | `/api/settings/environment` | GET | 设置页 `.env` 配置状态，不返回密钥明文。 |

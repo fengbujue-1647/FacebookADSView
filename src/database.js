@@ -163,6 +163,30 @@ function normalizeAllowedAccountIds(allowedAccountIds) {
     .filter((id) => /^\d{3,32}$/.test(id)))];
 }
 
+function normalizeScopeIds(ids = []) {
+  return [...new Set((Array.isArray(ids) ? ids : [])
+    .map((id) => String(id || "").trim())
+    .filter((id) => /^\d{3,32}$/.test(id)))];
+}
+
+function normalizeAllowedResourceScope(allowedResourceScope, allowedAccountIds = null) {
+  if (allowedResourceScope === null || allowedResourceScope === undefined) {
+    if (allowedAccountIds === null || allowedAccountIds === undefined) return null;
+    return {
+      accountIds: normalizeAllowedAccountIds(allowedAccountIds),
+      campaignIds: [],
+      adsetIds: [],
+      adIds: []
+    };
+  }
+  return {
+    accountIds: normalizeAllowedAccountIds(allowedResourceScope.accountIds || allowedResourceScope.account_ids || allowedAccountIds || []),
+    campaignIds: normalizeScopeIds(allowedResourceScope.campaignIds || allowedResourceScope.campaign_ids || []),
+    adsetIds: normalizeScopeIds(allowedResourceScope.adsetIds || allowedResourceScope.adset_ids || []),
+    adIds: normalizeScopeIds(allowedResourceScope.adIds || allowedResourceScope.ad_ids || [])
+  };
+}
+
 function accountScopeClause(alias, allowedAccountIds, params) {
   const ids = normalizeAllowedAccountIds(allowedAccountIds);
   if (ids === null) return "";
@@ -172,8 +196,32 @@ function accountScopeClause(alias, allowedAccountIds, params) {
   return ` AND ${column} IN (${placeholders(ids)})`;
 }
 
+function resourceScopeClause(alias, allowedResourceScope, params, allowedAccountIds = null, level = "ad") {
+  const scope = normalizeAllowedResourceScope(allowedResourceScope, allowedAccountIds);
+  if (scope === null) return "";
+  if (!scope.accountIds.length) return " AND 1 = 0";
+  const prefix = alias ? `${alias}.` : "";
+  const depth = { account: 0, campaign: 1, adset: 2, ad: 3 }[level] ?? 3;
+  const clauses = [];
+  clauses.push(`${prefix}account_id IN (${placeholders(scope.accountIds)})`);
+  params.push(...scope.accountIds);
+  if (depth >= 1 && scope.campaignIds.length) {
+    clauses.push(`${prefix}campaign_id IN (${placeholders(scope.campaignIds)})`);
+    params.push(...scope.campaignIds);
+  }
+  if (depth >= 2 && scope.adsetIds.length) {
+    clauses.push(`${prefix}adset_id IN (${placeholders(scope.adsetIds)})`);
+    params.push(...scope.adsetIds);
+  }
+  if (depth >= 3 && scope.adIds.length) {
+    clauses.push(`${prefix}ad_id IN (${placeholders(scope.adIds)})`);
+    params.push(...scope.adIds);
+  }
+  return ` AND ${clauses.join(" AND ")}`;
+}
 
-function readLatestInsightData({ databaseFile, limit = 50_000, accountTimeZones = new Map(), allowedAccountIds = null } = {}) {
+
+function readLatestInsightData({ databaseFile, limit = 50_000, accountTimeZones = new Map(), allowedAccountIds = null, allowedResourceScope = null } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return null;
   }
@@ -181,7 +229,7 @@ function readLatestInsightData({ databaseFile, limit = 50_000, accountTimeZones 
   const db = openDatabase(databaseFile);
   try {
     const latestFactParams = [];
-    const latestFactScope = accountScopeClause("", allowedAccountIds, latestFactParams);
+    const latestFactScope = resourceScopeClause("", allowedResourceScope, latestFactParams, allowedAccountIds);
     const batch = db.prepare(`
       SELECT id, source, level, account_ids, row_count, started_at, completed_at, metadata_json
       FROM sync_batches
@@ -208,7 +256,7 @@ function readLatestInsightData({ databaseFile, limit = 50_000, accountTimeZones 
     }
 
     const rowParams = [latestFact.max_date];
-    const rowScope = accountScopeClause("", allowedAccountIds, rowParams);
+    const rowScope = resourceScopeClause("", allowedResourceScope, rowParams, allowedAccountIds);
     const rows = db.prepare(`
       SELECT ${selectableColumns(db, "insight_rows", insightDbColumns).join(", ")}
       FROM insight_rows
@@ -1390,7 +1438,7 @@ const analysisNameColumns = {
   ad: "ad_name"
 };
 
-function readEntitiesFromInsightRows(db, { level = "campaign", search = "", limit = 80, allowedAccountIds = null } = {}) {
+function readEntitiesFromInsightRows(db, { level = "campaign", search = "", limit = 80, allowedAccountIds = null, allowedResourceScope = null } = {}) {
   if (!tableExists(db, "insight_rows")) {
     return [];
   }
@@ -1404,9 +1452,9 @@ function readEntitiesFromInsightRows(db, { level = "campaign", search = "", limi
     clauses.push(`(${idColumn} LIKE ? OR ${nameColumn} LIKE ?)`);
     params.push(`%${query}%`, `%${query}%`);
   }
-  const accountScope = accountScopeClause("", allowedAccountIds, params);
-  if (accountScope) {
-    clauses.push(accountScope.replace(/^\s*AND\s+/i, ""));
+  const resourceScope = resourceScopeClause("", allowedResourceScope, params, allowedAccountIds);
+  if (resourceScope) {
+    clauses.push(resourceScope.replace(/^\s*AND\s+/i, ""));
   }
 
   return db.prepare(`
@@ -1433,7 +1481,8 @@ function readAnalysisEntityOptions({
   level = "campaign",
   search = "",
   limit = 80,
-  allowedAccountIds = null
+  allowedAccountIds = null,
+  allowedResourceScope = null
 } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return [];
@@ -1446,12 +1495,12 @@ function readAnalysisEntityOptions({
   const db = openDatabase(databaseFile);
   try {
     if (normalizedLevel === "account") {
-      return readEntitiesFromInsightRows(db, { level: normalizedLevel, search: query, limit: normalizedLimit, allowedAccountIds });
+      return readEntitiesFromInsightRows(db, { level: normalizedLevel, search: query, limit: normalizedLimit, allowedAccountIds, allowedResourceScope });
     }
 
     if (normalizedLevel === "campaign" && tableExists(db, "resource_campaigns")) {
       const params = [query, like, like];
-      const scope = accountScopeClause("", allowedAccountIds, params);
+      const scope = resourceScopeClause("", allowedResourceScope, params, allowedAccountIds, "campaign");
       const rows = db.prepare(`
         SELECT
           campaign_id AS id,
@@ -1476,7 +1525,7 @@ function readAnalysisEntityOptions({
       const params = canJoinCampaigns
         ? [query, like, like, like, like]
         : [query, like, like, like];
-      const scope = accountScopeClause("s", allowedAccountIds, params);
+      const scope = resourceScopeClause("s", allowedResourceScope, params, allowedAccountIds, "adset");
       const rows = db.prepare(`
         SELECT
           s.adset_id AS id,
@@ -1513,7 +1562,7 @@ function readAnalysisEntityOptions({
         ...(canJoinAdsets ? [like] : []),
         ...(canJoinCampaigns ? [like] : [])
       ];
-      const scope = accountScopeClause("a", allowedAccountIds, params);
+      const scope = resourceScopeClause("a", allowedResourceScope, params, allowedAccountIds, "ad");
       const rows = db.prepare(`
         SELECT
           a.ad_id AS id,
@@ -1548,7 +1597,8 @@ function readAnalysisEntityOptions({
       level: normalizedLevel,
       search: query,
       limit: normalizedLimit,
-      allowedAccountIds
+      allowedAccountIds,
+      allowedResourceScope
     });
   } catch {
     return [];
@@ -1565,7 +1615,8 @@ function readInsightRowsForAnalysis({
   entityIds = [],
   limit = 120_000,
   accountTimeZones = new Map(),
-  allowedAccountIds = null
+  allowedAccountIds = null,
+  allowedResourceScope = null
 } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return [];
@@ -1600,9 +1651,9 @@ function readInsightRowsForAnalysis({
       clauses.push(`${idColumn} IN (${placeholders(ids)})`);
       params.push(...ids);
     }
-    const accountScope = accountScopeClause("", allowedAccountIds, params);
-    if (accountScope) {
-      clauses.push(accountScope.replace(/^\s*AND\s+/i, ""));
+    const resourceScope = resourceScopeClause("", allowedResourceScope, params, allowedAccountIds);
+    if (resourceScope) {
+      clauses.push(resourceScope.replace(/^\s*AND\s+/i, ""));
     }
 
     const rows = db.prepare(`
@@ -1634,7 +1685,8 @@ function readAccountIdsForAnalysisEntities({
   databaseFile,
   level = "campaign",
   entityIds = [],
-  allowedAccountIds = null
+  allowedAccountIds = null,
+  allowedResourceScope = null
 } = {}) {
   if (!databaseFile || !fs.existsSync(databaseFile)) {
     return new Map();
@@ -1649,7 +1701,8 @@ function readAccountIdsForAnalysisEntities({
   const db = openDatabase(databaseFile);
   try {
     if (normalizedLevel === "account") {
-      const allowed = normalizeAllowedAccountIds(allowedAccountIds);
+      const scope = normalizeAllowedResourceScope(allowedResourceScope, allowedAccountIds);
+      const allowed = scope === null ? null : scope.accountIds;
       ids.forEach((id) => {
         if (allowed === null || allowed.includes(id)) {
           result.get(id)?.add(id);
@@ -1666,7 +1719,7 @@ function readAccountIdsForAnalysisEntities({
 
     if (resourceConfig && tableExists(db, resourceConfig.table)) {
       const params = [...ids];
-      const scope = accountScopeClause(resourceConfig.alias, allowedAccountIds, params);
+      const scope = resourceScopeClause(resourceConfig.alias, allowedResourceScope, params, allowedAccountIds, normalizedLevel);
       const rows = db.prepare(`
         SELECT ${resourceConfig.idColumn} AS id, account_id
         FROM ${resourceConfig.table} ${resourceConfig.alias}
@@ -1682,7 +1735,7 @@ function readAccountIdsForAnalysisEntities({
     if (tableExists(db, "insight_rows")) {
       const idColumn = analysisLevelColumns[normalizedLevel];
       const params = [...ids];
-      const scope = accountScopeClause("", allowedAccountIds, params);
+      const scope = resourceScopeClause("", allowedResourceScope, params, allowedAccountIds);
       const rows = db.prepare(`
         SELECT ${idColumn} AS id, account_id
         FROM insight_rows

@@ -22,10 +22,12 @@ const {
 const {
   createUser,
   updateUser,
+  deleteUser,
   resetUserPassword,
   listUsers,
   listAuditEvents,
-  normalizeAccountIds
+  normalizeAccountIds,
+  normalizeResourceScope
 } = require("./authStore");
 const {
   readLatestInsightData,
@@ -2679,7 +2681,7 @@ function buildMarkdownReport({ request, rows, current, previous, board, topEntit
   ].join("\n");
 }
 
-function buildAnalysisReport(request, { allowedAccountIds = null } = {}) {
+function buildAnalysisReport(request, { allowedAccountIds = null, allowedResourceScope = null } = {}) {
   const rows = readInsightRowsForAnalysis({
     databaseFile,
     since: request.since,
@@ -2687,11 +2689,12 @@ function buildAnalysisReport(request, { allowedAccountIds = null } = {}) {
     level: request.level,
     entityIds: request.entityIds,
     accountTimeZones: readRecentAccountTimeZonesCached(),
-    allowedAccountIds
+    allowedAccountIds,
+    allowedResourceScope
   });
   const reportAccountIds = listAccountIdsFromRows(rows);
   if (!reportAccountIds.length && request.entityIds?.length) {
-    reportAccountIds.push(...resolveEntityAccountIds(request.level, request.entityIds, allowedAccountIds));
+    reportAccountIds.push(...resolveEntityAccountIds(request.level, request.entityIds, allowedAccountIds, allowedResourceScope));
   }
   const { previousRows, currentRows } = splitRowsByPeriod(rows, request.since, request.until);
   const current = aggregateInsightRows(currentRows.length ? currentRows : rows);
@@ -2922,7 +2925,8 @@ async function streamReportGeneration(req, res, request) {
     }
 
     const localReport = buildAnalysisReport(request, {
-      allowedAccountIds: allowedAccountIdsForRequest(req)
+      allowedAccountIds: allowedAccountIdsForRequest(req),
+      allowedResourceScope: allowedResourceScopeForRequest(req)
     });
     writeSse(res, "stage", { key: "diagnose", label: "生成诊断与行动项" });
     const report = await callDeepSeekAnalysis(localReport);
@@ -3166,6 +3170,24 @@ function filterRowsByAllowedAccountIds(rows = [], allowedAccountIds = null) {
   return rows.filter((row) => allowed.has(String(row.account_id || row.accountId || "")));
 }
 
+function filterRowsByAllowedResourceScope(rows = [], allowedResourceScope = null, allowedAccountIds = null) {
+  if (allowedResourceScope === null || allowedResourceScope === undefined) {
+    return filterRowsByAllowedAccountIds(rows, allowedAccountIds);
+  }
+  const accountIds = new Set((allowedResourceScope.accountIds || allowedAccountIds || []).map((id) => String(id)));
+  if (!accountIds.size) return [];
+  const campaignIds = new Set((allowedResourceScope.campaignIds || []).map((id) => String(id)));
+  const adsetIds = new Set((allowedResourceScope.adsetIds || []).map((id) => String(id)));
+  const adIds = new Set((allowedResourceScope.adIds || []).map((id) => String(id)));
+  return rows.filter((row) => {
+    if (!accountIds.has(String(row.account_id || row.accountId || ""))) return false;
+    if (adIds.size) return adIds.has(String(row.ad_id || row.adId || ""));
+    if (adsetIds.size) return adsetIds.has(String(row.adset_id || row.adsetId || ""));
+    if (campaignIds.size) return campaignIds.has(String(row.campaign_id || row.campaignId || ""));
+    return true;
+  });
+}
+
 function emptyLatestAdsPayload({ dashboardShape = false, source = "scope:empty" } = {}) {
   return {
     ok: true,
@@ -3184,14 +3206,14 @@ function emptyLatestAdsPayload({ dashboardShape = false, source = "scope:empty" 
   };
 }
 
-function sendLatestAdsData(res, { dashboardShape = false, allowedAccountIds = null } = {}) {
+function sendLatestAdsData(res, { dashboardShape = false, allowedAccountIds = null, allowedResourceScope = null } = {}) {
   if (Array.isArray(allowedAccountIds) && allowedAccountIds.length === 0) {
     writeJson(res, 200, emptyLatestAdsPayload({ dashboardShape }));
     return;
   }
   const accountTimeZones = readRecentAccountTimeZonesCached();
   try {
-    const latestFromDb = readLatestInsightData({ databaseFile, accountTimeZones, allowedAccountIds });
+    const latestFromDb = readLatestInsightData({ databaseFile, accountTimeZones, allowedAccountIds, allowedResourceScope });
     if (latestFromDb?.rows?.length) {
       const rows = dashboardShape ? toDashboardInsightValueRows(latestFromDb.rows) : latestFromDb.rows;
       writeJson(res, 200, {
@@ -3233,7 +3255,7 @@ function sendLatestAdsData(res, { dashboardShape = false, allowedAccountIds = nu
 
   try {
     const enriched = enrichInsightRowsWithTimeZone(latest.rows, accountTimeZones);
-    const scopedRows = filterRowsByAllowedAccountIds(enriched.rows, allowedAccountIds);
+    const scopedRows = filterRowsByAllowedResourceScope(enriched.rows, allowedResourceScope, allowedAccountIds);
     const rows = dashboardShape ? toDashboardInsightValueRows(scopedRows) : scopedRows;
     writeJson(res, 200, {
       ok: true,
@@ -3452,7 +3474,8 @@ function handleAlertEntityRoutes(req, res, url) {
       level,
       search,
       limit,
-      allowedAccountIds: allowedAccountIdsForRequest(req)
+      allowedAccountIds: allowedAccountIdsForRequest(req),
+      allowedResourceScope: allowedResourceScopeForRequest(req)
     });
     writeJson(res, 200, {
       ok: true,
@@ -3570,6 +3593,7 @@ function apiPolicyFor(method, pathname) {
     { method: "GET", pattern: /^\/api\/admin\/users$/, permission: "users.manage" },
     { method: "POST", pattern: /^\/api\/admin\/users$/, permission: "users.manage" },
     { method: "PUT", pattern: /^\/api\/admin\/users\/[^/]+$/, permission: "users.manage" },
+    { method: "DELETE", pattern: /^\/api\/admin\/users\/[^/]+$/, permission: "users.manage" },
     { method: "POST", pattern: /^\/api\/admin\/users\/[^/]+\/password$/, permission: "users.manage" },
     { method: "GET", pattern: /^\/api\/admin\/audit-events$/, permission: "audit.read" }
   ];
@@ -3601,7 +3625,24 @@ function isAdminRequest(req) {
 }
 
 function allowedAccountIdsForRequest(req) {
+  if (req.auth?.allowedResourceScope === null) return null;
+  if (req.auth?.allowedResourceScope) return req.auth.allowedResourceScope.accountIds || [];
   return isAdminRequest(req) ? null : req.auth?.allowedAccountIds || [];
+}
+
+function allowedResourceScopeForRequest(req) {
+  if (req.auth?.allowedResourceScope === null) return null;
+  if (req.auth?.allowedResourceScope) return req.auth.allowedResourceScope;
+  return {
+    accountIds: allowedAccountIdsForRequest(req),
+    campaignIds: [],
+    adsetIds: [],
+    adIds: []
+  };
+}
+
+function hasFullResourceAccess(req) {
+  return allowedResourceScopeForRequest(req) === null;
 }
 
 function listAccountIdsFromRows(rows = []) {
@@ -3609,7 +3650,7 @@ function listAccountIdsFromRows(rows = []) {
 }
 
 function reportVisibleToRequest(req, report) {
-  if (isAdminRequest(req)) return true;
+  if (hasFullResourceAccess(req)) return true;
   const allowed = new Set(allowedAccountIdsForRequest(req));
   if (!allowed.size) return false;
   const accountIds = Array.isArray(report.accountIds)
@@ -3619,7 +3660,7 @@ function reportVisibleToRequest(req, report) {
 }
 
 function recordVisibleToRequest(req, record) {
-  if (isAdminRequest(req)) return true;
+  if (hasFullResourceAccess(req)) return true;
   const allowed = new Set(allowedAccountIdsForRequest(req));
   if (!allowed.size) return false;
   const accountIds = Array.isArray(record.account_ids)
@@ -3628,25 +3669,27 @@ function recordVisibleToRequest(req, record) {
   return accountIds.some((accountId) => allowed.has(String(accountId)));
 }
 
-function resolveEntityAccountIds(level, entityIds, allowedAccountIds = null) {
+function resolveEntityAccountIds(level, entityIds, allowedAccountIds = null, allowedResourceScope = null) {
   const accountIdsByEntity = readAccountIdsForAnalysisEntities({
     databaseFile,
     level,
     entityIds,
-    allowedAccountIds
+    allowedAccountIds,
+    allowedResourceScope
   });
   return [...new Set([...accountIdsByEntity.values()].flatMap((ids) => [...ids]))];
 }
 
 function assertEntityScopeForRequest(req, request) {
-  if (isAdminRequest(req)) return;
+  if (hasFullResourceAccess(req)) return;
   const ids = Array.isArray(request.entityIds) ? request.entityIds : [];
   if (!ids.length) return;
   const accountIdsByEntity = readAccountIdsForAnalysisEntities({
     databaseFile,
     level: request.level,
     entityIds: ids,
-    allowedAccountIds: allowedAccountIdsForRequest(req)
+    allowedAccountIds: allowedAccountIdsForRequest(req),
+    allowedResourceScope: allowedResourceScopeForRequest(req)
   });
   const denied = ids.filter((id) => !accountIdsByEntity.get(String(id))?.size);
   if (denied.length) {
@@ -3658,13 +3701,16 @@ function assertEntityScopeForRequest(req, request) {
 }
 
 function normalizeAdminUserPayload(payload = {}) {
+  const accountIds = normalizeAccountIds(payload.accountIds || payload.account_ids || []);
+  const resourceScope = normalizeResourceScope(payload.resourceScope || payload.resource_scope || {}, accountIds);
   return {
     username: String(payload.username || "").trim(),
     password: String(payload.password || ""),
     displayName: String(payload.displayName || payload.display_name || "").trim(),
     role: payload.role === "admin" ? "admin" : "user",
     status: payload.status === "disabled" ? "disabled" : "active",
-    accountIds: normalizeAccountIds(payload.accountIds || payload.account_ids || [])
+    accountIds: resourceScope.accountIds,
+    resourceScope
   };
 }
 
@@ -3689,7 +3735,10 @@ function handleAdminRoutes(req, res, url) {
             username: user.username,
             role: user.role,
             status: user.status,
-            accountCount: user.accountIds.length
+            accountCount: user.accountIds.length,
+            campaignCount: user.resourceScope?.campaignIds?.length || 0,
+            adsetCount: user.resourceScope?.adsetIds?.length || 0,
+            adCount: user.resourceScope?.adIds?.length || 0
           }
         });
         writeJson(res, 201, {
@@ -3710,7 +3759,8 @@ function handleAdminRoutes(req, res, url) {
           displayName: payload.displayName,
           role: payload.role,
           status: payload.status,
-          accountIds: payload.accountIds
+          accountIds: payload.accountIds,
+          resourceScope: payload.resourceScope
         });
         audit(req, "users.update", {
           targetType: "user",
@@ -3719,7 +3769,10 @@ function handleAdminRoutes(req, res, url) {
             username: user.username,
             role: user.role,
             status: user.status,
-            accountCount: user.accountIds.length
+            accountCount: user.accountIds.length,
+            campaignCount: user.resourceScope?.campaignIds?.length || 0,
+            adsetCount: user.resourceScope?.adsetIds?.length || 0,
+            adCount: user.resourceScope?.adIds?.length || 0
           }
         });
         writeJson(res, 200, {
@@ -3728,6 +3781,39 @@ function handleAdminRoutes(req, res, url) {
         });
       })
       .catch((error) => writeApiError(res, error, "update_user_failed"));
+    return true;
+  }
+
+  if (userMatch && req.method === "DELETE") {
+    Promise.resolve()
+      .then(() => {
+        const userId = decodeURIComponent(userMatch[1]);
+        if (req.auth?.user?.id === userId) {
+          const error = new Error("不能删除当前登录管理员账号");
+          error.statusCode = 409;
+          error.code = "cannot_delete_self";
+          throw error;
+        }
+        const user = deleteUser(userId);
+        audit(req, "users.delete", {
+          targetType: "user",
+          targetId: user.id,
+          metadata: {
+            username: user.username,
+            role: user.role,
+            status: user.status,
+            accountCount: user.accountIds.length,
+            campaignCount: user.resourceScope?.campaignIds?.length || 0,
+            adsetCount: user.resourceScope?.adsetIds?.length || 0,
+            adCount: user.resourceScope?.adIds?.length || 0
+          }
+        });
+        writeJson(res, 200, {
+          ok: true,
+          user
+        });
+      })
+      .catch((error) => writeApiError(res, error, "delete_user_failed"));
     return true;
   }
 
@@ -3880,7 +3966,8 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/fb-ads/latest") {
     sendLatestAdsData(res, {
       dashboardShape: url.searchParams.get("shape") === "dashboard",
-      allowedAccountIds: allowedAccountIdsForRequest(req)
+      allowedAccountIds: allowedAccountIdsForRequest(req),
+      allowedResourceScope: allowedResourceScopeForRequest(req)
     });
     return;
   }
