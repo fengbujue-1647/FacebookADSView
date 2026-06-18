@@ -11,6 +11,11 @@
     "auth:create-admin": "node scripts/create-admin.js",
     "auth:reset-admin-password": "node scripts/create-admin.js --reset-password",
     "service:install": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/install-windows-service.ps1 -Start",
+    "service:status": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/manage-windows-service.ps1 -Action status",
+    "service:start": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/manage-windows-service.ps1 -Action start",
+    "service:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/manage-windows-service.ps1 -Action stop",
+    "service:restart": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/manage-windows-service.ps1 -Action restart",
+    "service:global": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-zai-service-command.ps1",
     "service:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/uninstall-windows-service.ps1",
     "cli:install": "npm --prefix cli install",
     "cli:doctor": "npm --prefix cli run doctor",
@@ -40,6 +45,7 @@
   },
   "dependencies": {
     "echarts": "^6.0.0",
+    "nodemailer": "^9.0.1",
     "three": "^0.184.0",
     "tom-select": "^2.6.1"
   }

@@ -97,7 +97,7 @@ async function apiFetch(url, options = {}) {
   });
   if (response.status === 401) {
     setAuth({});
-    renderLogin("登录已过期，请重新登录");
+    redirectToPlatformLogin("/admin");
     throw new Error("请先登录");
   }
   if (response.status === 403) {
@@ -110,6 +110,11 @@ async function apiFetch(url, options = {}) {
 }
 
 window.apiFetch = apiFetch;
+
+function redirectToPlatformLogin(returnPath = window.location.pathname + window.location.search) {
+  const safePath = String(returnPath || "/admin");
+  window.location.href = `/login.html?return=${encodeURIComponent(safePath)}`;
+}
 
 async function jsonFetch(url, options = {}) {
   const response = await apiFetch(url, options);
@@ -160,7 +165,7 @@ async function logout() {
     // local state is cleared regardless of network result
   }
   setAuth({});
-  renderLogin();
+  redirectToPlatformLogin("/admin");
 }
 
 function formValue(form, name) {
@@ -311,8 +316,8 @@ function adminShell(content) {
             </button>
           `).join("")}
         </nav>
+        <a class="secondary-button admin-side-link" href="/console.html">平台工作台</a>
         <a class="secondary-button admin-side-link" href="/ads">广告看板</a>
-        <a class="secondary-button admin-side-link" href="/">首页</a>
       </aside>
       <main class="admin-workspace">
         <header class="topbar admin-topbar">
@@ -881,7 +886,7 @@ function bindAuditEvents() {
 async function init() {
   const authenticated = await loadAuth();
   if (!authenticated) {
-    renderLogin();
+    redirectToPlatformLogin("/admin");
     return;
   }
   await continueAfterAuth();

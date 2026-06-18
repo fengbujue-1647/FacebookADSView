@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 | 智在 AI 工作台</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=20260611-4">
+  <link rel="alternate icon" type="image/png" href="/favicon.png?v=20260611-4">
+  <link rel="stylesheet" href="/styles.css?v=20260616-admin3">
+  <link rel="stylesheet" href="/platform.css?v=20260618-register-email">
+</head>
+<body class="platform-page platform-login-page">
+  <main class="platform-shell" data-platform-root>
+    <section class="platform-login-layout">
+      <section class="auth-panel platform-auth-card" aria-labelledby="loginTitle">
+        <div class="auth-brand">
+          <img src="/favicon.svg?v=20260611-4" alt="">
+          <div>
+            <strong>智在 AI</strong>
+            <span>账号入口</span>
+          </div>
+        </div>
+        <div class="segmented platform-auth-tabs" role="tablist" aria-label="账号入口">
+          <button class="segment active" type="button" data-auth-mode="login">登录</button>
+          <button class="segment" type="button" data-auth-mode="register">注册</button>
+        </div>
+        <form class="auth-form" data-login-form data-auth-panel="login">
+          <h2 id="loginTitle">登录</h2>
+          <label>
+            <span>账号</span>
+            <input name="username" autocomplete="username" required placeholder="用户名或邮箱">
+          </label>
+          <label>
+            <span>密码</span>
+            <input name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <p class="platform-message" data-platform-message aria-live="polite"></p>
+          <button class="primary-button" type="submit" data-login-submit>登录</button>
+        </form>
+
+        <form class="auth-form" data-register-form data-auth-panel="register" hidden>
+          <h2>注册</h2>
+          <label>
+            <span>邮箱</span>
+            <input name="email" type="email" autocomplete="email" required>
+          </label>
+          <label>
+            <span>验证码</span>
+            <div class="platform-code-row">
+              <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+              <button class="secondary-button" type="button" data-register-code>发送验证码</button>
+            </div>
+          </label>
+          <label>
+            <span>密码</span>
+            <input name="password" type="password" autocomplete="new-password" minlength="10" required>
+          </label>
+          <p class="platform-message" data-register-message aria-live="polite"></p>
+          <button class="primary-button" type="submit" data-register-submit>注册</button>
+        </form>
+        <div class="platform-panel-foot">
+          <a href="/">返回首页</a>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script defer src="/platform.js?v=20260618-register-email"></script>
+</body>
+</html>
