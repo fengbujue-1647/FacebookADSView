@@ -10,6 +10,7 @@ const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
   || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const isNarrowViewport = window.matchMedia?.("(max-width: 759px)")?.matches ?? window.innerWidth < 760;
 const supportsPointerFollow = window.matchMedia?.("(pointer: fine)")?.matches && !isIOS && !isNarrowViewport;
+let isDarkTheme = document.documentElement.dataset.theme === "dark";
 
 if (mount && !reduceMotion) {
   mount.dataset.cubeRenderer = "gpu-instanced";
@@ -46,7 +47,7 @@ if (mount && !reduceMotion) {
 
   const color = new THREE.Color();
   const colorA = new THREE.Color(0xffffff);
-  const colorB = new THREE.Color(0xdde8ff);
+  const colorB = new THREE.Color(0xd7e4ff);
 
   for (let index = 0; index < cubeCount; index += 1) {
     const x = index % blockSide;
@@ -236,8 +237,8 @@ void main() {
 
   const timeUniform = { value: 0 };
   const progressUniform = { value: 0 };
-  const cubeOpacityUniform = { value: 0.38 };
-  const edgeOpacityUniform = { value: 0.12 };
+  const cubeOpacityUniform = { value: 0.46 };
+  const edgeOpacityUniform = { value: 0.18 };
 
   const boxGeometry = new THREE.BoxGeometry(unitSize, unitSize, unitSize);
   const cubeGeometry = createInstancedGeometry(boxGeometry, ["position", "normal"]);
@@ -306,6 +307,12 @@ void main() {
   let startedAtMs = 0;
   let lastFrameTime = 0;
   let isRunning = false;
+
+  function syncThemeColors() {
+    isDarkTheme = document.documentElement.dataset.theme === "dark";
+    shellMaterial.color.set(isDarkTheme ? 0x25436f : 0xf8fbff);
+    shellEdgeMaterial.color.set(isDarkTheme ? 0x7fb0ff : 0x0052d9);
+  }
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
@@ -386,10 +393,10 @@ void main() {
 
     timeUniform.value = time;
     progressUniform.value = t;
-    cubeOpacityUniform.value = 0.33 + blockPresence * 0.12;
-    edgeOpacityUniform.value = 0.12 * (1 - blockPresence) + 0.045 * blockPresence;
-    shellMaterial.opacity = blockPresence * 0.045;
-    shellEdgeMaterial.opacity = blockPresence * 0.14;
+    cubeOpacityUniform.value = (isDarkTheme ? 0.42 : 0.42) + blockPresence * (isDarkTheme ? 0.18 : 0.16);
+    edgeOpacityUniform.value = (isDarkTheme ? 0.2 : 0.18) * (1 - blockPresence) + (isDarkTheme ? 0.12 : 0.075) * blockPresence;
+    shellMaterial.opacity = blockPresence * (isDarkTheme ? 0.08 : 0.06);
+    shellEdgeMaterial.opacity = blockPresence * (isDarkTheme ? 0.22 : 0.18);
 
     const assembledWeight = smoothProgress;
     const globalTurn = elapsedTime * GLOBAL_ROTATION_SPEED;
@@ -436,6 +443,7 @@ void main() {
   }
 
   resize();
+  syncThemeColors();
   updateScrollProgress();
   const observer = new ResizeObserver(handleResize);
   observer.observe(mount);
@@ -444,6 +452,11 @@ void main() {
   if (supportsPointerFollow) {
     window.addEventListener("pointermove", handlePointer, { passive: true });
   }
+  const themeObserver = new MutationObserver(syncThemeColors);
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme"]
+  });
   renderer.domElement.addEventListener("webglcontextlost", handleContextLost, false);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
@@ -466,6 +479,7 @@ void main() {
     if (supportsPointerFollow) {
       window.removeEventListener("pointermove", handlePointer);
     }
+    themeObserver.disconnect();
     renderer.domElement.removeEventListener("webglcontextlost", handleContextLost);
     observer.disconnect();
     renderer.dispose();
