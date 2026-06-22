@@ -71,6 +71,9 @@ const RESOURCE_SELECTED_PAGE_SIZE = 8;
 const COLLECTION_PAGE_SIZE = 50;
 const COLLECTION_REFRESH_INTERVAL_MS = 2000;
 const MONITOR_STATUS_REFRESH_INTERVAL_MS = 15000;
+const HOT_SUMMARY_WINDOW_HOURS = 72;
+const FULL_ROWS_PAGE_SIZE = 500;
+const FULL_ROWS_MAX_PAGES = 200;
 
 const state = {
   appReady: false,
@@ -150,6 +153,9 @@ const state = {
   settingsLoading: false,
   settingsLoadPromise: null,
   settingsMessage: "",
+  usingSummaryRows: false,
+  fullRowsLoaded: false,
+  fullRowsLoading: false,
   samplingSettings: {
     campaignMonitor: {
       enabled: true,
@@ -423,9 +429,10 @@ function setAuthState(payload = {}) {
 }
 
 async function apiFetch(url, options = {}) {
+  const { __csrfRetry, ...fetchOptions } = options;
   const method = String(options.method || "GET").toUpperCase();
   const headers = {
-    ...(options.headers || {})
+    ...(fetchOptions.headers || {})
   };
   if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
     headers["X-CSRF-Token"] = state.auth.csrfToken;
@@ -433,7 +440,7 @@ async function apiFetch(url, options = {}) {
   const response = await nativeFetch(url, {
     cache: "no-store",
     credentials: "same-origin",
-    ...options,
+    ...fetchOptions,
     headers
   });
   if (response.status === 401) {
@@ -442,6 +449,16 @@ async function apiFetch(url, options = {}) {
     throw new Error("请先登录");
   }
   if (response.status === 403) {
+    const payload = await response.clone().json().catch(() => ({}));
+    if (payload.error === "csrf_invalid" && !__csrfRetry) {
+      const refreshed = await loadAuthSession();
+      if (refreshed) {
+        return apiFetch(url, {
+          ...fetchOptions,
+          __csrfRetry: true
+        });
+      }
+    }
     throw new Error("当前账号没有权限执行该操作");
   }
   return response;
@@ -2775,37 +2792,87 @@ async function saveSettings() {
   }
 }
 
-async function loadCollectedRows() {
-  try {
-    const response = await apiFetch("/api/fb-ads/latest?shape=dashboard", { cache: "no-store" });
-    if (!response.ok) return null;
-    const payload = await response.json();
-    if (!payload.ok || !Array.isArray(payload.rows)) return null;
-    if (payload.rows.length === 0) {
+function rowsFromAdsPayload(payload, { updateSource = true } = {}) {
+  if (!payload?.ok || !Array.isArray(payload.rows)) return null;
+  if (payload.rows.length === 0) {
+    if (updateSource) {
       dataSourceName.textContent = payload.storage === "sqlite" ? "SQLite Insights" : "Collected Insights";
       dataSourceMeta.textContent = "0 行";
-      return [];
     }
+    return [];
+  }
 
-    const rows = payload.shape === "dashboard_columns"
-      ? mapDashboardColumnRows(payload.rows, payload.columns)
-      : payload.shape === "dashboard"
-        ? payload.rows.filter((row) => Number.isFinite(row.timestamp))
+  const rows = payload.shape === "dashboard_columns"
+    ? mapDashboardColumnRows(payload.rows, payload.columns)
+    : payload.shape === "dashboard"
+      ? payload.rows.filter((row) => Number.isFinite(row.timestamp))
       : payload.rows.map(mapCollectedRow).filter((row) => Number.isFinite(row.timestamp));
-    if (rows.length === 0) return [];
+  if (rows.length === 0) return [];
 
-    if (payload.metadata?.granularity === "hour" || payload.rows.some((row) => row.hour_start)) {
-      state.granularity = "hour";
-    }
+  if (payload.metadata?.granularity === "hour" || payload.rows.some((row) => row.hour_start)) {
+    state.granularity = "hour";
+  }
+  if (updateSource) {
     applyCampaignsFromRows(rows);
     dataSourceName.textContent = payload.storage === "sqlite" ? "SQLite Insights" : "Collected Insights";
     const rowText = `${rows.length.toLocaleString("en-US")} 行`;
     const updateText = payload.updated_at ? `更新于 ${formatInstantInDisplayTimeZone(payload.updated_at)}` : payload.source;
-    dataSourceMeta.textContent = [rowText, updateText].filter(Boolean).join(" · ");
-    return rows;
+    const hotText = payload.metadata?.read_mode === "hot_summary_rows"
+      ? `近 ${payload.metadata.window_hours || HOT_SUMMARY_WINDOW_HOURS} 小时热数据`
+      : "";
+    dataSourceMeta.textContent = [rowText, updateText, hotText].filter(Boolean).join(" · ");
+  }
+  return rows;
+}
+
+async function loadAdsPayload(url) {
+  try {
+    const response = await apiFetch(url, { cache: "no-store" });
+    if (!response.ok) return null;
+    return await response.json();
   } catch {
     return null;
   }
+}
+
+async function loadRowsFromEndpoint(url) {
+  const payload = await loadAdsPayload(url);
+  return rowsFromAdsPayload(payload);
+}
+
+async function loadCollectedRows() {
+  const summaryRows = await loadRowsFromEndpoint(`/api/fb-ads/summary?shape=dashboard&window_hours=${HOT_SUMMARY_WINDOW_HOURS}`);
+  if (summaryRows) {
+    state.usingSummaryRows = true;
+    state.fullRowsLoaded = false;
+    return summaryRows;
+  }
+  const rows = await loadRowsFromEndpoint("/api/fb-ads/latest?shape=dashboard");
+  state.usingSummaryRows = false;
+  state.fullRowsLoaded = Boolean(rows);
+  return rows;
+}
+
+async function loadFullRows() {
+  const rows = [];
+  let latestPayload = null;
+  for (let page = 1; page <= FULL_ROWS_MAX_PAGES; page += 1) {
+    const payload = await loadAdsPayload(`/api/fb-ads/rows?shape=dashboard&page=${page}&page_size=${FULL_ROWS_PAGE_SIZE}`);
+    if (!payload?.ok) return null;
+    latestPayload = payload;
+    rows.push(...rowsFromAdsPayload(payload, { updateSource: false }));
+    if (!payload.page?.has_more) break;
+  }
+  if (!latestPayload) return null;
+  applyCampaignsFromRows(rows);
+  dataSourceName.textContent = latestPayload.storage === "sqlite" ? "SQLite Insights" : "Collected Insights";
+  const total = Number(latestPayload.page?.total || rows.length);
+  const rowText = `${rows.length.toLocaleString("en-US")} / ${total.toLocaleString("en-US")} 行`;
+  const updateText = latestPayload.updated_at ? `更新于 ${formatInstantInDisplayTimeZone(latestPayload.updated_at)}` : latestPayload.source;
+  dataSourceMeta.textContent = [rowText, updateText, "分页完整明细"].filter(Boolean).join(" · ");
+  state.usingSummaryRows = false;
+  state.fullRowsLoaded = true;
+  return rows;
 }
 
 function deriveMetrics(row) {
@@ -2871,6 +2938,32 @@ function getFilteredRows() {
     }
     return true;
   });
+}
+
+function selectedRangeNeedsFullRows() {
+  if (!state.usingSummaryRows || state.fullRowsLoaded || state.fullRowsLoading || rawRows.length === 0) {
+    return false;
+  }
+  const bounds = selectedRangeBounds();
+  if (!bounds) return false;
+  const minTimestamp = Math.min(...rawRows.map((row) => row.timestamp));
+  return Number.isFinite(minTimestamp) && bounds.from.getTime() < minTimestamp - MS_HOUR;
+}
+
+function ensureFullRowsLoaded() {
+  if (!selectedRangeNeedsFullRows()) return;
+  state.fullRowsLoading = true;
+  dataSourceMeta.textContent = `${dataSourceMeta.textContent} · 正在加载完整明细`;
+  loadFullRows()
+    .then((rows) => {
+      if (!rows) return;
+      rawRows = rows;
+      renderFilters();
+      renderDashboard();
+    })
+    .finally(() => {
+      state.fullRowsLoading = false;
+    });
 }
 
 function aggregateByTime(rows) {
@@ -4036,6 +4129,7 @@ function clearAdDrilldown() {
 function renderDashboard() {
   coerceGranularity();
   syncGranularityButtons();
+  ensureFullRowsLoaded();
   const rows = getFilteredRows();
   const timePoints = aggregateByTime(rows);
   const baseRows = state.selectedAdId

@@ -8,6 +8,7 @@ data/
 .cache/
 logs/
 artifacts/
+docs/git-update-report-*.md
 cli/config/monitored-accounts.json
 cli/config/sampling-plans.json
 *.log

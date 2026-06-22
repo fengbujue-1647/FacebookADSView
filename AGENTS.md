@@ -336,6 +336,13 @@ Always 先理解这些目录职责，再修改代码：
   - Always 邮箱验证码注册使用成熟邮件库和显式 SMTP 配置；未配置时返回可解释错误，不伪造发送成功，不手写脆弱 SMTP。
   - Always 外部邮件服务商错误必须转成中文业务提示；Never 把 Resend/SMTP 原始英文 550、认证失败或连接失败直接展示给注册用户。
   - Never 为登录/注册单独引入新 UI 框架或做成 landing page，除非用户明确要求。
+- Auth state:
+  - Always 当前登录热路径优先使用 HttpOnly 签名 Cookie 校验；普通业务 API 不应每次请求读写 `data/auth.sqlite` 的 session 表。
+  - Always 登录、注册时才读取用户库并签发新的 `id` 签名 Cookie 与 CSRF token；`/api/auth/me` 和普通业务 API 只校验签名、过期时间和 CSRF。
+  - Always 将签名 token 的登出撤销、用户禁用、删号和重置密码失效状态持久化在 ignored 数据文件中，避免服务重启后旧 token 复活。
+  - Always 保留管理员 PIN 保护设置、采集、用户管理、环境变量等高风险操作。
+  - Prefer 通过 `AUTH_SIGNED_COOKIE_TTL_MS` / `AUTH_SIGNED_COOKIE_REFRESH_MS` 调整长期登录体验，并在生产环境显式配置 `AUTH_SIGNED_COOKIE_SECRET`。
+  - Never 为了“刷新 last_seen_at”让所有 GET API 争抢 SQLite 写锁；如果后续恢复服务端 session，也必须使用内存优先或限流批量写入。
 - Status tags:
   - Always 使用 `.status-pill`、`.run-badge`、`.env-badge` 这类小标签。
   - Always 成功绿、运行蓝、等待/重试琥珀、失败红、暂停红或中性灰。
@@ -464,6 +471,15 @@ Always 先理解这些目录职责，再修改代码：
 - Wrong pattern: 静默使用 demo rows，不突出数据源状态。
 - Correct pattern: 明确显示数据源、fallback 原因和接口错误；生产模式可禁用 demo fallback。
 - Future rule: Always 标明当前数据是真实采集、JSON fallback 还是 demo。
+
+### Avoid: 首屏加载全量广告明细导致 TTFB 过高
+
+- Status: Confirmed issue.
+- Symptom: `/ads` 首屏加载需要数秒，用户看到图表迟迟不显示；实测慢点集中在 `/api/fb-ads/latest?shape=dashboard` 返回 2 万多行、约 7MB 数据。
+- Cause: 首屏为了画 KPI 和时间分布图，一次性读取、转换、压缩并返回最近 14 天全量明细，再由前端重新聚合。
+- Wrong pattern: 页面初始化直接 `fetch("/api/fb-ads/latest?shape=dashboard")`，把明细接口当首屏聚合接口用。
+- Correct pattern: 首屏先请求 `/api/fb-ads/summary?shape=dashboard&window_hours=72`，只返回近 3 天热数据；完整明细通过 `/api/fb-ads/rows?page=...&page_size=...` 分页或用户选择更长时间窗口时按需加载。
+- Future rule: 数据看板首屏必须优先返回聚合/热数据；Never 让首屏为了一个图表搬运全量明细。热数据内存缓存必须有 TTL、最大条目数和数据源变更失效条件。
 
 ### Avoid: 手写路由文件过大导致漏改
 

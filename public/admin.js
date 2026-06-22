@@ -204,9 +204,10 @@ function setAuth(payload = {}) {
 }
 
 async function apiFetch(url, options = {}) {
+  const { __csrfRetry, ...fetchOptions } = options;
   const method = String(options.method || "GET").toUpperCase();
   const headers = {
-    ...(options.headers || {})
+    ...(fetchOptions.headers || {})
   };
   if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
     headers["X-CSRF-Token"] = state.csrfToken;
@@ -214,7 +215,7 @@ async function apiFetch(url, options = {}) {
   const response = await nativeFetch(url, {
     credentials: "same-origin",
     cache: "no-store",
-    ...options,
+    ...fetchOptions,
     headers
   });
   if (response.status === 401) {
@@ -224,6 +225,15 @@ async function apiFetch(url, options = {}) {
   }
   if (response.status === 403) {
     const payload = await response.clone().json().catch(() => ({}));
+    if (payload.error === "csrf_invalid" && !__csrfRetry) {
+      const refreshed = await loadAuth();
+      if (refreshed) {
+        return apiFetch(url, {
+          ...fetchOptions,
+          __csrfRetry: true
+        });
+      }
+    }
     if (payload.error === "admin_pin_required" || payload.error === "admin_pin_not_configured") {
       renderPin(payload.message || "需要先完成管理员 PIN 校验");
     }

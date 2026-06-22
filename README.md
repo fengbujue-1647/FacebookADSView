@@ -93,14 +93,16 @@ $env:ADMIN_PAGE_PIN="123456"
 
 生产或 cloudflared 隧道域名暴露前，建议改用 `ADMIN_PAGE_PIN_HASH` 并显式设置 `ADMIN_PAGE_PIN_SECRET`。未配置 PIN 时，管理员页只会提示服务端缺少 PIN 配置，不会放行到管理系统。
 
-认证数据保存在 `data/auth.sqlite`，不提交 Git。密码使用慢哈希保存，浏览器只持有 HttpOnly session Cookie；所有写操作会自动携带并校验 CSRF token。管理员可以访问设置、采集队列、预警模板管理、用户管理和审计日志；普通用户只能查看分配到账户范围内的数据和报告。
+认证数据保存在 `data/auth.sqlite`，不提交 Git。密码使用慢哈希保存；登录成功后浏览器持有 HttpOnly 签名登录 Cookie，普通业务 API 只校验签名和过期时间，不再每次请求读写 SQLite session。签名 token 的登出撤销、用户禁用、删号和重置密码失效状态保存在 `data/auth-token-state.json`，同样不提交 Git。所有写操作会自动携带并校验签名 token 内的 CSRF token。管理员可以访问设置、采集队列、预警模板管理、用户管理和审计日志；普通用户只能查看分配到账户范围内的数据和报告。
+
+签名登录 Cookie 默认有效期 30 天，可通过 `AUTH_SIGNED_COOKIE_TTL_MS` 或兼容变量 `AUTH_TOKEN_TTL_MS` 调整；距离过期不足 7 天时会滑动续期，可通过 `AUTH_SIGNED_COOKIE_REFRESH_MS` 或 `AUTH_TOKEN_REFRESH_MS` 调整。生产环境建议显式配置 `AUTH_SIGNED_COOKIE_SECRET` 或 `AUTH_TOKEN_SECRET`，否则会回退到管理员 PIN secret/hash 或本地默认 secret。
 
 上线或局域网多人访问前，必须确认：
 
 - 不要把 Node 服务裸露到公网；远程访问应放在 HTTPS 反向代理或 VPN 后面。
 - 如果 `HOST=0.0.0.0`，必须先创建管理员并验证未登录业务 API 返回 401。
 - 配置 `ADMIN_PAGE_PIN` 或 `ADMIN_PAGE_PIN_HASH`，并确认 `/admin` 未通过 PIN 时不能访问任何管理数据。
-- 不提交 `data/auth.sqlite`、`.env`、采集输出、日志、截图和 token cache。
+- 不提交 `data/auth.sqlite`、`data/auth-token-state.json`、`.env`、采集输出、日志、截图和 token cache。
 
 安全验证示例：
 
@@ -248,11 +250,13 @@ npm run cli:sampling-loop -- --mode all --max-cycles 1
 | 接口 | 方法 | 说明 |
 | --- | --- | --- |
 | `/api/health` | GET | 健康检查。 |
-| `/api/auth/login` | POST | 登录账号并签发 HttpOnly session Cookie。 |
+| `/api/auth/login` | POST | 登录账号并签发 HttpOnly 签名登录 Cookie。 |
 | `/api/auth/register/code` | POST | 向注册邮箱发送 6 位验证码，需要 SMTP 配置。 |
 | `/api/auth/register` | POST | 使用邮箱、验证码和密码注册普通用户并登录。 |
 | `/api/auth/me` | GET | 返回当前登录用户、权限和 CSRF token。 |
-| `/api/fb-ads/latest?shape=dashboard` | GET | 看板数据；优先 SQLite，其次 output JSON，最后 Demo。 |
+| `/api/fb-ads/summary?shape=dashboard&window_hours=72` | GET | 首屏热数据；默认读取近 3 天 SQLite 数据，带 60 秒有界内存缓存。 |
+| `/api/fb-ads/rows?shape=dashboard&page=1&page_size=100` | GET | 广告明细分页数据；用于按需加载完整明细。 |
+| `/api/fb-ads/latest?shape=dashboard` | GET | 完整看板数据；优先 SQLite，其次 output JSON，最后 Demo，保留兼容。 |
 | `/api/monitor/status` | GET | List 1/List 2 最近批次、状态和资源计数。 |
 | `/api/admin/pin/status` | GET | 管理员 PIN 配置和当前浏览器通过状态，不返回 PIN。 |
 | `/api/admin/pin/verify` | POST | 校验管理员 PIN，成功后写入短期 HttpOnly PIN Cookie。 |

@@ -6,6 +6,7 @@ const sqliteBusyTimeoutMs = Math.max(1000, Number.parseInt(process.env.SQLITE_BU
 const sqliteRetryAttempts = Math.max(1, Number.parseInt(process.env.SQLITE_RETRY_ATTEMPTS || "6", 10) || 6);
 const sqliteRetryBaseMs = Math.max(25, Number.parseInt(process.env.SQLITE_RETRY_BASE_MS || "80", 10) || 80);
 const walReadyDatabases = new Set();
+const insightIndexReadyDatabases = new Set();
 
 const insightDbColumns = [
   "date_start",
@@ -62,7 +63,27 @@ function openDatabase(databaseFile) {
     db.exec("PRAGMA journal_mode = WAL;");
     walReadyDatabases.add(key);
   }
+  ensureInsightPerformanceIndexes(db, key);
   return db;
+}
+
+function ensureInsightPerformanceIndexes(db, databaseKey) {
+  if (process.env.DISABLE_INSIGHT_INDEX_AUTO_CREATE === "1" || insightIndexReadyDatabases.has(databaseKey)) {
+    return;
+  }
+  if (!tableExists(db, "insight_rows")) {
+    insightIndexReadyDatabases.add(databaseKey);
+    return;
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_insight_rows_date_scope
+      ON insight_rows(date_start, account_id, campaign_id, adset_id, ad_id);
+    CREATE INDEX IF NOT EXISTS idx_insight_rows_hour_scope
+      ON insight_rows(hour_start, account_id, campaign_id, adset_id, ad_id);
+    CREATE INDEX IF NOT EXISTS idx_insight_rows_updated
+      ON insight_rows(updated_at);
+  `);
+  insightIndexReadyDatabases.add(databaseKey);
 }
 
 function isSqliteBusyError(error) {
@@ -285,6 +306,171 @@ function readLatestInsightData({ databaseFile, limit = 50_000, accountTimeZones 
         }
       },
       rows: enriched.rows
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function latestInsightBatchAndFact(db, { allowedAccountIds = null, allowedResourceScope = null } = {}) {
+  const latestFactParams = [];
+  const latestFactScope = resourceScopeClause("", allowedResourceScope, latestFactParams, allowedAccountIds);
+  const existingColumns = tableColumnSet(db, "insight_rows");
+  const displayTimeExpression = displayTimeOrderExpression(existingColumns);
+  const batch = db.prepare(`
+    SELECT id, source, level, account_ids, row_count, started_at, completed_at, metadata_json
+    FROM sync_batches
+    WHERE completed_at IS NOT NULL AND row_count > 0
+    ORDER BY completed_at DESC
+    LIMIT 1
+  `).get();
+
+  if (!batch) return null;
+
+  const latestFact = db.prepare(`
+    SELECT
+      MAX(date_start) AS max_date,
+      MAX(updated_at) AS max_updated_at,
+      MAX(NULLIF(${displayTimeExpression}, '')) AS max_display_time
+    FROM insight_rows
+    WHERE date_start <> ''
+      ${latestFactScope}
+  `).get(...latestFactParams);
+
+  if (!latestFact?.max_date) return null;
+
+  return {
+    batch,
+    latestFact,
+    displayTimeExpression
+  };
+}
+
+function batchPayload(batch, rows, latestFact, metadataExtra = {}) {
+  const metadata = parseJson(batch.metadata_json, {});
+  return {
+    ...batch,
+    row_count: rows.length,
+    completed_at: latestFact.max_updated_at || batch.completed_at,
+    account_ids: parseJson(batch.account_ids, []),
+    metadata: {
+      ...metadata,
+      latest_fact_date: latestFact.max_date,
+      latest_fact_time: latestFact.max_display_time || latestFact.max_date,
+      source_batch_id: batch.id,
+      source_batch_row_count: batch.row_count,
+      ...metadataExtra
+    }
+  };
+}
+
+function readLatestInsightSummary({
+  databaseFile,
+  windowHours = 72,
+  limit = 12_000,
+  accountTimeZones = new Map(),
+  allowedAccountIds = null,
+  allowedResourceScope = null
+} = {}) {
+  if (!databaseFile || !fs.existsSync(databaseFile)) {
+    return null;
+  }
+
+  const normalizedWindowHours = Math.min(168, Math.max(1, Number.parseInt(windowHours, 10) || 72));
+  const normalizedLimit = Math.min(50_000, Math.max(100, Number.parseInt(limit, 10) || 12_000));
+  const db = openDatabase(databaseFile);
+  try {
+    const latest = latestInsightBatchAndFact(db, { allowedAccountIds, allowedResourceScope });
+    if (!latest) return null;
+
+    const rowParams = [
+      latest.latestFact.max_display_time || latest.latestFact.max_date,
+      `-${Math.max(0, normalizedWindowHours - 1)} hours`
+    ];
+    const rowScope = resourceScopeClause("", allowedResourceScope, rowParams, allowedAccountIds);
+    const rows = db.prepare(`
+      SELECT ${selectableColumns(db, "insight_rows", insightDbColumns).join(", ")}
+      FROM insight_rows
+      WHERE date_start <> ''
+        AND datetime(replace(${latest.displayTimeExpression}, 'T', ' ')) >= datetime(replace(?, 'T', ' '), ?)
+        ${rowScope}
+      ORDER BY COALESCE(NULLIF(hour_start, ''), date_start), campaign_name, adset_name, ad_name
+      LIMIT ?
+    `).all(...rowParams, normalizedLimit);
+    const enriched = enrichInsightRowsWithTimeZone(rows, accountTimeZones);
+
+    return {
+      batch: batchPayload(latest.batch, rows, latest.latestFact, {
+        read_mode: "hot_summary_rows",
+        window_hours: normalizedWindowHours,
+        time_zone_enriched_fields: enriched.enrichedCount
+      }),
+      rows: enriched.rows,
+      page: {
+        limit: normalizedLimit,
+        returned: rows.length
+      }
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function readLatestInsightRowsPage({
+  databaseFile,
+  page = 1,
+  pageSize = 100,
+  accountTimeZones = new Map(),
+  allowedAccountIds = null,
+  allowedResourceScope = null
+} = {}) {
+  if (!databaseFile || !fs.existsSync(databaseFile)) {
+    return null;
+  }
+
+  const normalizedPage = Math.max(1, Number.parseInt(page, 10) || 1);
+  const normalizedPageSize = Math.min(500, Math.max(20, Number.parseInt(pageSize, 10) || 100));
+  const offset = (normalizedPage - 1) * normalizedPageSize;
+  const db = openDatabase(databaseFile);
+  try {
+    const latest = latestInsightBatchAndFact(db, { allowedAccountIds, allowedResourceScope });
+    if (!latest) return null;
+
+    const baseParams = [latest.latestFact.max_date];
+    const baseScope = resourceScopeClause("", allowedResourceScope, baseParams, allowedAccountIds);
+    const total = db.prepare(`
+      SELECT COUNT(*) AS total
+      FROM insight_rows
+      WHERE date_start >= date(?, '-13 day')
+        ${baseScope}
+    `).get(...baseParams)?.total || 0;
+
+    const rowParams = [latest.latestFact.max_date];
+    const rowScope = resourceScopeClause("", allowedResourceScope, rowParams, allowedAccountIds);
+    const rows = db.prepare(`
+      SELECT ${selectableColumns(db, "insight_rows", insightDbColumns).join(", ")}
+      FROM insight_rows
+      WHERE date_start >= date(?, '-13 day')
+        ${rowScope}
+      ORDER BY COALESCE(NULLIF(hour_start, ''), date_start), campaign_name, adset_name, ad_name
+      LIMIT ? OFFSET ?
+    `).all(...rowParams, normalizedPageSize, offset);
+    const enriched = enrichInsightRowsWithTimeZone(rows, accountTimeZones);
+
+    return {
+      batch: batchPayload(latest.batch, rows, latest.latestFact, {
+        read_mode: "paged_recent_fact_rows",
+        total_rows: Number(total || 0),
+        time_zone_enriched_fields: enriched.enrichedCount
+      }),
+      rows: enriched.rows,
+      page: {
+        page: normalizedPage,
+        page_size: normalizedPageSize,
+        total: Number(total || 0),
+        returned: rows.length,
+        has_more: offset + rows.length < Number(total || 0)
+      }
     };
   } finally {
     db.close();
@@ -1755,6 +1941,8 @@ function readAccountIdsForAnalysisEntities({
 
 module.exports = {
   readLatestInsightData,
+  readLatestInsightSummary,
+  readLatestInsightRowsPage,
   readMonitorOverview,
   readCollectionQueueOverview,
   recoverStaleCollectionJobs,

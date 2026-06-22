@@ -993,6 +993,11 @@ body.home-page.is-home-ready .hero-stage {
     --grid-margin: 24px;
   }
 
+  .home-cube-scene {
+    mix-blend-mode: normal;
+    opacity: 0.64;
+  }
+
   .site-nav {
     min-height: 64px;
     grid-template-columns: auto minmax(0, 1fr);

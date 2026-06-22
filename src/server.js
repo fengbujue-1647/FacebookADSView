@@ -8,6 +8,7 @@ const { spawn } = require("node:child_process");
 const {
   handleAuthRoutes,
   applyApiPolicy,
+  invalidateUserAuth,
   parseCookies,
   audit
 } = require("./auth");
@@ -31,6 +32,8 @@ const {
 } = require("./authStore");
 const {
   readLatestInsightData,
+  readLatestInsightSummary,
+  readLatestInsightRowsPage,
   readMonitorOverview,
   readCollectionQueueOverview,
   recoverStaleCollectionJobs,
@@ -3206,6 +3209,171 @@ function emptyLatestAdsPayload({ dashboardShape = false, source = "scope:empty" 
   };
 }
 
+const hotAdsCache = new Map();
+const hotAdsCacheMaxEntries = 8;
+const hotAdsCacheTtlMs = Math.max(15_000, Number.parseInt(process.env.ADS_HOT_CACHE_TTL_MS || "60000", 10) || 60_000);
+
+function databaseMtimeKey(filePath) {
+  try {
+    return String(Math.round(fs.statSync(filePath).mtimeMs));
+  } catch {
+    return "missing";
+  }
+}
+
+function authScopeCacheKey(allowedAccountIds = null, allowedResourceScope = null) {
+  if (allowedResourceScope === null && allowedAccountIds === null) return "full";
+  return JSON.stringify({
+    accounts: allowedAccountIds,
+    scope: allowedResourceScope
+  });
+}
+
+function hotAdsCacheGet(key) {
+  const cached = hotAdsCache.get(key);
+  if (!cached || cached.expiresAt <= Date.now()) {
+    hotAdsCache.delete(key);
+    return null;
+  }
+  hotAdsCache.delete(key);
+  hotAdsCache.set(key, cached);
+  return cached.payload;
+}
+
+function hotAdsCacheSet(key, payload) {
+  hotAdsCache.set(key, {
+    expiresAt: Date.now() + hotAdsCacheTtlMs,
+    payload
+  });
+  while (hotAdsCache.size > hotAdsCacheMaxEntries) {
+    const oldestKey = hotAdsCache.keys().next().value;
+    hotAdsCache.delete(oldestKey);
+  }
+}
+
+function latestAdsPayloadFromDbResult(result, { dashboardShape = false, sourcePrefix = "sqlite" } = {}) {
+  const rows = dashboardShape ? toDashboardInsightValueRows(result.rows) : result.rows;
+  return {
+    ok: true,
+    shape: dashboardShape ? "dashboard_columns" : "raw",
+    columns: dashboardShape ? dashboardInsightColumns : undefined,
+    source: `${sourcePrefix}:${result.batch.source}`,
+    storage: "sqlite",
+    batch: {
+      id: result.batch.id,
+      source: result.batch.source,
+      level: result.batch.level,
+      row_count: result.batch.row_count,
+      completed_at: result.batch.completed_at
+    },
+    updated_at: result.batch.completed_at,
+    display_time_zone: displayTimeZone,
+    metadata: {
+      ...result.batch.metadata,
+      time_zone_enriched_fields: result.batch.metadata.time_zone_enriched_fields || 0,
+      granularity: result.rows.some((row) => row.hour_start || row.hour_start_beijing) ? "hour" : "day"
+    },
+    page: result.page,
+    rows
+  };
+}
+
+function sendLatestAdsSummary(res, url, { dashboardShape = false, allowedAccountIds = null, allowedResourceScope = null } = {}) {
+  if (Array.isArray(allowedAccountIds) && allowedAccountIds.length === 0) {
+    writeJson(res, 200, emptyLatestAdsPayload({ dashboardShape }));
+    return;
+  }
+  const windowHours = clampInteger(url.searchParams.get("window_hours"), 72, 1, 168);
+  const limit = clampInteger(url.searchParams.get("limit"), 12_000, 100, 50_000);
+  const cacheKey = [
+    "summary",
+    databaseMtimeKey(databaseFile),
+    dashboardShape ? "dashboard" : "raw",
+    windowHours,
+    limit,
+    authScopeCacheKey(allowedAccountIds, allowedResourceScope)
+  ].join("|");
+  const cached = hotAdsCacheGet(cacheKey);
+  if (cached) {
+    writeJson(res, 200, {
+      ...cached,
+      cache: {
+        hit: true,
+        ttl_ms: hotAdsCacheTtlMs
+      }
+    });
+    return;
+  }
+  const accountTimeZones = readRecentAccountTimeZonesCached();
+  try {
+    const summary = readLatestInsightSummary({
+      databaseFile,
+      accountTimeZones,
+      windowHours,
+      limit,
+      allowedAccountIds,
+      allowedResourceScope
+    });
+    if (summary?.rows?.length) {
+      const payload = latestAdsPayloadFromDbResult(summary, {
+        dashboardShape,
+        sourcePrefix: "sqlite-summary"
+      });
+      hotAdsCacheSet(cacheKey, payload);
+      writeJson(res, 200, {
+        ...payload,
+        cache: {
+          hit: false,
+          ttl_ms: hotAdsCacheTtlMs
+        }
+      });
+      return;
+    }
+  } catch (databaseError) {
+    console.warn(`SQLite summary read failed: ${databaseError.message}`);
+  }
+  sendLatestAdsData(res, { dashboardShape, allowedAccountIds, allowedResourceScope });
+}
+
+function sendLatestAdsRowsPage(res, url, { dashboardShape = false, allowedAccountIds = null, allowedResourceScope = null } = {}) {
+  if (Array.isArray(allowedAccountIds) && allowedAccountIds.length === 0) {
+    writeJson(res, 200, {
+      ...emptyLatestAdsPayload({ dashboardShape }),
+      page: {
+        page: 1,
+        page_size: 0,
+        total: 0,
+        returned: 0,
+        has_more: false
+      }
+    });
+    return;
+  }
+  const page = clampInteger(url.searchParams.get("page"), 1, 1, 100_000);
+  const pageSize = clampInteger(url.searchParams.get("page_size"), 100, 20, 500);
+  const accountTimeZones = readRecentAccountTimeZonesCached();
+  try {
+    const result = readLatestInsightRowsPage({
+      databaseFile,
+      page,
+      pageSize,
+      accountTimeZones,
+      allowedAccountIds,
+      allowedResourceScope
+    });
+    if (result) {
+      writeJson(res, 200, latestAdsPayloadFromDbResult(result, {
+        dashboardShape,
+        sourcePrefix: "sqlite-rows"
+      }));
+      return;
+    }
+  } catch (databaseError) {
+    console.warn(`SQLite rows page read failed: ${databaseError.message}`);
+  }
+  writeJson(res, 404, { ok: false, error: "no_collected_data" });
+}
+
 function sendLatestAdsData(res, { dashboardShape = false, allowedAccountIds = null, allowedResourceScope = null } = {}) {
   if (Array.isArray(allowedAccountIds) && allowedAccountIds.length === 0) {
     writeJson(res, 200, emptyLatestAdsPayload({ dashboardShape }));
@@ -3561,6 +3729,8 @@ function apiPolicyFor(method, pathname) {
   const normalizedMethod = String(method || "GET").toUpperCase();
   const policies = [
     { method: "GET", pattern: /^\/api\/fb-ads\/latest$/, permission: "dashboard.read" },
+    { method: "GET", pattern: /^\/api\/fb-ads\/summary$/, permission: "dashboard.read" },
+    { method: "GET", pattern: /^\/api\/fb-ads\/rows$/, permission: "dashboard.read" },
     { method: "GET", pattern: /^\/api\/monitor\/status$/, permission: "collection.read" },
     { method: "GET", pattern: /^\/api\/collection\/queue\/status$/, permission: "collection.read" },
     { method: "POST", pattern: /^\/api\/collection\/queue\/preview$/, permission: "collection.run" },
@@ -3762,6 +3932,7 @@ function handleAdminRoutes(req, res, url) {
           accountIds: payload.accountIds,
           resourceScope: payload.resourceScope
         });
+        invalidateUserAuth(user.id);
         audit(req, "users.update", {
           targetType: "user",
           targetId: user.id,
@@ -3795,6 +3966,7 @@ function handleAdminRoutes(req, res, url) {
           throw error;
         }
         const user = deleteUser(userId);
+        invalidateUserAuth(user.id);
         audit(req, "users.delete", {
           targetType: "user",
           targetId: user.id,
@@ -3823,6 +3995,7 @@ function handleAdminRoutes(req, res, url) {
       .then((body) => {
         const payload = JSON.parse(body || "{}");
         const user = resetUserPassword(decodeURIComponent(passwordMatch[1]), String(payload.password || ""));
+        invalidateUserAuth(user.id);
         audit(req, "users.reset_password", {
           targetType: "user",
           targetId: user.id,
@@ -3965,6 +4138,24 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/fb-ads/latest") {
     sendLatestAdsData(res, {
+      dashboardShape: url.searchParams.get("shape") === "dashboard",
+      allowedAccountIds: allowedAccountIdsForRequest(req),
+      allowedResourceScope: allowedResourceScopeForRequest(req)
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/fb-ads/summary") {
+    sendLatestAdsSummary(res, url, {
+      dashboardShape: url.searchParams.get("shape") === "dashboard",
+      allowedAccountIds: allowedAccountIdsForRequest(req),
+      allowedResourceScope: allowedResourceScopeForRequest(req)
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/fb-ads/rows") {
+    sendLatestAdsRowsPage(res, url, {
       dashboardShape: url.searchParams.get("shape") === "dashboard",
       allowedAccountIds: allowedAccountIdsForRequest(req),
       allowedResourceScope: allowedResourceScopeForRequest(req)

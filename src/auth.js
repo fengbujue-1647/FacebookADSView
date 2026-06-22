@@ -1,10 +1,14 @@
-const { randomInt } = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const { createHmac, randomBytes, randomInt, timingSafeEqual } = require("node:crypto");
 const {
   authenticateUser,
   createUser,
-  createSession,
+  getUserById,
   getUserByEmail,
   getUserByUsername,
+  normalizeResourceScope,
+  permissionsForRole,
   readSession,
   rotateCsrfToken,
   revokeSession,
@@ -15,19 +19,130 @@ const {
 const { clearAdminPinCookie } = require("./adminPin");
 const { sendVerificationCode } = require("./email");
 
+const repoRoot = path.resolve(__dirname, "..");
 const sessionCookieName = "id";
 const csrfCookieName = "csrf";
 const csrfHeaderName = "x-csrf-token";
 const loginBodyLimit = 32 * 1024;
+const signedAuthStateFile = path.join(repoRoot, "data", "auth-token-state.json");
+const signedAuthVersion = 2;
+const defaultSignedAuthTtlMs = 30 * 24 * 60 * 60 * 1000;
+const defaultSignedAuthRefreshMs = 7 * 24 * 60 * 60 * 1000;
 const loginAttempts = new Map();
 const registerCodes = new Map();
 const registerCodeAttempts = new Map();
+const userTokenInvalidAfter = new Map();
+const revokedSignedTokenIds = new Map();
 const loginRateWindowMs = 10 * 60 * 1000;
 const loginRateMaxAttempts = 20;
 const registerCodeTtlMs = 10 * 60 * 1000;
 const registerCodeRateWindowMs = 10 * 60 * 1000;
 const registerCodeRateMaxAttempts = 5;
 const registerCodeMinIntervalMs = 60 * 1000;
+
+function readSignedAuthState() {
+  try {
+    if (!fs.existsSync(signedAuthStateFile)) {
+      return { invalidAfter: {}, revoked: {} };
+    }
+    const payload = JSON.parse(fs.readFileSync(signedAuthStateFile, "utf8") || "{}");
+    return {
+      invalidAfter: payload.invalidAfter && typeof payload.invalidAfter === "object" ? payload.invalidAfter : {},
+      revoked: payload.revoked && typeof payload.revoked === "object" ? payload.revoked : {}
+    };
+  } catch {
+    return { invalidAfter: {}, revoked: {} };
+  }
+}
+
+function writeSignedAuthState() {
+  fs.mkdirSync(path.dirname(signedAuthStateFile), { recursive: true });
+  const tempFile = `${signedAuthStateFile}.${process.pid}.${Date.now()}.tmp`;
+  const payload = {
+    version: 1,
+    updated_at: new Date().toISOString(),
+    invalidAfter: Object.fromEntries(userTokenInvalidAfter.entries()),
+    revoked: Object.fromEntries(revokedSignedTokenIds.entries())
+  };
+  fs.writeFileSync(tempFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  fs.renameSync(tempFile, signedAuthStateFile);
+}
+
+function loadSignedAuthState() {
+  const payload = readSignedAuthState();
+  Object.entries(payload.invalidAfter).forEach(([userId, value]) => {
+    const timestamp = Number(value);
+    if (userId && Number.isFinite(timestamp)) {
+      userTokenInvalidAfter.set(String(userId), timestamp);
+    }
+  });
+  Object.entries(payload.revoked).forEach(([tokenId, value]) => {
+    const timestamp = Number(value);
+    if (tokenId && Number.isFinite(timestamp)) {
+      revokedSignedTokenIds.set(String(tokenId), timestamp);
+    }
+  });
+}
+
+function parsePositiveMs(value, fallback, minimum = 60_000) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(parsed) && parsed >= minimum ? parsed : fallback;
+}
+
+function signedAuthTtlMs() {
+  return parsePositiveMs(
+    process.env.AUTH_SIGNED_COOKIE_TTL_MS || process.env.AUTH_TOKEN_TTL_MS,
+    defaultSignedAuthTtlMs,
+    5 * 60_000
+  );
+}
+
+function signedAuthRefreshMs() {
+  return Math.min(
+    signedAuthTtlMs(),
+    parsePositiveMs(
+      process.env.AUTH_SIGNED_COOKIE_REFRESH_MS || process.env.AUTH_TOKEN_REFRESH_MS,
+      defaultSignedAuthRefreshMs,
+      60_000
+    )
+  );
+}
+
+function authSigningSecret() {
+  return String(
+    process.env.AUTH_SIGNED_COOKIE_SECRET
+    || process.env.AUTH_TOKEN_SECRET
+    || process.env.ADMIN_PAGE_PIN_SECRET
+    || process.env.ADMIN_PAGE_PIN_HASH
+    || "fb-ads-dashboard-local-auth-cookie-secret"
+  );
+}
+
+function randomToken(bytes = 32) {
+  return randomBytes(bytes).toString("base64url");
+}
+
+function sha256Text(value) {
+  return createHmac("sha256", authSigningSecret()).update(String(value || "")).digest("hex");
+}
+
+function signAuthPayload(payloadText) {
+  return createHmac("sha256", authSigningSecret()).update(payloadText).digest("base64url");
+}
+
+function timingSafeTextEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left || ""));
+  const rightBuffer = Buffer.from(String(right || ""));
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function encodeJsonBase64Url(payload) {
+  return Buffer.from(JSON.stringify(payload)).toString("base64url");
+}
+
+function decodeJsonBase64Url(text) {
+  return JSON.parse(Buffer.from(String(text || ""), "base64url").toString("utf8"));
+}
 
 function parseCookies(req) {
   const header = String(req.headers.cookie || "");
@@ -87,12 +202,198 @@ function setSessionCookies(req, res, { sessionId, csrfToken, maxAgeSeconds } = {
   })}`);
 }
 
+function authContextFromUser(user, {
+  csrfToken = "",
+  tokenId = "",
+  issuedAt = "",
+  expiresAt = ""
+} = {}) {
+  if (!user || user.status !== "active") return null;
+  const resourceScope = normalizeResourceScope(user.resourceScope || {}, user.accountIds || []);
+  const allowedResourceScope = user.role === "admin" && resourceScope.accountIds.length === 0
+    ? null
+    : resourceScope;
+  return {
+    session: {
+      idHash: tokenId ? sha256Text(tokenId) : "",
+      csrfTokenHash: csrfToken ? sha256Text(csrfToken) : "",
+      expiresAt,
+      createdAt: issuedAt
+    },
+    user: {
+      ...user,
+      accountIds: resourceScope.accountIds,
+      resourceScope
+    },
+    permissions: permissionsForRole(user.role),
+    allowedAccountIds: allowedResourceScope === null ? null : allowedResourceScope.accountIds,
+    allowedResourceScope,
+    csrfToken,
+    signedAuth: Boolean(tokenId),
+    tokenId
+  };
+}
+
+function signedAuthPayloadFromContext(authContext, { tokenId, csrfToken, issuedAt, expiresAt } = {}) {
+  const user = authContext.user;
+  const resourceScope = normalizeResourceScope(user.resourceScope || {}, user.accountIds || []);
+  return {
+    v: signedAuthVersion,
+    j: tokenId,
+    c: csrfToken,
+    u: user.id,
+    n: user.username,
+    e: user.email || "",
+    d: user.displayName || user.username,
+    r: user.role,
+    sc: {
+      a: resourceScope.accountIds,
+      c: resourceScope.campaignIds,
+      s: resourceScope.adsetIds,
+      ad: resourceScope.adIds
+    },
+    iat: issuedAt,
+    exp: expiresAt
+  };
+}
+
+function authContextFromSignedPayload(payload) {
+  if (!payload || payload.v !== signedAuthVersion) return null;
+  const tokenId = String(payload.j || "");
+  const userId = String(payload.u || "");
+  const issuedAt = String(payload.iat || "");
+  const expiresAt = String(payload.exp || "");
+  if (!tokenId || !userId || !issuedAt || !expiresAt) return null;
+  const issuedAtMs = Date.parse(issuedAt);
+  const expiresAtMs = Date.parse(expiresAt);
+  if (!Number.isFinite(issuedAtMs)) return null;
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return null;
+  const invalidAfter = userTokenInvalidAfter.get(userId);
+  if (invalidAfter && issuedAtMs <= invalidAfter) return null;
+  if (revokedSignedTokenIds.has(tokenId)) return null;
+  const resourceScope = normalizeResourceScope({
+    accountIds: payload.sc?.a || [],
+    campaignIds: payload.sc?.c || [],
+    adsetIds: payload.sc?.s || [],
+    adIds: payload.sc?.ad || []
+  });
+  return authContextFromUser({
+    id: userId,
+    username: String(payload.n || ""),
+    email: String(payload.e || ""),
+    displayName: String(payload.d || payload.n || ""),
+    role: payload.r === "admin" ? "admin" : "user",
+    status: "active",
+    accountIds: resourceScope.accountIds,
+    resourceScope
+  }, {
+    csrfToken: String(payload.c || ""),
+    tokenId,
+    issuedAt,
+    expiresAt
+  });
+}
+
+function signedAuthTokenFromContext(authContext, { now = Date.now(), tokenId = randomToken(16), csrfToken = randomToken() } = {}) {
+  const issuedAt = new Date(now).toISOString();
+  const expiresAt = new Date(now + signedAuthTtlMs()).toISOString();
+  const payloadText = signedAuthPayloadFromContext(authContext, {
+    tokenId,
+    csrfToken,
+    issuedAt,
+    expiresAt
+  });
+  const encodedPayload = encodeJsonBase64Url(payloadText);
+  return {
+    token: `${encodedPayload}.${signAuthPayload(encodedPayload)}`,
+    tokenId,
+    csrfToken,
+    issuedAt,
+    expiresAt,
+    maxAgeSeconds: Math.floor(signedAuthTtlMs() / 1000)
+  };
+}
+
+function readSignedAuthToken(token) {
+  const parts = String(token || "").split(".");
+  if (parts.length !== 2) return null;
+  const [payloadText, signature] = parts;
+  if (!payloadText || !signature || !timingSafeTextEqual(signAuthPayload(payloadText), signature)) {
+    return null;
+  }
+  try {
+    return authContextFromSignedPayload(decodeJsonBase64Url(payloadText));
+  } catch {
+    return null;
+  }
+}
+
+function setSignedAuthCookies(req, res, authContext, options = {}) {
+  const signed = signedAuthTokenFromContext(authContext, options);
+  const secure = shouldUseSecureCookie(req);
+  appendSetCookie(res, `${sessionCookieName}=${encodeURIComponent(signed.token)}; ${cookieAttributes({
+    maxAgeSeconds: signed.maxAgeSeconds,
+    httpOnly: true,
+    secure
+  })}`);
+  appendSetCookie(res, `${csrfCookieName}=${encodeURIComponent(signed.csrfToken)}; ${cookieAttributes({
+    maxAgeSeconds: signed.maxAgeSeconds,
+    httpOnly: false,
+    secure
+  })}`);
+  return {
+    ...authContextFromSignedPayload(signedAuthPayloadFromContext(authContext, signed)),
+    sessionId: signed.token,
+    csrfToken: signed.csrfToken
+  };
+}
+
+function maybeRefreshSignedAuth(req, res, authContext) {
+  if (!authContext?.signedAuth || !res) return authContext;
+  const expiresAt = Date.parse(authContext.session?.expiresAt || "");
+  if (!Number.isFinite(expiresAt)) return authContext;
+  if (expiresAt - Date.now() > signedAuthRefreshMs()) return authContext;
+  return setSignedAuthCookies(req, res, authContext, {
+    tokenId: authContext.tokenId,
+    csrfToken: authContext.csrfToken
+  });
+}
+
 function clearAuthCookies(req, res) {
   const secure = shouldUseSecureCookie(req);
   appendSetCookie(res, `${sessionCookieName}=; ${cookieAttributes({ maxAgeSeconds: 0, httpOnly: true, secure })}`);
   appendSetCookie(res, `${csrfCookieName}=; ${cookieAttributes({ maxAgeSeconds: 0, httpOnly: false, secure })}`);
   clearAdminPinCookie(req, res);
 }
+
+function revokeCurrentSignedAuth(authContext) {
+  if (authContext?.tokenId) {
+    revokedSignedTokenIds.set(authContext.tokenId, Date.now());
+    writeSignedAuthState();
+  }
+}
+
+function invalidateUserAuth(userId) {
+  const id = String(userId || "");
+  if (id) {
+    userTokenInvalidAfter.set(id, Date.now());
+    writeSignedAuthState();
+  }
+}
+
+function cleanupAuthMemory() {
+  const now = Date.now();
+  for (const [tokenId, revokedAt] of revokedSignedTokenIds.entries()) {
+    if (now - revokedAt > signedAuthTtlMs()) {
+      revokedSignedTokenIds.delete(tokenId);
+    }
+  }
+  writeSignedAuthState();
+}
+
+loadSignedAuthState();
+const authMemoryCleanupTimer = setInterval(cleanupAuthMemory, 60 * 60 * 1000);
+authMemoryCleanupTimer.unref?.();
 
 function readClientIp(req) {
   const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
@@ -274,6 +575,14 @@ function publicUser(authContext) {
 
 function authContextFromRequest(req) {
   const cookies = parseCookies(req);
+  const signedContext = readSignedAuthToken(cookies[sessionCookieName]);
+  if (signedContext) {
+    return {
+      ...signedContext,
+      sessionId: cookies[sessionCookieName],
+      csrfToken: signedContext.csrfToken || ""
+    };
+  }
   const context = readSession(cookies[sessionCookieName]);
   if (!context) return null;
   return {
@@ -291,6 +600,9 @@ function hasPermission(authContext, permission) {
 
 function requireCsrf(req, authContext) {
   const headerToken = String(req.headers[csrfHeaderName] || "");
+  if (authContext?.signedAuth) {
+    return Boolean(headerToken && timingSafeTextEqual(headerToken, authContext.csrfToken));
+  }
   return Boolean(headerToken && validateCsrf(authContext.session, headerToken));
 }
 
@@ -377,13 +689,7 @@ async function handleAuthRoutes(req, res, url, writeJson) {
         status: "active",
         accountIds: []
       });
-      const session = createSession({
-        userId: user.id,
-        userAgent: req.headers["user-agent"] || "",
-        ipPrefix: ipPrefix(readClientIp(req))
-      });
-      const authContext = readSession(session.sessionId);
-      setSessionCookies(req, res, session);
+      const authContext = setSignedAuthCookies(req, res, authContextFromUser(user));
       writeAuditEvent({
         actorUserId: user.id,
         action: "auth.register_success",
@@ -397,9 +703,9 @@ async function handleAuthRoutes(req, res, url, writeJson) {
         ok: true,
         user: publicUser(authContext),
         permissions: authContext.permissions,
-        csrfToken: session.csrfToken,
+        csrfToken: authContext.csrfToken,
         session: {
-          expiresAt: session.expiresAt
+          expiresAt: authContext.session.expiresAt
         }
       });
     } catch (error) {
@@ -451,13 +757,8 @@ async function handleAuthRoutes(req, res, url, writeJson) {
         });
         return true;
       }
-      const session = createSession({
-        userId: result.user.id,
-        userAgent: req.headers["user-agent"] || "",
-        ipPrefix: ipPrefix(readClientIp(req))
-      });
-      const authContext = readSession(session.sessionId);
-      setSessionCookies(req, res, session);
+      const freshUser = getUserById(result.user.id) || result.user;
+      const authContext = setSignedAuthCookies(req, res, authContextFromUser(freshUser));
       writeAuditEvent({
         actorUserId: result.user.id,
         action: "auth.login_success",
@@ -470,9 +771,9 @@ async function handleAuthRoutes(req, res, url, writeJson) {
         ok: true,
         user: publicUser(authContext),
         permissions: authContext.permissions,
-        csrfToken: session.csrfToken,
+        csrfToken: authContext.csrfToken,
         session: {
-          expiresAt: session.expiresAt
+          expiresAt: authContext.session.expiresAt
         }
       });
     } catch (error) {
@@ -486,7 +787,7 @@ async function handleAuthRoutes(req, res, url, writeJson) {
   }
 
   if (url.pathname === "/api/auth/me" && req.method === "GET") {
-    const authContext = authContextFromRequest(req);
+    let authContext = authContextFromRequest(req);
     if (!authContext) {
       clearAuthCookies(req, res);
       writeJson(res, 401, {
@@ -495,8 +796,9 @@ async function handleAuthRoutes(req, res, url, writeJson) {
       });
       return true;
     }
+    authContext = maybeRefreshSignedAuth(req, res, authContext);
     let csrfToken = authContext.csrfToken;
-    if (!validateCsrf(authContext.session, csrfToken)) {
+    if (!authContext.signedAuth && !validateCsrf(authContext.session, csrfToken)) {
       csrfToken = rotateCsrfToken(authContext.session.idHash);
       setSessionCookies(req, res, {
         sessionId: authContext.sessionId,
@@ -527,7 +829,11 @@ async function handleAuthRoutes(req, res, url, writeJson) {
         });
         return true;
       }
-      revokeSession(authContext.sessionId);
+      if (authContext.signedAuth) {
+        revokeCurrentSignedAuth(authContext);
+      } else {
+        revokeSession(authContext.sessionId);
+      }
       writeAuditEvent({
         actorUserId: authContext.user.id,
         action: "auth.logout",
@@ -556,12 +862,13 @@ function writeAuthError(res, writeJson, statusCode, error, message = "") {
 }
 
 function applyApiPolicy(req, res, policy, writeJson) {
-  const authContext = authContextFromRequest(req);
+  let authContext = authContextFromRequest(req);
   if (!authContext) {
     clearAuthCookies(req, res);
     writeAuthError(res, writeJson, 401, "unauthenticated", "请先登录");
     return null;
   }
+  authContext = maybeRefreshSignedAuth(req, res, authContext);
 
   const method = String(req.method || "GET").toUpperCase();
   const csrfRequired = policy.csrf !== false && !["GET", "HEAD", "OPTIONS"].includes(method);
@@ -614,6 +921,7 @@ module.exports = {
   parseCookies,
   handleAuthRoutes,
   applyApiPolicy,
+  invalidateUserAuth,
   readClientIp,
   audit
 };
